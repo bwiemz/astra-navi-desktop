@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "AI-chan Local DOM Bridge",
+  "version": "0.1.0",
+  "description": "Read-only local DOM and media companion communicating strictly via native messaging with AI-chan Desktop.",
+  "permissions": ["activeTab", "nativeMessaging"],
+  "host_permissions": [],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

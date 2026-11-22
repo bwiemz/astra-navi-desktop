@@ -1,0 +1,6 @@
+{
+  "name": "aria",
+  "description": "A young woman in her early twenties with a high, bright, sweet voice. Clearly an adult, not a child: clean and articulate, with a light, airy head-voice quality. Lively, confident and playful, like a cheerful anime heroine or a virtual idol presenter.",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "seed": 3
+}

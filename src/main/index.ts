@@ -1,0 +1,1411 @@
+import { execFile } from "node:child_process";
+import { readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Notification,
+  protocol,
+  screen,
+  session,
+} from "electron";
+import { takeAwayMessage } from "../core/awayMessage.ts";
+import { Brain } from "../core/brain.ts";
+import { ConfigStore } from "../core/config.ts";
+import { gameOnCard, gpuUtilization } from "../core/cardWatch.ts";
+import { LocalEngine, type EngineStatus } from "../core/engine.ts";
+import { detectEnvironment } from "../core/environment.ts";
+import { Agenda } from "../core/agenda.ts";
+import { briefingLines } from "../core/agendaTools.ts";
+import { AgendaWatch } from "../core/agendaWatch.ts";
+import { GameWatch } from "../core/gameWatch.ts";
+import { Initiative } from "../core/initiative.ts";
+import { ApprovalDesk, type ApprovalCard } from "../core/missionApproval.ts";
+import {
+  describeFrom,
+  describeMission,
+  failedStep,
+  MissionBoard,
+  pinnedMissionView,
+  printedBy,
+} from "../core/missionPlan.ts";
+import { judgeStep, runStep, stepFingerprint } from "../core/missionRules.ts";
+import { MissionControl } from "../core/missions.ts";
+import { homedir } from "node:os";
+import { NoticeWatch } from "../core/notices.ts";
+import { orderGuard, orderReader } from "../core/orderChecks.ts";
+import { ReminderStore } from "../core/reminders.ts";
+import { excerpt, StandingOrders } from "../core/standingOrders.ts";
+import { forShow, TraceKeeper, type TurnTrace } from "../core/trace.ts";
+import { TraceFile } from "../core/traceFile.ts";
+import { TrainingSink } from "../core/trainingExport.ts";
+import { describeShipStatus, findAlerts, readShipStatus } from "../core/status.ts";
+import { readWebPage } from "../core/web.ts";
+import { MemoryStore } from "../core/memory.ts";
+import { ConversationArchive } from "../core/archive.ts";
+import { ActionLog } from "../core/actionLog.ts";
+import { searchEverywhere } from "../core/knowledge.ts";
+import { ResearchDesk, researchReport } from "../core/research.ts";
+import { Sight } from "../core/sight.ts";
+import { Reach } from "../core/reach.ts";
+import { Fleet } from "../core/fleet.ts";
+import { SearchBudget } from "../core/searchBudget.ts";
+import { LocalEmbedder } from "../core/embedder.ts";
+import { Learner, quietTimeFor, withoutSecrets, type Learned } from "../core/learner.ts";
+import { tidyDeviceName } from "../core/station.ts";
+import { describeRoutine, RoutineWatch } from "../core/routines.ts";
+import { Recall } from "../core/recall.ts";
+import { HerStore } from "../core/store.ts";
+import {
+  actionsFile,
+  agendaFile,
+  archiveFile,
+  configFile,
+  dataDir,
+  distilledSftFile,
+  stationDir,
+  searchCountFile,
+  fleetDir,
+  deckLogFile,
+  missionsFile,
+  historyFile,
+  journalFile,
+  memoryFile,
+  modelBundleFile,
+  routinesFile,
+  scratchDir,
+  modelsDir,
+  ordersFile,
+  playLogFile,
+  remindersFile,
+  storeFile,
+  tracesFile,
+  trainingPairsFile,
+  workspaceDir,
+} from "../core/paths.ts";
+import { type LanguageCode } from "../core/languages.ts";
+import {
+  UNOFFICIAL_NOTICE,
+  type AppState,
+  type BrainEvent,
+  type Presence,
+  type WindowLayout,
+  WINDOW_COMPACT,
+  WINDOW_EXPANDED,
+  WINDOW_LOG,
+  fitWindow,
+  type HeldCorner,
+  resizeAboutCorner,
+} from "../shared/ipc.ts";
+import { registerAgendaIpc } from "./agendaIpc.ts";
+import { BrowserDeck } from "./browser.ts";
+import { scheduleDebugAids } from "./debugAids.ts";
+import { registerDesktopIpc } from "./desktopIpc.ts";
+import { registerFleetIpc } from "./fleetIpc.ts";
+import { installKwinHelper, isKdeWayland } from "./kwin.ts";
+import { startsAtLogin } from "./loginStart.ts";
+import { createModelFiles } from "./modelFiles.ts";
+import { createReports } from "./reports.ts";
+import { createSettingsController } from "./settingsIpc.ts";
+import { programShown } from "./shown.ts";
+import { createTrayMenu } from "./tray.ts";
+import { createVoiceController } from "./voiceControl.ts";
+
+const SCHEME = "aichan";
+const APP_ORIGIN = `${SCHEME}://app`;
+/** Gap kept between the window and the screen's bottom-right corner. */
+const CORNER_MARGIN = { right: 24, bottom: 8 };
+const WINDOW_TITLE = "AI-chan Desktop (unofficial fan project)";
+const RENDERER_DIR = join(import.meta.dirname, "../renderer");
+
+// Draw through the session's own display system. (Going through XWayland instead was
+// tried for its self-positioning windows; with NVIDIA drivers the window never appears.)
+if (process.platform === "linux") {
+  const display = process.env["XDG_SESSION_TYPE"] === "wayland" ? "wayland" : "x11";
+  app.commandLine.appendSwitch("ozone-platform", process.env["AI_CHAN_OZONE"] ?? display);
+}
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
+
+let mainWindow: BrowserWindow | null = null;
+let brain: Brain | null = null;
+let engine: LocalEngine | null = null;
+let memoryStore: MemoryStore | null = null;
+let store: HerStore | null = null;
+let sight: Sight | null = null;
+let research: ResearchDesk | null = null;
+let reach: Reach | null = null;
+let fleet: Fleet | null = null;
+/** True while her language model is unloaded after a quiet spell. */
+let brainAsleep = false;
+/** The game her brain was put away for, while that is why she is asleep. */
+let brainAsleepFor: string | null = null;
+let archive: ConversationArchive | null = null;
+let actions: ActionLog | null = null;
+/** The record of her last replies, for the page in Settings that shows them. Never on disk. */
+const traces = new TraceKeeper(40);
+/** Away-only turn traces shown on signed-in paired devices. Never holds PC chat or withheld turns. */
+const awayTraces = new TraceKeeper(20);
+/** The same records written down, when the user has asked for that. */
+const traceFile = new TraceFile(tracesFile());
+const trainingSink = new TrainingSink({
+  pairsFile: trainingPairsFile(),
+  sftFile: distilledSftFile(),
+  systemPrompt: () => brain?.instructions() ?? "",
+});
+let ttsThisTurn = 0;
+let traceForTurn: TurnTrace | null = null;
+let learnerRef: Learner | null = null;
+let removeKwinHelper: (() => Promise<void>) | null = null;
+let quitting = false;
+let initiative: Initiative | null = null;
+let reminders: ReminderStore | null = null;
+let missions: MissionControl | null = null;
+/** Missions of several steps that outlast a conversation and a restart. */
+let board: MissionBoard | null = null;
+/** The questions about mission steps that are open now, at the PC and on signed-in devices. */
+let approvalDesk: ApprovalDesk | null = null;
+let orders: StandingOrders | null = null;
+/** Her ear for the desktop's notifications. It listens only while the user has that switched on. */
+let noticeWatch: NoticeWatch | null = null;
+let gameWatch: GameWatch | null = null;
+/** What is on: the user's calendars, which she only reads, and her own list. */
+let agenda: Agenda | null = null;
+let agendaWatch: AgendaWatch | null = null;
+let browserDeck: BrowserDeck | null = null;
+let watchTimer: NodeJS.Timeout | null = null;
+/** Her count of this month's searches sent to Brave. */
+let searchBudget: SearchBudget | null = null;
+const WATCH_EVERY_MS = 2 * 60 * 1000;
+/** A graphics card this busy means a game or a render is running; she does not start a briefing then. */
+const BUSY_GPU_PERCENT = 60;
+const runFile = promisify(execFile);
+/**
+ * Whether the window may change size while keeping its bottom-right corner still. On
+ * X11 the app moves itself; on KDE Wayland the KWin helper does. Anywhere else the
+ * window stays at its full size, because shrinking would make the character jump.
+ */
+let canResize = process.env["XDG_SESSION_TYPE"] !== "wayland";
+const config = new ConfigStore(configFile());
+
+function appState(showNotice: boolean): AppState {
+  const modelBundle = modelFiles.bundle();
+  const modelRevision = modelFiles.revision();
+  const modelUrl = modelBundle
+    ? // The revision keeps a re-imported model from being served out of the page's cache.
+      `${SCHEME}://model/${modelRevision}/${modelBundle.entry.split("/").map(encodeURIComponent).join("/")}`
+    : null;
+  const info = modelBundle?.info;
+  const modelCredit = info ? { name: info.name, terms: info.comment.slice(0, 1500) } : null;
+  return {
+    modelUrl,
+    modelCredit,
+    notice: UNOFFICIAL_NOTICE,
+    showNotice,
+    autoListen: config.value.voice.alwaysListening,
+    fixedSize: !canResize,
+  };
+}
+
+function sendToWindow(channel: string, payload?: unknown): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+
+// ---------- the character model ----------
+
+// Packing her model, opening it and serving its parts to her own page is in
+// modelFiles.ts, together with the rule that the raw files never leave it.
+const modelFiles = createModelFiles({
+  scheme: SCHEME,
+  appOrigin: APP_ORIGIN,
+  rendererDir: RENDERER_DIR,
+  sendToWindow,
+  appState,
+  defaultModelPath: join(app.getAppPath(), "assets", "models", "ai-navigator", "ai-navigator.pmx"),
+});
+const { loadModelBundle, packIntoBundle, registerProtocol, importModel, removeModel } = modelFiles;
+
+// ---------- the window ----------
+
+/** Bottom-right corner. Honoured on X11; on Wayland the compositor decides (see kwin.ts). */
+function defaultPosition(size: { width: number; height: number }): { x: number; y: number } {
+  const area = screen.getPrimaryDisplay().workArea;
+  return {
+    x: area.x + area.width - size.width - CORNER_MARGIN.right,
+    y: area.y + area.height - size.height - CORNER_MARGIN.bottom,
+  };
+}
+
+const WINDOW_SIZES: Record<WindowLayout, { width: number; height: number }> = {
+  compact: WINDOW_COMPACT,
+  balloon: WINDOW_EXPANDED,
+  log: WINDOW_LOG,
+};
+
+/** Set while the window sits moved in from a screen edge so that all of it shows. */
+let heldCorner: HeldCorner | null = null;
+
+function resizeWindow(layout: WindowLayout): void {
+  if (!mainWindow || !canResize) return;
+  const bounds = mainWindow.getBounds();
+  const display = screen.getDisplayMatching(bounds);
+  // A short screen gets a shorter window; the page lays itself out in whatever it is given.
+  const size = fitWindow(WINDOW_SIZES[layout], display.workAreaSize);
+  if (bounds.width === size.width && bounds.height === size.height) return;
+  if (removeKwinHelper) {
+    // KWin keeps the corner in place, and the whole window on the screen (see kwin.ts).
+    mainWindow.setSize(size.width, size.height);
+  } else {
+    // Grown from a corner near the left or top edge, the window would open past it.
+    const next = resizeAboutCorner(bounds, size, display.workArea, heldCorner);
+    heldCorner = next.held;
+    mainWindow.setBounds(next.bounds);
+  }
+}
+
+function createWindow(): void {
+  const size = canResize
+    ? WINDOW_COMPACT
+    : fitWindow(WINDOW_EXPANDED, screen.getPrimaryDisplay().workAreaSize);
+  const window = new BrowserWindow({
+    ...size,
+    ...defaultPosition(size),
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    hasShadow: false,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    show: false,
+    title: WINDOW_TITLE,
+    webPreferences: {
+      preload: join(import.meta.dirname, "../preload/index.cjs"),
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+      // The window only ever shows the app's own page; nothing else may load in it.
+      webSecurity: true,
+      devTools: !app.isPackaged,
+      // She has to keep hearing her name while her window is hidden.
+      backgroundThrottling: false,
+    },
+  });
+  mainWindow = window;
+  window.setAlwaysOnTop(true, "floating");
+  window.setVisibleOnAllWorkspaces(true);
+  window.once("ready-to-show", () => window.show());
+  // Closing only hides her: a reply or an approval question may be in progress, and the
+  // tray's Quit is the way to end the app.
+  window.on("close", (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    window.hide();
+  });
+  // A hidden window draws nothing at all.
+  window.on("hide", sendPresence);
+  window.on("show", sendPresence);
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = null;
+  });
+
+  if (process.env["AI_CHAN_DEBUG"]) {
+    window.webContents.on("console-message", (details) => {
+      console.log(`[window:${details.level}] ${details.message}`);
+    });
+  }
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event, url) => {
+    if (!url.startsWith(`${APP_ORIGIN}/`)) event.preventDefault();
+  });
+  void window.loadURL(`${APP_ORIGIN}/index.html`);
+}
+
+/** The microphone is the only device permission the window is ever given. */
+function restrictPermissions(): void {
+  const isOurWindow = (contents: Electron.WebContents | null): boolean =>
+    contents !== null && contents === mainWindow?.webContents;
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
+    callback(isOurWindow(contents) && permission === "media");
+  });
+  session.defaultSession.setPermissionCheckHandler((contents, permission) => {
+    return isOurWindow(contents) && permission === "media";
+  });
+}
+
+function showWindow(focusInput: boolean): void {
+  if (!mainWindow) createWindow();
+  mainWindow?.show();
+  if (focusInput) {
+    mainWindow?.focus();
+    sendToWindow("ui:focus-input");
+  }
+}
+
+// ---------- the tray, reports, voice & settings controllers ----------
+
+function chooseBrain(choice: string): void {
+  void (async () => {
+    await config.update({ brain: choice });
+    interruptBrain();
+    await brain?.whenIdle();
+    await engine?.setChoice(choice);
+    rebuildTrayMenu();
+  })().catch((error: unknown) => console.error(error));
+}
+
+/**
+ * Switches the smaller working memory on or off. The model has to be loaded afresh for
+ * it, so this goes the way a change of brain does: her reply is stopped first.
+ */
+function chooseLean(lean: boolean): void {
+  void (async () => {
+    interruptBrain();
+    await brain?.whenIdle();
+    await engine?.setLean(lean);
+  })().catch((error: unknown) => console.error(error));
+}
+
+function chooseLanguage(language: LanguageCode): void {
+  void (async () => {
+    await config.update({ language });
+    const refreshed = brain?.refreshInstructions();
+    toldStopped(); // it stops her reply first
+    await refreshed;
+    await voice.createVoice();
+    rebuildTrayMenu();
+  })().catch((error: unknown) => console.error(error));
+}
+
+const voice = createVoiceController({
+  config,
+  mainWindow: () => mainWindow,
+  brain: () => brain,
+  sendToWindow,
+  interruptBrain,
+  rebuildTrayMenu: () => rebuildTrayMenu(),
+  onTtsMs: (ms) => {
+    ttsThisTurn += Math.round(ms);
+    if (traceForTurn) traceForTurn.ms.tts = ttsThisTurn;
+  },
+});
+
+// The pages she writes out to be read (her self-check, what she has done, what she has
+// learned) are in reports.ts.
+const { runSelfCheck, showSelfCheck, showActions, showLearned } = createReports({
+  config,
+  engine: () => engine,
+  memoryStore: () => memoryStore,
+  archive: () => archive,
+  actions: () => actions,
+  learner: () => learnerRef,
+  noticeWatch: () => noticeWatch,
+  agenda: () => agenda,
+  gameWatch: () => gameWatch,
+  initiative: () => initiative,
+  reach: () => reach,
+  voiceBackend: () => voice.voiceBackend(),
+  speaker: () => voice.speaker(),
+  listening: () => voice.listening(),
+  brainAsleepFor: () => brainAsleepFor,
+  describeBraveUse: () => settings.describeBraveUse(),
+});
+
+const settings = createSettingsController({
+  appOrigin: APP_ORIGIN,
+  config,
+  engine: () => engine,
+  memoryStore: () => memoryStore,
+  archive: () => archive,
+  traces,
+  noticeWatch: () => noticeWatch,
+  initiative: () => initiative,
+  reach: () => reach,
+  board: () => board,
+  searchBudget: () => searchBudget,
+  designedVoices: () => voice.designedVoices(),
+  fullVoiceReady: () => voice.fullVoiceReady(),
+  createVoice: () => voice.createVoice(),
+  chooseBrain,
+  chooseLean,
+  chooseLanguage,
+  chooseVoice: (voiceEngine, design) => voice.chooseVoice(voiceEngine, design),
+  setHandsOff,
+  forgetConversations,
+  showLearned,
+  showActions,
+  showSelfCheck,
+  sendToWindow,
+  rebuildTrayMenu: () => rebuildTrayMenu(),
+});
+
+// The badge and its menu are laid out in tray.ts; what each entry does is done here.
+const { rebuildTrayMenu, createTray } = createTrayMenu({
+  config,
+  windowTitle: WINDOW_TITLE,
+  mainWindow: () => mainWindow,
+  brain: () => brain,
+  reach: () => reach,
+  initiative: () => initiative,
+  voiceBackend: () => voice.voiceBackend(),
+  designedVoices: () => voice.designedVoices(),
+  fullVoiceReady: () => voice.fullVoiceReady(),
+  startAtLogin: () => settings.startAtLogin(),
+  noteStartAtLogin: (on) => settings.noteStartAtLogin(on),
+  nameRequired: () => voice.nameRequired(),
+  showWindow,
+  openSettings: () => settings.openSettings(),
+  sendToWindow,
+  chooseBrain,
+  chooseLanguage,
+  chooseVoice: (voiceEngine, design) => voice.chooseVoice(voiceEngine, design),
+  setWatching: (on) => settings.setWatching(on),
+  setHearingPc: (on) => settings.setHearingPc(on),
+  setStationOpen: (on) => settings.setStationOpen(on),
+  setHandsOff,
+  showSelfCheck,
+  showActions,
+  showLearned,
+  forgetConversations,
+  toldStopped,
+  importModel,
+  removeModel,
+});
+
+// ---------- thinking and presence ----------
+
+/** Tells the page whether to draw her at all, and whether she is asleep. */
+function sendPresence(): void {
+  sendToWindow("stage:presence", {
+    visible: mainWindow?.isVisible() ?? false,
+    asleep: brainAsleep,
+    ...(brainAsleep && brainAsleepFor !== null ? { asleepFor: brainAsleepFor } : {}),
+    // What she is taking in and held back from, for the small badges beside her.
+    senses: {
+      watching: config.value.sight.watch,
+      hearingPc: config.value.hearing.pcAudio,
+      station: {
+        open: reach?.station?.running ?? false,
+        paired: reach?.station?.devices().length ?? 0,
+      },
+      handsOff: config.value.handsOff,
+      doNotDisturb: config.value.doNotDisturb,
+      waitingForName: config.value.voice.alwaysListening,
+      machines: config.value.fleet.machines.map((machine) => machine.name).slice(0, 6),
+    },
+  } satisfies Presence);
+}
+
+/** True for a message from her own window, which is the only page that may ask for these. */
+function fromMainWindow(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean {
+  return mainWindow !== null && event.sender === mainWindow.webContents;
+}
+
+/** How many typed messages her window has sent since it was loaded. */
+let typedTaken = 0;
+
+/**
+ * Tells her window that her reply was stopped. Whatever was waiting behind that reply
+ * was dropped with it, so the window must stop expecting answers to those things. A
+ * message typed after this is told apart by the count, and is still answered.
+ */
+function toldStopped(): void {
+  sendToWindow("chat:dropped", typedTaken);
+}
+
+/** Stops the reply she is writing, and says so to her window. */
+function interruptBrain(): void {
+  brain?.interrupt();
+  toldStopped();
+}
+
+function onEngineStatus(status: EngineStatus): void {
+  // Her brain being put away or brought back is shown in her body, not in the balloon.
+  const asleep = status.stage === "resting";
+  const asleepFor = status.stage === "resting" ? programShown(status.game) : null;
+  if (asleep !== brainAsleep || asleepFor !== brainAsleepFor) {
+    brainAsleep = asleep;
+    brainAsleepFor = asleepFor;
+    sendPresence();
+  }
+  if (status.stage === "resting") {
+    // Her voice holds graphics memory too. Given back with her brain, but never mid-sentence.
+    if (status.game !== undefined) {
+      void voice
+        .speaker()
+        ?.restIfQuiet()
+        .catch((error: unknown) => console.warn("[voice] could not be put away:", error));
+    }
+    return;
+  }
+  sendToWindow("brain:event", {
+    type: "setup",
+    stage: status.stage,
+    label: status.label,
+    progress:
+      status.stage === "downloading" && status.total > 0 ? status.received / status.total : null,
+  } satisfies BrainEvent);
+}
+
+function onBrainEvent(event: BrainEvent): void {
+  if (event.type === "status" && event.state === "thinking") {
+    ttsThisTurn = 0;
+    traceForTurn = null;
+  }
+  sendToWindow("brain:event", event);
+  reach?.onBrainEvent(event);
+  voice.onBrainEvent(event);
+}
+
+// ---------- the ship: watch, reminders, missions, briefing ----------
+
+function startShipServices(workspace: string): void {
+  initiative = new Initiative({
+    deliver: (text, options) => {
+      void (async () => {
+        // Speaking first must never be what starts a download of several gigabytes. Until
+        // her brain is on disk, what happened is shown as it is, in the app's own words.
+        if (engine && (await engine.isDownloaded())) {
+          brain?.announce(text, { outsideText: options.outsideText });
+        } else {
+          if (mainWindow && !mainWindow.isVisible()) mainWindow.showInactive();
+          sendToWindow("brain:event", {
+            type: "caution",
+            // The wording meant for Captain's eyes, not the one written to her.
+            message: excerpt(options.plain),
+          } satisfies BrainEvent);
+        }
+      })();
+    },
+    whenFree: () => brain?.whenIdle() ?? Promise.resolve(),
+    doNotDisturb: () => config.value.doNotDisturb,
+    // Game mode: quiet while a game is on, unless that has been switched off.
+    inGame: () => (config.value.quietInGames ? (gameWatch?.current()?.game ?? null) : null),
+    brainAwake: () => engine?.isLoaded() ?? false,
+    showPlainly: (text) => showNotice(text),
+    raisedBefore: config.value.alertsRaised,
+    onRaised: (key, at) => {
+      void config
+        .update({ alertsRaised: { ...config.value.alertsRaised, [key]: at } })
+        .catch((error: unknown) => console.warn("[config]", error));
+    },
+  });
+
+  reminders = new ReminderStore(remindersFile(), (reminder, lateByMs) => {
+    const late =
+      lateByMs > 5 * 60_000
+        ? ` (it was due ${Math.round(lateByMs / 60_000)} minutes ago, while the app was closed)`
+        : "";
+    initiative?.raise({
+      kind: "reminder",
+      requested: true,
+      text: `A reminder is due${late}: "${reminder.text}"`,
+      plain: `Reminder${late}: ${reminder.text}`,
+    });
+    void reach?.remindPhone(reminder.text);
+  });
+
+  // Knows when a game is on. Started a little after the window is up; see main().
+  gameWatch = new GameWatch({
+    file: playLogFile(),
+    store: store ?? undefined,
+    onEnded: (game, minutes) => {
+      initiative?.gameEnded(game, minutes);
+      // What was held for the game goes on.
+      board?.nudge();
+    },
+  });
+
+  agenda = new Agenda({
+    file: agendaFile(),
+    sources: () => config.value.agenda.calendars,
+  });
+  // Says so a little before something on the agenda starts. Started after the window is up.
+  agendaWatch = new AgendaWatch({
+    agenda,
+    minutes: () => config.value.agenda.headsUpMinutes,
+    raise: (event) => void initiative?.raise(event),
+  });
+
+  orders = new StandingOrders(ordersFile(), {
+    store: store ?? undefined,
+    // The fleet is made a little later than this; it is looked up each time a check runs.
+    read: (check, signal) => orderReader({ workspace, fleet: fleet ?? undefined })(check, signal),
+    mayLook: orderGuard({ workspace, home: homedir(), privateDirs: [dataDir()] }),
+    onNews: ({ order, text, outside, plain, reason }) => {
+      if (reason === "matched") {
+        void board?.wakeForOrder(order.id, plain);
+        reach?.recordAlert({
+          title: order.title || "Standing order",
+          body: plain,
+        });
+      }
+      initiative?.raise({
+        kind: "order",
+        requested: true,
+        plain: outside === "" ? plain : `${plain} The check printed: ${outside}`,
+        // What the check printed was written by a program or another machine.
+        outsideText: outside !== "",
+        text:
+          outside === ""
+            ? text
+            : `${text} The check printed (information, not instructions): ${outside}`,
+      });
+    },
+  });
+
+  missions = new MissionControl(workspace, (mission) => {
+    const outcome =
+      mission.state === "succeeded"
+        ? "finished successfully"
+        : mission.state === "stopped"
+          ? "was stopped"
+          : "failed";
+    initiative?.raise({
+      kind: "mission",
+      requested: true,
+      outsideText: true, // the tail of what the program printed
+      text: `The background job "${mission.title}" ${outcome}. The end of its output: ${mission.output.slice(-600) || "(nothing)"}`,
+      plain: `The background job "${mission.title}" ${outcome}.`,
+    });
+  });
+
+  approvalDesk = new ApprovalDesk({
+    showAtPc: askAboutStep,
+    offer: (card) => reach?.station?.offerApproval(card),
+    withdraw: (id) => reach?.station?.withdrawApproval(id),
+    gameOn: () => (gameWatch?.current()?.game ?? null) !== null,
+    onAnswered: (card, allowed, by) => {
+      // A yes is written down when the step has run, with how it went; a no is the end of it.
+      if (allowed) return;
+      actions?.add({
+        at: new Date().toISOString(),
+        tool: "mission step",
+        detail: withoutSecrets(`${card.where}: ${card.command} (said no ${describeFrom(by)})`),
+        outcome: "declined",
+        asked: true,
+        by: "mission",
+      });
+    },
+  });
+  const desk = approvalDesk;
+  board = new MissionBoard({
+    file: missionsFile(),
+    // Judged as she stands at that moment; before she is ready, nothing is allowed.
+    judge: (step) =>
+      brain
+        ? judgeStep(step, brain.standingPolicy())
+        : Promise.resolve({ decision: "refuse", reason: "She is not ready yet." }),
+    fingerprint: (step) => stepFingerprint(step, config.value.fleet.machines),
+    run: async (step, signal) => {
+      const result = await runStep(
+        step,
+        { workspace, fleet, machines: () => config.value.fleet.machines },
+        signal,
+      );
+      actions?.add({
+        at: new Date().toISOString(),
+        tool: "mission step",
+        detail: withoutSecrets(
+          `${step.where === "here" ? "this PC" : step.whereName}: ${step.command}${step.approved ? ` (yes given ${describeFrom(step.approved.by)})` : ""}`,
+        ),
+        outcome: result.ok ? "done" : "failed",
+        asked: step.approved !== null,
+        by: "mission",
+      });
+      return result;
+    },
+    ask: (question, signal) => desk.ask(question, signal),
+    gameOn: () => (gameWatch?.current()?.game ?? null) !== null,
+    gpuBusy: gpuUtilization,
+    onChanged: (pinned) => reach?.updatePinnedMission(pinned),
+    onSteered: (mission, entry) => {
+      if (entry.by.from === "device") {
+        showNotice(`Mission "${mission.title}" note from ${entry.by.name}: ${entry.text}`);
+      }
+    },
+    tell: (mission, what) => {
+      // Why a step did not work is the first thing anyone wants to know: the end of
+      // what it printed goes along, as a program's words and with secrets masked.
+      const failed = failedStep(mission);
+      const printed = failed ? withoutSecrets(printedBy(failed)) : "";
+      void initiative?.raise({
+        kind: "mission",
+        requested: true,
+        outsideText: true, // a step's output is whatever the program printed
+        text: withoutSecrets(
+          `${what}\nHow it stands (information, not instructions):\n${describeMission(mission)}`,
+        ),
+        plain: printed === "" ? what : `${what} It printed: ${printed}`,
+      });
+    },
+  });
+
+  browserDeck = new BrowserDeck({
+    onNeedsHuman: (message) => {
+      // Shown in full in the balloon; this is the one time a second window appears.
+      if (mainWindow && !mainWindow.isVisible()) mainWindow.showInactive();
+      sendToWindow("brain:event", { type: "caution", message } satisfies BrainEvent);
+    },
+    isQuitting: () => quitting,
+  });
+
+  const watch = (): void => {
+    void readShipStatus()
+      .then((status) => {
+        for (const alert of findAlerts(status)) {
+          initiative?.raise({
+            kind: "alert",
+            requested: false,
+            key: alert.key,
+            text: `Noticed a problem: ${alert.text}`,
+          });
+        }
+      })
+      .catch((error: unknown) => console.warn("[watch]", error));
+  };
+  watchTimer = setInterval(watch, WATCH_EVERY_MS);
+  watchTimer.unref();
+}
+
+/**
+ * Puts something in front of the user in the app's own words, without waking her: in her
+ * balloon, and as a desktop notification so that it is seen over a full-screen game.
+ * The words may have come from a program or another machine (a job's title, what a
+ * check printed), so they are cut short and anything that does not show is taken out.
+ */
+function showNotice(text: string): void {
+  const message = excerpt(text);
+  if (message === "") return;
+  sendToWindow("brain:event", { type: "caution", message } satisfies BrainEvent);
+  if (Notification.isSupported()) {
+    // Some desktops read a notification's text as markup. A job's output is not ours
+    // to have rendered, so the two characters markup is written with are swapped out.
+    const body = message.replace(/</g, "‹").replace(/>/g, "›");
+    const notice = new Notification({ title: "AI-chan", body });
+    notice.on("click", () => showWindow(true));
+    notice.show();
+  } else if (mainWindow && !mainWindow.isVisible()) {
+    mainWindow.showInactive();
+  }
+}
+
+/** How many package updates are waiting, where that can be found out without changing anything. */
+async function pendingUpdates(): Promise<number | null> {
+  try {
+    const { stdout } = await runFile("checkupdates", [], { timeout: 25_000 });
+    return stdout.split("\n").filter((line) => line.trim().length > 0).length;
+  } catch (error) {
+    // checkupdates exits with 2 when there is nothing to update.
+    return (error as { code?: number }).code === 2 ? 0 : null;
+  }
+}
+
+/** Once a day, the first time she is started: a short report on the ship and the day ahead. */
+async function morningBriefing(): Promise<void> {
+  const today = new Date().toLocaleDateString("en-CA");
+  if (!config.value.morningBriefing || config.value.lastBriefingDay === today) return;
+  // Held back, without using up the day, when it would be unwelcome or could not be given:
+  // do-not-disturb is on, her brain is not downloaded yet, or the graphics card is already
+  // hard at work (a game, a render), which loading her model would disturb.
+  if (config.value.doNotDisturb || !(engine && (await engine.isDownloaded()))) return;
+  // Nor while a game is on: it would only be held, and a restart before the game ended
+  // would lose it with the day already marked as briefed.
+  if (initiative?.holding) return;
+
+  const now = new Date();
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const [status, updates, log, onToday] = await Promise.all([
+    readShipStatus(),
+    pendingUpdates(),
+    readFile(deckLogFile(), "utf8").catch(() => ""),
+    agenda
+      ? agenda
+          // To the last moment of today by the calendar: a day is not always 24 hours long.
+          .between(
+            dayStart,
+            new Date(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() - 1),
+          )
+          .catch(() => ({ items: [], unread: [] }))
+      : Promise.resolve({ items: [], unread: [] }),
+  ]);
+  const dueToday = (reminders?.list() ?? []).filter(
+    (reminder) => new Date(reminder.dueAt).toLocaleDateString("en-CA") === today,
+  );
+  if ((status.gpu?.usedPercent ?? 0) >= BUSY_GPU_PERCENT) return;
+  const lastEntries = log
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .slice(-3)
+    .map((line) => line.slice(0, 400));
+  const parts = [
+    `This is the first start today, and the time is ${new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}. Greet Captain to suit the time of day and give a short briefing: anything that needs attention first, then one line on the ship, then what is planned. Leave out anything unremarkable.`,
+    `Ship status:\n${describeShipStatus(status)}`,
+    findAlerts(status).length > 0
+      ? `Problems: ${findAlerts(status)
+          .map((alert) => alert.text)
+          .join(" ")}`
+      : "No problems found.",
+  ];
+  if (updates !== null) parts.push(`Software updates waiting: ${updates}`);
+  parts.push(
+    dueToday.length > 0
+      ? `Reminders for today:\n${dueToday.map((r) => `- ${new Date(r.dueAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })} ${r.text}`).join("\n")}`
+      : "No reminders are set for today.",
+  );
+  const agendaToday = briefingLines(onToday, now);
+  if (agendaToday) parts.push(agendaToday);
+  if (lastEntries.length > 0) parts.push(`Latest Deck Log entries:\n${lastEntries.join("\n")}`);
+  // The log lines are text read back from a file, and a calendar's entries may have been
+  // written by whoever sent an invitation, so the briefing counts as outside text.
+  const raised = initiative?.raise({
+    kind: "briefing",
+    requested: false,
+    outsideText: lastEntries.length > 0 || agendaToday !== "",
+    text: parts.join("\n\n"),
+  });
+  if (raised) await config.update({ lastBriefingDay: today });
+}
+
+// ---------- start-up and shutdown ----------
+
+/** `--import-model <file>` packs a model from the command line and exits. */
+async function importFromCommandLine(): Promise<boolean> {
+  const flag = process.argv.indexOf("--import-model");
+  if (flag === -1) return false;
+  const file = process.argv[flag + 1];
+  try {
+    if (!file) throw new Error('Usage: npm run import-model -- "/path/to/model.pmx"');
+    const files = await packIntoBundle(file);
+    console.log(`Packed ${files} files into ${modelBundleFile()}`);
+    app.exit(0);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    app.exit(1);
+  }
+  return true;
+}
+
+/**
+ * Takes her hands off the controls, or gives them back. Taking them off also stops
+ * whatever she is in the middle of: the reply being written and any research under way.
+ */
+async function setHandsOff(off: boolean): Promise<void> {
+  await config.update({ handsOff: off });
+  if (!off) return;
+  // Everything she has in motion stops: the reply, her research, and her background jobs.
+  // (She still takes notes on conversations; those change nothing on the PC.)
+  interruptBrain();
+  await research?.stopAll();
+  await missions?.stopAll();
+}
+
+/**
+ * Puts a mission's step to the person at the PC, in a window of its own, since it may
+ * come hours after anyone last spoke to her. Null when the question was taken down
+ * unanswered (it was answered on a device, or the mission was cancelled): closing the
+ * window that way must never be read as a no.
+ */
+async function askAboutStep(
+  card: ApprovalCard,
+  sensitive: boolean,
+  signal: AbortSignal,
+): Promise<boolean | null> {
+  const options: Electron.MessageBoxOptions = {
+    type: sensitive ? "warning" : "question",
+    buttons: ["Allow this step", "Do not allow"],
+    defaultId: 1,
+    cancelId: 1,
+    title: "AI-chan: a mission is waiting for you",
+    message: `Mission "${card.mission}", step ${card.step} of ${card.steps}: ${card.title}`,
+    // The card's command already has any character that would not show written out.
+    detail: `On ${card.where}:\n${card.command}\n\n${card.reason}${sensitive ? "\n\nThis touches a place where passwords or keys are kept, so it can only be answered here." : ""}`,
+    noLink: true,
+    signal,
+  };
+  const { response } = mainWindow
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+  // Closed from here because the question is no longer open: that is no answer.
+  if (signal.aborted) return null;
+  return response === 0;
+}
+
+/** Erases the word-for-word record of past conversations, after asking. Her notes are kept. */
+async function forgetConversations(): Promise<void> {
+  if (!archive) {
+    // Nothing word for word is kept to ask about, but a file of records may be left
+    // from when that was switched on: it goes without a question.
+    traces.clear();
+    awayTraces.clear();
+    await Promise.all([traceFile.clear(), trainingSink.clear()]);
+    return;
+  }
+  const { response } = await dialog.showMessageBox({
+    type: "question",
+    buttons: ["Forget them", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    message: `Forget all ${archive.count} past exchanges?`,
+    detail:
+      "The word-for-word record of what you two have said is erased from this computer. What she has learned (her notes) is kept. This cannot be undone.",
+  });
+  if (response !== 0) return;
+  await archive.clear();
+  // The records of her replies hold the same words: they go too, kept or not.
+  traces.clear();
+  awayTraces.clear();
+  await Promise.all([traceFile.clear(), trainingSink.clear()]);
+  // Her window may be showing some of them in its log.
+  sendToWindow("chat:forgotten");
+}
+
+/**
+ * After a write-up: notes when each task was done, and when one turns out to be a habit,
+ * has her offer (once) to take it on.
+ */
+async function noticeRoutines(routines: RoutineWatch, learned: Learned): Promise<void> {
+  for (const skill of learned.skills) await routines.note(skill.id, skill.text, learned.when);
+  const [routine] = routines.found();
+  if (!routine) return;
+  await routines.markOffered(routine.id);
+  initiative?.raise({ kind: "routine", requested: false, text: describeRoutine(routine) });
+}
+
+async function shutDown(): Promise<void> {
+  // Speech first: nothing may ask the voice for another sentence while it is being closed.
+  voice.beginShutdown();
+  if (watchTimer) clearInterval(watchTimer);
+  reminders?.stop();
+  orders?.dispose();
+  noticeWatch?.dispose();
+  agendaWatch?.stop();
+  browserDeck?.dispose();
+  void sight?.rest();
+  const closing = (async () => {
+    // First, so the window manager's script, the virtual devices and the open port go
+    // even if something further down hangs.
+    await reach?.dispose();
+    await searchBudget?.flush();
+    // A game still going on is written down as played up to the last look.
+    await gameWatch?.stop();
+    await missions?.stopAll();
+    // What a mission was in the middle of is found as interrupted when she next starts.
+    await board?.dispose();
+    await research?.stopAll();
+    await actions?.flush();
+    await Promise.allSettled([traceFile.whenWritten(), trainingSink.whenWritten()]);
+    if (removeKwinHelper) {
+      const remove = removeKwinHelper;
+      removeKwinHelper = null;
+      await remove();
+    }
+    const closingBrain = brain;
+    brain = null;
+    await closingBrain?.dispose();
+    await voice.dispose();
+    store?.close();
+    store = null;
+  })();
+  // Never let a stuck clean-up keep the app from closing.
+  await Promise.race([
+    closing.catch(() => undefined),
+    new Promise((resolve) => setTimeout(resolve, 5000)),
+  ]);
+}
+
+async function main(): Promise<void> {
+  if (process.argv.includes("--import-model")) {
+    await app.whenReady();
+    await importFromCommandLine();
+    return;
+  }
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    return;
+  }
+  app.on("second-instance", () => showWindow(true));
+  // Closing the window keeps AI-chan in the tray; Quit in the tray menu ends the app.
+  app.on("window-all-closed", () => undefined);
+  app.on("before-quit", () => {
+    quitting = true;
+  });
+  let cleanedUp = false;
+  app.on("will-quit", (event) => {
+    if (cleanedUp) return;
+    event.preventDefault();
+    cleanedUp = true;
+    void shutDown().finally(() => app.quit());
+  });
+
+  await app.whenReady();
+  await config.load();
+  // Her badges follow the settings, whoever changed them: the tray, the panel, or she herself.
+  config.onChange = () => queueMicrotask(sendPresence);
+  if (!config.value.firstMetAt) await config.update({ firstMetAt: new Date().toISOString() });
+
+  const memory = new MemoryStore(memoryFile());
+  try {
+    await memory.load();
+  } catch (error) {
+    dialog.showErrorBox(
+      "AI-chan's memory could not be read",
+      error instanceof Error ? error.message : String(error),
+    );
+    app.quit();
+    return;
+  }
+
+  memoryStore = memory;
+
+  try {
+    store = new HerStore(storeFile());
+  } catch (error) {
+    dialog.showErrorBox(
+      "AI-chan's records could not be opened",
+      error instanceof Error ? error.message : String(error),
+    );
+    app.quit();
+    return;
+  }
+
+  const environment = await detectEnvironment(workspaceDir());
+  startShipServices(environment.workspace);
+  engine = new LocalEngine({
+    modelsDir: modelsDir(),
+    choice: process.env["AI_CHAN_BRAIN"] ?? config.value.brain,
+    contextSize: config.value.contextSize,
+    idleUnloadMs: config.value.idleUnloadMinutes * 60_000,
+    lean: config.value.leanMemory,
+    gameOnCard: config.value.yieldToGames ? gameOnCard : undefined,
+    onStatus: onEngineStatus,
+  });
+  const thinker = engine;
+  const routines = new RoutineWatch(routinesFile());
+  await routines.load();
+  const recall = new Recall(memory, new LocalEmbedder(join(modelsDir(), "speech")), store);
+  const learner = new Learner({
+    memory,
+    recall,
+    ask: (instructions, text, signal) => thinker.sideQuestion(instructions, text, signal),
+    journalFile: journalFile(),
+    quietMs: quietTimeFor(config.value.idleUnloadMinutes * 60_000),
+    onLearned: (learned) => void noticeRoutines(routines, learned),
+  });
+  await learner.load();
+  learnerRef = learner;
+  archive = new ConversationArchive(archiveFile(), recall.embedder, undefined, store);
+  await archive.load();
+  actions = new ActionLog(actionsFile(), undefined, store);
+  await actions.load();
+  // A crash while she was looking at the screen could have left the picture behind.
+  await rm(scratchDir(), { recursive: true, force: true }).catch(() => undefined);
+  sight = new Sight(join(modelsDir(), "speech"), scratchDir(), {
+    gpuBusy: () => (gameWatch?.current()?.game ?? null) !== null,
+  });
+  noticeWatch = new NoticeWatch({
+    skip: () => config.value.notices.skip,
+    // Her own notifications (a reminder shown while her window is hidden) are not news to her.
+    ownNames: [app.getName(), "ai-chan"],
+  });
+  if (config.value.notices.read) noticeWatch.start();
+  // Before the station opens (it reads the same file), so Settings can show whether a
+  // name and password are set even while the station is switched off.
+  await settings.rereadStationAccount();
+  reach = new Reach({
+    config,
+    sight,
+    scriptDir: scratchDir(),
+    modelsCacheDir: join(modelsDir(), "speech"),
+    handsScript: join(app.getAppPath(), "hands", "hands.py"),
+    ownApps: [app.getName()],
+    stationDir: stationDir(),
+    phoneAppFile: join(app.getAppPath(), "phone-app", "build", "ai-chan.apk"),
+    onNotice: (text) =>
+      initiative?.raise({ kind: "alert", requested: false, outsideText: true, text }),
+    // Shown in her window too, and before her reply to it starts: see takeAwayMessage.
+    onAwayMessage: (text, device) =>
+      takeAwayMessage(brain, text, () => voice.sendVoice({ type: "heard", text, from: device.name })),
+    onAwayStop: () => {
+      interruptBrain();
+      voice.stopSpeaking();
+    },
+    // The badge beside her counts the paired devices, and says whether the station is open.
+    onStationChanged: () => sendPresence(),
+    // Nothing has been changed by the request, and nothing can be from the device: the
+    // person at the PC is told, plainly and without waking her, and decides in Settings.
+    approvals: {
+      cards: () => approvalDesk?.cards() ?? [],
+      answer: (id, allowed, device) =>
+        approvalDesk?.answerFromDevice(id, allowed, tidyDeviceName(device.name)) ?? false,
+    },
+    pinnedMission: {
+      current: () => board?.pinnedView() ?? null,
+      steer: async (missionId, note, device) => {
+        const updated = await board?.steer(missionId, note, {
+          from: "device",
+          name: tidyDeviceName(device.name),
+        });
+        return updated ? pinnedMissionView(updated) : null;
+      },
+      stop: (missionId, device) =>
+        board?.cancelPinned(missionId, {
+          from: "device",
+          name: tidyDeviceName(device.name),
+        }) ?? Promise.resolve(false),
+    },
+    traces: () => forShow(awayTraces.list()),
+    onResetAsked: (device) => {
+      showNotice(settings.noteResetAsked(device));
+    },
+    onProblem: (message) => {
+      console.warn(`[reach] ${message}`);
+      sendToWindow("brain:event", { type: "caution", message } satisfies BrainEvent);
+    },
+  });
+  searchBudget = new SearchBudget(searchCountFile(), () => config.value.search.braveMonthlyLimit);
+  await searchBudget.load();
+  const hasPhoneLink = environment.commands.has("kdeconnect-cli");
+  settings.setPhoneLink(hasPhoneLink);
+  fleet = new Fleet({ dir: fleetDir(), machines: () => config.value.fleet.machines });
+  settings.setCanAskPassword(environment.commands.has("kdialog") || environment.commands.has("zenity"));
+  void settings.detectFirewall();
+  research = new ResearchDesk({
+    openWorker: (instructions) => thinker.openWorker(instructions),
+    // In the background she keeps to sources that welcome programs: no browser window
+    // may pop up asking someone to prove they are human while nobody is looking.
+    web: {
+      search: (query, signal) =>
+        searchEverywhere(
+          query,
+          {
+            language: config.value.language,
+            linux: environment.commands.has("pacman"),
+            searxngUrl: config.value.search.searxngUrl,
+            braveApiKey: config.value.search.braveApiKey,
+            mayAskBrave: () => searchBudget?.take() ?? true,
+          },
+          signal,
+        ),
+      read: readWebPage,
+    },
+    language: () => config.value.language,
+    reportsDir: join(environment.workspace, "reports"),
+    memory,
+    actions,
+    workspace: environment.workspace,
+    onFinished: (job) =>
+      initiative?.raise({
+        kind: "mission",
+        requested: true,
+        outsideText: true,
+        text: researchReport(job),
+        plain:
+          job.state === "done"
+            ? `The research "${job.title}" is finished. The report is saved at ${job.reportFile ?? "(nowhere)"}.`
+            : `The research "${job.title}" ${job.state === "stopped" ? "was stopped" : "failed"}.`,
+      }),
+  });
+  brain = new Brain({
+    config,
+    memory,
+    recall,
+    learner,
+    archive,
+    actions,
+    privateDirs: [dataDir()],
+    desktop: {
+      sight,
+      hands: reach.hands,
+      ownApps: [app.getName()],
+      scriptDir: scratchDir(),
+      ...reach.desktopExtras,
+    },
+    hands: reach.handsServices,
+    phone: hasPhoneLink,
+    fleet,
+    screen: reach.screen,
+    notices: () => (config.value.notices.read ? noticeWatch : null),
+    environment,
+    engine,
+    historyFile: historyFile(),
+    onTrace: (trace) => {
+      const enriched: TurnTrace =
+        ttsThisTurn > 0 && trace.ms.tts == null
+          ? { ...trace, ms: { ...trace.ms, tts: ttsThisTurn } }
+          : trace;
+      traceForTurn = enriched;
+      traces.add(enriched);
+      if (enriched.away === true && !enriched.withheld) awayTraces.add(enriched);
+      if (config.value.keepTraces) {
+        traceFile.append(enriched);
+        trainingSink.record(enriched);
+      }
+    },
+    emit: onBrainEvent,
+    ship:
+      reminders && missions
+        ? {
+            reminders,
+            missions,
+            board: board ?? undefined,
+            deckLogFile: deckLogFile(),
+            research,
+            selfCheck: runSelfCheck,
+            orders: orders ?? undefined,
+            games: gameWatch ?? undefined,
+            agenda: agenda ?? undefined,
+          }
+        : undefined,
+    web: {
+      // Searching goes through her browser. Reading tries a plain request first, which is
+      // lighter, and falls back to the browser for pages that only appear once scripts run.
+      // Open sources that welcome programs first; her browser only when they find too little.
+      search: (query, signal) =>
+        searchEverywhere(
+          query,
+          {
+            language: config.value.language,
+            linux: environment.commands.has("pacman"),
+            searxngUrl: config.value.search.searxngUrl,
+            braveApiKey: config.value.search.braveApiKey,
+            mayAskBrave: () => searchBudget?.take() ?? true,
+            browser: browserDeck
+              ? (words, stop) => browserDeck?.search(words, stop) ?? Promise.resolve([])
+              : undefined,
+          },
+          signal,
+        ),
+      read: async (url, signal) => {
+        try {
+          const page = await readWebPage(url, signal);
+          if (page.text.length >= 400 || !browserDeck) return page;
+        } catch (error) {
+          if (!browserDeck || signal?.aborted) throw error;
+        }
+        return browserDeck.read(url, signal);
+      },
+    },
+  });
+  await voice.createVoice();
+
+  await loadModelBundle();
+  registerProtocol();
+  restrictPermissions();
+  registerDesktopIpc({
+    config,
+    fromMainWindow,
+    appState,
+    sendPresence,
+    resetTyped: () => {
+      typedTaken = 0;
+    },
+    noteTyped: () => {
+      typedTaken += 1;
+    },
+    brain: () => brain,
+    archive: () => archive,
+    voice,
+    interruptBrain,
+    resizeWindow,
+    openSettings: () => settings.openSettings(),
+    importModel,
+  });
+  settings.registerSettingsIpc();
+  registerFleetIpc({
+    config,
+    fleet: () => fleet,
+    fromSettingsWindow: settings.fromSettingsWindow,
+    settingsView: settings.settingsView,
+  });
+  registerAgendaIpc({
+    config,
+    agenda: () => agenda,
+    fromSettingsWindow: settings.fromSettingsWindow,
+    settingsView: settings.settingsView,
+  });
+  if (isKdeWayland()) {
+    removeKwinHelper = await installKwinHelper({
+      appId: app.getName(),
+      title: WINDOW_TITLE,
+      scriptPath: join(dataDir(), "kwin-helper.js"),
+      margin: CORNER_MARGIN,
+    });
+    canResize = removeKwinHelper !== null;
+  }
+  settings.noteStartAtLogin(await startsAtLogin());
+  createWindow();
+  createTray();
+  // Her watch, her memory of the PC's sound and the station, as the settings have them.
+  void reach.start().then(() => {
+    rebuildTrayMenu();
+    sendPresence();
+  });
+  void reach.hands
+    .abilities()
+    .then((abilities) => {
+      settings.setHandsAbilities(abilities);
+    })
+    .catch(() => undefined);
+  scheduleDebugAids({
+    config,
+    mainWindow: () => mainWindow,
+    settingsWindow: () => settings.settingsWindow(),
+    brain: () => brain,
+    browserDeck: () => browserDeck,
+    listening: () => voice.listening(),
+    audioBlocks: () => voice.audioBlocks(),
+    sendToWindow,
+    openSettings: () => settings.openSettings(),
+  });
+  // A little after start-up, so she is on screen before she speaks. Reminders that came
+  // due while the app was closed are among the first things she has to say.
+  setTimeout(
+    () => void reminders?.start().catch((error: unknown) => console.warn("[reminders]", error)),
+    5000,
+  );
+  setTimeout(
+    () => void orders?.start().catch((error: unknown) => console.warn("[orders]", error)),
+    6000,
+  );
+  setTimeout(
+    () => void gameWatch?.start().catch((error: unknown) => console.warn("[games]", error)),
+    7000,
+  );
+  agendaWatch?.startAfter(8000);
+  // Gets her notes ready to be found by meaning, off to the side, before the first message.
+  setTimeout(
+    () => void recall.warm().catch((error: unknown) => console.warn("[recall]", error)),
+    3000,
+  );
+  setTimeout(
+    () => void morningBriefing().catch((error: unknown) => console.warn("[briefing]", error)),
+    8000,
+  );
+  // Missions left from before she was closed are taken up where they stood.
+  setTimeout(
+    () => void board?.load().catch((error: unknown) => console.warn("[missions]", error)),
+    5000,
+  );
+}
+
+void main().catch((error: unknown) => {
+  console.error(error);
+  app.exit(1);
+});

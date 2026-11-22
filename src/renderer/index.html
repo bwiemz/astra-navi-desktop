@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' aichan://model blob: data:; connect-src 'self' aichan://model blob: data:; font-src 'self'; media-src 'self' blob:"
+    />
+    <title>AI-chan Desktop (unofficial fan project)</title>
+  </head>
+  <body data-layout="compact" data-mood="neutral">
+    <!-- The conversation so far, opened on purpose: a panel to the left of her. -->
+    <section id="log" class="log" hidden aria-label="Conversation">
+      <header class="log-head">
+        <h2 class="log-title">Conversation</h2>
+        <button
+          id="log-close"
+          class="round-button"
+          type="button"
+          aria-label="Close the conversation"
+        >
+          ×
+        </button>
+      </header>
+      <ol id="log-list" class="log-list" aria-live="off"></ol>
+      <p id="log-empty" class="log-empty">
+        Nothing has been said yet. What you two say will be kept here, newest at the bottom.
+      </p>
+      <!-- While the panel is open, what she is saying right now is shown here instead of in a balloon. -->
+      <div id="log-live" class="log-live"></div>
+      <div id="log-ask" class="log-ask"></div>
+    </section>
+
+    <section id="balloon" class="balloon" hidden>
+      <button
+        id="balloon-close"
+        class="round-button balloon-close"
+        type="button"
+        aria-label="Close"
+      >
+        ×
+      </button>
+      <div id="live" class="live">
+        <div id="live-scroll" class="live-scroll">
+          <p id="heard" class="heard" hidden></p>
+          <!-- Rewritten as each word lands, so it is not read out from here: the finished
+               reply is put in #reply-aloud once. -->
+          <div id="reply" class="reply" aria-live="off"></div>
+          <p id="caution" class="caution" role="alert" hidden></p>
+          <ol id="trail" class="trail" hidden aria-label="What she did"></ol>
+        </div>
+
+        <div
+          id="permission"
+          class="permission"
+          role="group"
+          aria-labelledby="permission-title"
+          hidden
+        >
+          <p class="permission-head">
+            <span id="permission-title" class="permission-title"></span>
+            <span id="permission-flag" class="permission-flag" hidden>Private data</span>
+          </p>
+          <pre
+            id="permission-detail"
+            class="permission-detail"
+            tabindex="0"
+            aria-describedby="permission-detail-more"
+          ></pre>
+          <p id="permission-detail-more" class="permission-more" hidden></p>
+          <p
+            id="permission-note"
+            class="permission-note"
+            tabindex="0"
+            aria-describedby="permission-note-more"
+          ></p>
+          <p id="permission-note-more" class="permission-more" hidden></p>
+          <div class="permission-actions">
+            <button id="permission-deny" type="button" class="button">Don't</button>
+            <button id="permission-session" type="button" class="button">
+              Allow for this chat
+            </button>
+            <button id="permission-allow" type="button" class="button button-primary">
+              Allow once
+            </button>
+          </div>
+        </div>
+
+        <div id="activity" class="activity" hidden>
+          <span class="activity-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span id="activity-label">Thinking</span>
+          <button id="stop" type="button" class="activity-stop">Stop</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- For screen readers only. Her finished reply, said once; and a question she is
+         waiting on, said at once without moving the focus. -->
+    <div id="reply-aloud" class="visually-hidden" aria-live="polite"></div>
+    <p id="permission-ask" class="visually-hidden" role="alert"></p>
+
+    <div id="stage-wrap" class="stage-wrap">
+      <canvas id="stage" class="stage"></canvas>
+      <div id="stand-in" class="stand-in" hidden>
+        <div id="first-run" class="first-run">
+          <p class="first-run-title">No character yet</p>
+          <p class="first-run-words">
+            Pick the .pmx file of a model you are allowed to use. She can already talk and work
+            without one.
+          </p>
+          <button id="import-model" type="button" class="button button-primary">
+            Import a model…
+          </button>
+        </div>
+        <div class="stand-in-body" aria-hidden="true"><span></span><span></span></div>
+      </div>
+    </div>
+
+    <!-- What she is taking in right now. Each badge is only there while it is true. -->
+    <div id="badges" class="badges" aria-label="What she is doing"></div>
+
+    <div id="grip" class="grip" title="Drag to move"></div>
+
+    <button id="mic" class="mic corner-button" type="button">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor" />
+        <path
+          d="M6 11a6 6 0 0 0 12 0M12 17v4M8.5 21h7"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+        />
+      </svg>
+    </button>
+
+    <button id="log-toggle" class="log-toggle corner-button" type="button" aria-pressed="false">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path
+          d="M5 5h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7l-4 3.5V16H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linejoin="round"
+        />
+        <path d="M7.5 9h9M7.5 12h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </svg>
+    </button>
+
+    <form id="ask" class="ask" hidden autocomplete="off">
+      <div id="chips" class="chips" aria-label="Things to ask"></div>
+      <div class="ask-row">
+        <textarea
+          id="ask-input"
+          class="ask-input"
+          rows="1"
+          placeholder="Ask AI-chan anything"
+          aria-label="Message"
+        ></textarea>
+        <button class="button button-primary ask-send" type="submit">Send</button>
+      </div>
+    </form>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "name": "bright",
+  "description": "A young woman with a very high-pitched, bright and sweet voice, like the cheerful heroine of an anime. Bubbly and full of energy, speaking quickly with a bouncy rhythm and big swings in pitch. Playful and a little cheeky, as if she is always smiling.",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "seed": 7
+}

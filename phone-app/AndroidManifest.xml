@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AI-chan's station on a phone: an unofficial, free fan app. It is a window onto the page
+  the desktop app serves on the home network, and holds nothing of the character model.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="fan.aichan.station">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- For letting this phone back in to her by its own fingerprint or face check. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- For hold-to-talk voice notes sent straight to local Whisper transcription. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- For background standing-order notifications on Android 13+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Station"
+        android:usesCleartextTraffic="false">
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale|locale|layoutDirection|keyboard|keyboardHidden|navigation|uiMode"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- The page's "open in the app" link: aichan://station?at=…&fp=…&code=… -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:host="station" android:scheme="aichan" />
+            </intent-filter>
+        </activity>
+        <service
+            android:name=".AlertPollerService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+    </application>
+</manifest>

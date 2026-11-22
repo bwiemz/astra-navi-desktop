@@ -1,0 +1,22 @@
+{
+  "id": "astra-navi-chibi",
+  "name": "Astra Navi (AI Navigator)",
+  "version": "2.0.0",
+  "author": "AI-chan Desktop Contributors",
+  "license": "CC-BY-4.0 / MIT",
+  "modelEntry": "ai-navigator.pmx",
+  "modelFormat": "pmx",
+  "persona": {
+    "displayName": "Astra Navi",
+    "greetingStyle": "cheerful"
+  },
+  "voice": {
+    "engine": "light",
+    "design": "bright navigator",
+    "speed": 1.0
+  },
+  "shader": {
+    "outlineWidth": 0.055,
+    "toonTint": "#d8e6ff"
+  }
+}

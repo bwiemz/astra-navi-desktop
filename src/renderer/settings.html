@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'"
+    />
+    <title>AI-chan Desktop settings (unofficial fan project)</title>
+  </head>
+  <body>
+    <header class="masthead">
+      <h1>Ship's settings</h1>
+      <p id="days" class="days"></p>
+    </header>
+
+    <!-- Stays at the top while the page scrolls: where each section is, and which one is in view. -->
+    <nav id="sections" class="sections" aria-label="Sections">
+      <a href="#sec-voice">Voice</a>
+      <a href="#sec-senses">Eyes &amp; hands</a>
+      <a href="#sec-watch">Watch</a>
+      <a href="#sec-agenda">Agenda</a>
+      <a href="#sec-devices">Devices</a>
+      <a href="#sec-machines">Machines</a>
+      <a href="#sec-memory">Memory</a>
+      <a href="#sec-search">Search</a>
+      <a href="#sec-mind">Mind</a>
+    </nav>
+    <p id="saved" class="saved" role="status" aria-live="polite"></p>
+
+    <main>
+      <section id="sec-voice" class="panel">
+        <h2>Her voice and ears</h2>
+        <label class="row">
+          <span class="what">Voice</span>
+          <select id="voice"></select>
+          <span id="voice-note" class="why"></span>
+        </label>
+        <label class="row">
+          <span class="what">Speaking speed</span>
+          <input id="speed" type="range" min="0.8" max="1.3" step="0.05" />
+          <output id="speed-shown" for="speed"></output>
+        </label>
+        <label class="row">
+          <span class="what">She speaks aloud</span>
+          <select id="speak">
+            <option value="when-spoken-to">When you speak to her</option>
+            <option value="always">Always</option>
+            <option value="never">Never</option>
+          </select>
+        </label>
+        <label class="row switch">
+          <input id="alwaysListening" type="checkbox" />
+          <span class="what">Listen for her name</span>
+          <span class="why"
+            >The microphone stays on. Speech is checked for her name on this computer and
+            dropped.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="needsName" type="checkbox" />
+          <span class="what">Only answer to her name</span>
+        </label>
+        <label class="row">
+          <span class="what">Other names she answers to</span>
+          <input id="otherNames" type="text" placeholder="Computer, Hyperion" autocomplete="off" />
+          <span class="why">Separate with commas. Useful when "AI-chan" keeps being misheard.</span>
+        </label>
+      </section>
+
+      <section id="sec-senses" class="panel">
+        <h2>Her eyes and hands</h2>
+        <label class="row switch">
+          <input id="lookWithoutAsking" type="checkbox" />
+          <span class="what">She may look at the screen without asking</span>
+          <span class="why"
+            >Otherwise she asks each time. The picture never leaves this computer.</span
+          >
+        </label>
+        <label class="row switch warn">
+          <input id="handsOff" type="checkbox" />
+          <span class="what">Hands off the controls</span>
+          <span class="why"
+            >She can talk and look things up, and change nothing. Stops what she is doing.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="watch" type="checkbox" />
+          <span class="what">Keep an eye on the screen</span>
+          <span class="why"
+            >She always knows which program and window you are in, can say what you were doing
+            earlier, and speaks up when a small window pops up that reads like an error. Password
+            managers, private browsing, sign-in windows, chat and mail are not read.</span
+          >
+        </label>
+        <label class="row">
+          <span class="what">Never read these programs</span>
+          <input id="watchSkip" type="text" placeholder="signal, thunderbird" autocomplete="off" />
+          <span class="why">Program names, separated by commas, on top of the built-in list.</span>
+        </label>
+        <label class="row switch">
+          <input id="hearPc" type="checkbox" />
+          <span class="what">Remember what the PC just played</span>
+          <span class="why"
+            >She keeps the last minute and a half of sound in memory, so you can ask what was just
+            said. Never saved; calls are heard too.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="readNotices" type="checkbox" />
+          <span class="what">She may read desktop notifications</span>
+          <span class="why"
+            >She can then say what a notification was and what you missed. They are kept in memory
+            only and never saved: not the list, and not what she tells you about them. Password
+            managers, wallets and sign-in prompts are not read.</span
+          >
+        </label>
+        <label class="row">
+          <span class="what">Never read notifications from</span>
+          <input
+            id="noticesSkip"
+            type="text"
+            placeholder="signal, thunderbird"
+            autocomplete="off"
+          />
+          <span class="why">Program names, separated by commas, on top of the built-in list.</span>
+        </label>
+        <label class="row switch">
+          <input id="workInPrograms" type="checkbox" />
+          <span class="what">She may work inside other programs</span>
+          <span id="hands-note" class="why"></span>
+        </label>
+        <div class="row">
+          <span class="what">Everything she has done</span>
+          <button type="button" data-open="actions">Open the record</button>
+        </div>
+        <div class="row">
+          <span class="what">Her own systems and disk space</span>
+          <button type="button" data-open="self-check">Run a self-check</button>
+        </div>
+      </section>
+
+      <section id="sec-watch" class="panel">
+        <h2>Her watch</h2>
+        <label class="row switch">
+          <input id="doNotDisturb" type="checkbox" />
+          <span class="what">Do not disturb</span>
+          <span class="why">She only speaks first about things you asked to be told.</span>
+        </label>
+        <label class="row switch">
+          <input id="morningBriefing" type="checkbox" />
+          <span class="what">Morning briefing</span>
+        </label>
+        <label class="row switch">
+          <input id="startAtLogin" type="checkbox" />
+          <span class="what">Start when I log in</span>
+        </label>
+      </section>
+
+      <section id="sec-agenda" class="panel">
+        <h2>Her agenda</h2>
+        <p class="note">
+          Calendars of yours that she may read: a calendar file on this PC, or the private address
+          your calendar service gives out for sharing (often called an iCal or ICS link). She only
+          reads them. An address is asked at most every 15 minutes, and nothing is sent anywhere
+          else.
+        </p>
+        <ul id="calendars" class="devices"></ul>
+        <form id="calendar-form" class="machine-form" autocomplete="off">
+          <label class="row">
+            <span class="what">Add a calendar</span>
+            <input id="calendar-name" type="text" maxlength="40" placeholder="Work" required />
+            <span class="why">What you call it. She names it when she tells you what is on.</span>
+          </label>
+          <label class="row">
+            <span class="what">Where it is</span>
+            <input
+              id="calendar-source"
+              type="text"
+              maxlength="500"
+              placeholder="/home/you/calendar.ics or https://…"
+              spellcheck="false"
+              required
+            />
+            <span class="why"
+              >A file's full path, or an https address. The address is kept in her settings file on
+              this PC and is not shown again.</span
+            >
+          </label>
+          <div class="row">
+            <span class="what"></span>
+            <button id="calendar-add" type="submit">Add it</button>
+            <span id="calendar-note" class="why" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+        <label class="row">
+          <span class="what">Say so before something starts</span>
+          <select id="headsUpMinutes">
+            <option value="0">Never</option>
+            <option value="5">5 minutes before</option>
+            <option value="10">10 minutes before</option>
+            <option value="15">15 minutes before</option>
+            <option value="30">30 minutes before</option>
+            <option value="60">An hour before</option>
+          </select>
+          <span class="why">For things with a time, from your calendars and her own list.</span>
+        </label>
+      </section>
+
+      <section id="sec-devices" class="panel">
+        <h2>Your other devices</h2>
+        <p class="note">
+          Your phone or laptop can talk to her through a page she serves on your home network. From
+          there she will not do anything that needs your approval, look at this screen or listen to
+          this PC; those have to be asked for here.
+        </p>
+        <label class="row switch">
+          <input id="station" type="checkbox" />
+          <span class="what">Let my other devices talk to her</span>
+          <span id="station-note" class="why"></span>
+        </label>
+        <div class="row" id="station-pairing" hidden>
+          <span class="what">Add a device</span>
+          <button id="pair" type="button">Show a pairing code</button>
+          <span id="pair-code" class="why" role="status" aria-live="polite"></span>
+        </div>
+        <div class="row" id="station-devices" hidden>
+          <span class="what">Paired devices</span>
+          <ul id="devices" class="devices"></ul>
+        </div>
+        <div class="row" id="station-missions" hidden>
+          <span class="what">Pinned mission bridge</span>
+          <span id="pinned-mission-note" class="why"></span>
+          <ul id="pinned-missions" class="devices"></ul>
+        </div>
+        <div id="signin" class="signin">
+          <h3>Signing in on your devices</h3>
+          <p class="note">
+            Every time the phone app or her page is opened, it asks for this name and password. They
+            are set and changed only here, on this PC. Changing them signs every device out.
+          </p>
+          <p id="signin-state" class="signin-state" role="status"></p>
+          <div id="reset-asked" class="banner" role="alert" hidden>
+            <p id="reset-asked-text"></p>
+            <button id="reset-dismiss" type="button">Dismiss</button>
+          </div>
+          <form id="signin-form" class="machine-form" autocomplete="off">
+            <label class="row">
+              <span class="what">Name</span>
+              <input
+                id="signin-name"
+                type="text"
+                maxlength="32"
+                autocomplete="off"
+                autocapitalize="none"
+                spellcheck="false"
+                required
+              />
+              <span class="why"
+                >3 to 32 letters, digits, dots, dashes or underscores. Capitals do not matter when
+                signing in.</span
+              >
+            </label>
+            <label class="row">
+              <span class="what">New password</span>
+              <input
+                id="signin-password"
+                type="password"
+                maxlength="200"
+                autocomplete="new-password"
+                required
+              />
+              <span class="why"
+                >At least 8 characters. It is not kept anywhere: only a scrambled form that cannot
+                be turned back into it.</span
+              >
+            </label>
+            <label class="row">
+              <span class="what">The same password again</span>
+              <input
+                id="signin-again"
+                type="password"
+                maxlength="200"
+                autocomplete="new-password"
+                required
+              />
+            </label>
+            <div class="row">
+              <span class="what"></span>
+              <button id="signin-save" type="submit">Save name and password</button>
+              <span id="signin-note" class="why" role="status" aria-live="polite"></span>
+            </div>
+          </form>
+        </div>
+        <label class="row switch" id="ping-row" hidden>
+          <input id="pingPhone" type="checkbox" />
+          <span class="what">Send reminders to my phone too</span>
+          <span class="why">Through KDE Connect, when the phone is paired and in reach.</span>
+        </label>
+      </section>
+
+      <section id="sec-machines" class="panel">
+        <h2>Your other machines</h2>
+        <p class="note">
+          A server or a NAS she may work on for you over SSH. She gets a key of her own for each
+          one; you let it in once. Every command is shown to you before it runs, except the plain
+          status checks on machines where you tick the box.
+        </p>
+        <ul id="machines" class="machines"></ul>
+        <form id="machine-form" class="machine-form" autocomplete="off">
+          <label class="row">
+            <span class="what">Add a machine</span>
+            <input id="machine-name" type="text" maxlength="40" placeholder="proxmox" required />
+            <span class="why">What you call it. She is told to use it by this name.</span>
+          </label>
+          <label class="row">
+            <span class="what">Its address</span>
+            <input
+              id="machine-host"
+              type="text"
+              maxlength="253"
+              placeholder="192.168.1.10"
+              required
+            />
+          </label>
+          <label class="row">
+            <span class="what">Sign in as</span>
+            <input id="machine-user" type="text" maxlength="32" placeholder="root" required />
+            <span class="why"
+              >An account that may sign in over SSH. Port 22 unless you change it below.</span
+            >
+          </label>
+          <label class="row">
+            <span class="what">Port</span>
+            <input id="machine-port" type="number" min="1" max="65535" value="22" required />
+          </label>
+          <div class="row">
+            <span class="what"></span>
+            <button id="machine-find" type="submit">Find it</button>
+            <span id="machine-note" class="why" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+        <div class="row" id="machine-confirm" hidden>
+          <span class="what">Is this the machine?</span>
+          <span id="machine-prints" class="why prints"></span>
+          <span class="why"
+            >Compare with the machine's own answer. On it, run:
+            <code>for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done</code></span
+          >
+          <button id="machine-yes" type="button">Yes, add it</button>
+          <button id="machine-no" type="button" class="quiet">Cancel</button>
+        </div>
+      </section>
+
+      <section id="sec-memory" class="panel">
+        <h2>Her memory</h2>
+        <div class="row">
+          <span class="what">What she has learned</span>
+          <button type="button" data-open="learned">Open her notes</button>
+          <span id="notes" class="why"></span>
+        </div>
+        <label class="row switch">
+          <input id="keepConversations" type="checkbox" />
+          <span class="what">Keep past conversations</span>
+          <span id="exchanges" class="why"></span>
+        </label>
+        <div class="row">
+          <span class="what">Past conversations</span>
+          <button id="forget" type="button" class="danger">Forget them all…</button>
+        </div>
+      </section>
+
+      <section id="sec-search" class="panel">
+        <h2>Looking things up</h2>
+        <p class="note">
+          She already searches Wikipedia, Stack Overflow and other open sources without any account.
+          A search engine of your own makes her answers wider. Both are optional.
+        </p>
+        <label class="row">
+          <span class="what">Your own SearXNG</span>
+          <input
+            id="searxngUrl"
+            type="url"
+            placeholder="http://localhost:8888"
+            autocomplete="off"
+          />
+        </label>
+        <label class="row">
+          <span class="what">Brave Search key</span>
+          <input id="braveApiKey" type="password" autocomplete="off" />
+          <span id="brave-note" class="why"></span>
+        </label>
+        <label class="row" id="brave-limit-row" hidden>
+          <span class="what">Brave searches a month, at most</span>
+          <input id="braveMonthlyLimit" type="number" min="0" max="1000000" step="100" />
+          <span id="brave-used" class="why"></span>
+        </label>
+      </section>
+
+      <section id="sec-mind" class="panel">
+        <h2>Her mind</h2>
+        <label class="row">
+          <span class="what">Brain</span>
+          <select id="brain"></select>
+          <span class="why">Bigger answers better and takes more of the graphics card.</span>
+        </label>
+        <label class="row">
+          <span class="what">Language</span>
+          <select id="language"></select>
+        </label>
+        <label class="row">
+          <span class="what">Thinking before she answers</span>
+          <select id="thinkingTokens">
+            <option value="0">None: answer at once</option>
+            <option value="128">A moment</option>
+            <option value="256">A while (usual)</option>
+            <option value="512">Longer, for hard questions</option>
+          </select>
+        </label>
+        <label class="row">
+          <span class="what">Falls asleep after</span>
+          <select id="idleUnloadMinutes">
+            <option value="2">2 quiet minutes</option>
+            <option value="5">5 quiet minutes</option>
+            <option value="10">10 quiet minutes (usual)</option>
+            <option value="30">30 quiet minutes</option>
+            <option value="0">Never: keep the graphics memory</option>
+          </select>
+          <span class="why"
+            >Asleep, she hands her graphics memory back. She wakes in a few seconds.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="yieldToGames" type="checkbox" />
+          <span class="what">Give the graphics card back while a game is running</span>
+          <span class="why"
+            >With a game open she falls asleep a minute after each reply, and her voice with her. On
+            "Choose for this computer" she takes the small brain when the standard one no longer
+            fits beside the game.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="quietInGames" type="checkbox" />
+          <span class="what">Stay quiet while a game is running</span>
+          <span class="why"
+            >What she would bring up by herself waits until the game is over, and she tells it as
+            one thing. A reminder you set still reaches you at once, as a plain notice, without
+            waking her.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="leanMemory" type="checkbox" />
+          <span class="what">Use less graphics memory (experimental)</span>
+          <span class="why"
+            >Holds the conversation more compactly. Only for her built-in brains. Changing it stops
+            her reply and reloads her brain.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="fittingTools" type="checkbox" />
+          <span class="what">Offer her only the tools a message needs (experimental)</span>
+          <span class="why"
+            >She holds about a third less in mind, which leaves more room for a long conversation
+            and makes her first reply after waking quicker. If she says she cannot do something she
+            is then given every tool and tries once more.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="keepTraces" type="checkbox" />
+          <span class="what">Keep a record of each reply on this computer</span>
+          <span class="why"
+            >Written to a file in her data folder, where only you can read it. It holds what you
+            asked and what she answered, so it is as private as your conversations, and "Forget
+            conversations" erases it too. The text of notifications is never in it. It is what
+            <code>npm run export-pairs</code> reads.</span
+          >
+        </label>
+        <details id="tier10-block" class="traces">
+          <summary>Tier 10 experimental capabilities (all off by default)</summary>
+          <p class="note">
+            Every capability stays off until switched on here. Everything runs on your hardware or
+            private home network.
+          </p>
+          <div id="tier10-toggles"></div>
+        </details>
+        <details id="traces-block" class="traces">
+          <summary>Why did she do that?</summary>
+          <p class="note">
+            Her last replies since she was started, newest first: which tools she was offered, what
+            she called and how each call ended, and where the app's own checks sent her back.
+          </p>
+          <div class="traces-bar">
+            <button id="traces-refresh" type="button">Refresh</button>
+            <span id="traces-note" class="why" role="status" aria-live="polite"></span>
+          </div>
+          <ol id="traces" class="trace-list"></ol>
+        </details>
+      </section>
+    </main>
+
+    <footer>
+      Unofficial fan project. Not affiliated with miHoYo / HoYoverse, who own AI-chan and
+      <i>Honkai Impact 3rd</i>. Free, and everything stays on this computer.
+    </footer>
+    <script type="module" src="./src/settings.ts"></script>
+  </body>
+</html>

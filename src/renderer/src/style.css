@@ -1,0 +1,1259 @@
+@import "@fontsource/m-plus-rounded-1c/latin-500.css";
+@import "@fontsource/m-plus-rounded-1c/latin-800.css";
+
+/*
+  A comic speech balloon: paper white, one ink colour for every outline, and a hard
+  offset shadow instead of a soft one, so it stays readable on any wallpaper.
+*/
+:root {
+  --paper: #fffdf6;
+  --ink: #1b1f3b;
+  --blush: #ff6fa3;
+  --sky: #59c8f5;
+  --lemon: #ffe27a;
+  --ink-soft: #5c6187;
+  --outline: 2.5px solid var(--ink);
+  --drop: 4px 4px 0 var(--ink);
+  --stage-width: 280px;
+  --stage-height: 430px;
+  /* Her mood, as one block of colour peeking out behind the balloon. None when neutral. */
+  --mood: transparent;
+  --mood-edge: transparent;
+  --dots: radial-gradient(rgb(27 31 59 / 8%) 1px, transparent 1.4px);
+  font-family: "M PLUS Rounded 1c", "Noto Sans CJK JP", "Noto Sans", system-ui, sans-serif;
+  font-weight: 500;
+  font-size: 14.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* Said to a screen reader, shown to nobody. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+body[data-mood="happy"] {
+  --mood: var(--lemon);
+}
+body[data-mood="excited"] {
+  --mood: var(--blush);
+}
+body[data-mood="thinking"] {
+  --mood: var(--sky);
+}
+body[data-mood="surprised"] {
+  --mood: #c9b8ff;
+}
+body[data-mood="worried"] {
+  --mood: #ffc2a1;
+}
+body[data-mood="smug"] {
+  --mood: #a6ecc4;
+}
+body[data-mood="sad"] {
+  --mood: #b9c4e8;
+}
+body:not([data-mood="neutral"]) {
+  --mood-edge: var(--ink);
+}
+
+/* ---------- the character ---------- */
+
+/* Every element is pinned to the bottom-right corner, the one point that stays put
+   when the window grows to make room for the balloon. */
+.stage-wrap {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: var(--stage-width);
+  height: var(--stage-height);
+}
+
+.stage {
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+  cursor: pointer;
+}
+
+/* The stand under her feet: the one part of the window that drags it around. */
+.grip {
+  position: absolute;
+  right: calc(var(--stage-width) / 2 - 66px);
+  bottom: 6px;
+  width: 132px;
+  height: 20px;
+  border: var(--outline);
+  border-radius: 50%;
+  background: var(--paper);
+  box-shadow: 0 3px 0 var(--ink);
+  opacity: 0.85;
+  -webkit-app-region: drag;
+}
+
+/* Shown until a character model has been imported. Deliberately not a likeness of anyone. */
+.stand-in {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 18px;
+  padding-bottom: 76px;
+  pointer-events: none;
+}
+
+/* First run: what to do is said right where she will stand. */
+.first-run {
+  width: 236px;
+  padding: 12px 14px 14px;
+  border: var(--outline);
+  border-radius: 16px;
+  background: var(--paper);
+  box-shadow: var(--drop);
+  text-align: center;
+  pointer-events: auto;
+}
+
+.first-run-title {
+  margin: 0 0 4px;
+  font-weight: 800;
+  font-size: 1.08em;
+}
+
+.first-run-words {
+  margin: 0 0 10px;
+  font-size: 0.9em;
+  color: var(--ink-soft);
+}
+
+.stand-in-body {
+  width: 132px;
+  height: 132px;
+  border: var(--outline);
+  border-radius: 46% 46% 42% 42%;
+  background: var(--blush);
+  box-shadow: var(--drop);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 30px;
+  animation: bob 3.2s ease-in-out infinite;
+}
+
+.stand-in-body span {
+  width: 14px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--ink);
+  animation: blink 4.6s infinite;
+}
+
+@keyframes bob {
+  50% {
+    transform: translateY(-7px);
+  }
+}
+
+@keyframes blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+  95% {
+    transform: scaleY(0.1);
+  }
+}
+
+/* The two round buttons at her feet: the microphone, and the conversation so far. */
+.corner-button {
+  position: absolute;
+  /* They step up out of the way while the message box floats at her feet. */
+  bottom: max(8px, calc(var(--ask-clear, 0px) - 2px));
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: var(--outline);
+  border-radius: 50%;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 2px 2px 0 var(--ink);
+  cursor: pointer;
+}
+
+/* The microphone: off, listening, and hearing you are three clearly different looks. */
+.mic {
+  right: calc(var(--stage-width) - 46px);
+}
+
+.log-toggle {
+  right: 10px;
+}
+
+.log-toggle:hover {
+  background: var(--lemon);
+}
+
+.log-toggle[aria-pressed="true"] {
+  background: var(--sky);
+}
+
+/* What she is taking in right now, stacked above the microphone. Nothing is drawn for
+   a sense that is off, so an empty strip means she is only waiting to be spoken to. */
+.badges {
+  position: absolute;
+  right: calc(var(--stage-width) - 41px);
+  bottom: max(52px, calc(var(--ask-clear, 0px) + 42px));
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 5px;
+}
+
+.badge {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 1.5px 1.5px 0 var(--ink);
+  cursor: pointer;
+}
+
+.badge:hover {
+  background: var(--lemon);
+}
+
+.badge[data-kind="hands-off"] {
+  background: #ffc2cf;
+}
+
+.badge[data-kind="asleep"] {
+  background: #dfe3f7;
+}
+
+.badge-count {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.mic:hover {
+  background: var(--lemon);
+}
+
+.mic[data-state="starting"] {
+  background: var(--lemon);
+  animation: mic-wait 1s ease-in-out infinite;
+}
+
+.mic[data-state="listening"],
+.mic[data-state="transcribing"] {
+  background: var(--blush);
+}
+
+.mic[data-state="hearing"] {
+  background: var(--blush);
+  box-shadow:
+    2px 2px 0 var(--ink),
+    0 0 0 5px rgb(255 111 163 / 45%);
+}
+
+@keyframes mic-wait {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* ---------- the speech balloon ---------- */
+
+.balloon {
+  position: absolute;
+  right: 20px;
+  width: 404px;
+  bottom: calc(var(--stage-height) - 22px);
+  /* Everything above her head, less a margin: the reply scrolls inside this. */
+  max-height: calc(100vh - var(--stage-height) + 8px);
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  border: var(--outline);
+  border-radius: 20px;
+  /* The ink shadow, then her mood as a second block behind it, itself edged in ink. */
+  box-shadow:
+    var(--drop),
+    8px 8px 0 var(--mood),
+    8px 8px 0 2.5px var(--mood-edge);
+  user-select: text;
+}
+
+/* The tail: a square turned on its corner, with only its two lower edges inked. */
+.balloon::after {
+  content: "";
+  position: absolute;
+  right: 114px;
+  bottom: -11px;
+  width: 18px;
+  height: 18px;
+  background: var(--paper);
+  border-right: var(--outline);
+  border-bottom: var(--outline);
+  transform: rotate(45deg);
+  box-shadow: 4px 4px 0 -1px var(--ink);
+}
+
+/* What she is saying and doing right now. It sits in the balloon, or at the foot of the
+   conversation panel while that is open; either way the reply scrolls and a question
+   put to the user stays whole underneath it. */
+.live {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.live-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* The margin keeps the scrollbar clear of the balloon's rounded corner. */
+  margin: 8px 4px 0 0;
+  padding: 6px 10px 12px 16px;
+}
+
+/* One quiet scrollbar for everything that scrolls in her window: a thin ink pill, no arrows. */
+.live-scroll::-webkit-scrollbar,
+.log-list::-webkit-scrollbar,
+.permission::-webkit-scrollbar,
+.permission-detail::-webkit-scrollbar,
+.permission-note::-webkit-scrollbar,
+.ask-input::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+.live-scroll::-webkit-scrollbar-thumb,
+.log-list::-webkit-scrollbar-thumb,
+.permission::-webkit-scrollbar-thumb,
+.permission-detail::-webkit-scrollbar-thumb,
+.permission-note::-webkit-scrollbar-thumb,
+.ask-input::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgb(92 97 135 / 55%);
+}
+
+.live-scroll::-webkit-scrollbar-thumb:hover,
+.log-list::-webkit-scrollbar-thumb:hover,
+.permission::-webkit-scrollbar-thumb:hover,
+.permission-detail::-webkit-scrollbar-thumb:hover,
+.permission-note::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-soft);
+}
+
+.live-scroll:has(> :not([hidden]):not(:empty)) {
+  min-height: 46px;
+}
+
+/* While a question is up, her reply is what gives way: it shrinks (and scrolls) long
+   before the question and its buttons lose any room. */
+.live:has(> .permission:not([hidden])) > .live-scroll {
+  flex-shrink: 1000;
+}
+
+.round-button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.round-button:hover {
+  background: var(--lemon);
+  color: var(--ink);
+}
+
+/* The balloon's close button rides its corner like a sticker, out of the way of the words. */
+.balloon-close {
+  position: absolute;
+  top: -11px;
+  right: -11px;
+  z-index: 1;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 1.5px 1.5px 0 var(--ink);
+}
+
+/* A question cannot be closed away, so the button is not offered while one is open. */
+.balloon:has(.permission:not([hidden])) .balloon-close {
+  display: none;
+}
+
+/* What she understood you to say, so a mishearing is visible at a glance. */
+.heard {
+  margin: 0 0 8px;
+  padding-bottom: 7px;
+  border-bottom: 1.5px dashed var(--ink-soft);
+  color: var(--ink-soft);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.heard::before {
+  content: "You said: ";
+}
+
+/* In the conversation panel what was said is a caption box, as it will be in the list. */
+.log-live .heard {
+  align-self: flex-end;
+  max-width: 86%;
+  margin: 0 0 10px;
+  padding: 6px 11px 7px;
+  border: 2px solid var(--ink);
+  border-radius: 4px;
+  background: var(--lemon);
+  box-shadow: 2px 2px 0 var(--ink);
+  color: var(--ink);
+  font-size: 1em;
+  white-space: pre-wrap;
+}
+
+.log-live .heard::before {
+  content: none;
+}
+
+.log-live .live-scroll {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+  padding-top: 10px;
+}
+
+.reply {
+  overflow-wrap: anywhere;
+}
+
+.reply:empty {
+  display: none;
+}
+
+/* While her words are still arriving, a caret marks where the next one will land. */
+.reply.is-streaming > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.12em;
+  background: var(--ink);
+  animation: caret 1s steps(2, jump-none) infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* The steps she took for this reply, in the order she took them. */
+.trail {
+  margin: 10px 0 0;
+  padding: 8px 0 0;
+  border-top: 1.5px dashed var(--ink-soft);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--ink-soft);
+  font-size: 0.86em;
+}
+
+.reply:empty + .caution[hidden] + .trail,
+.heard[hidden] + .reply:empty + .caution[hidden] + .trail {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.step {
+  display: flex;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+.step::before {
+  content: "✓";
+  flex: none;
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.step[data-kind="refused"]::before {
+  content: "✕";
+  color: #a3123f;
+}
+
+.step-label {
+  min-width: 0;
+}
+
+/* How a question ended. It is a mark the page draws, boxed in ink, so that words in a
+   step (which her tools and the model write) can never pass for it. */
+.step-answer {
+  flex: none;
+  align-self: flex-start;
+  margin-left: auto;
+  padding: 0 7px;
+  border: 1.5px solid var(--ink);
+  border-radius: 999px;
+  background: var(--lemon);
+  color: var(--ink);
+  font-size: 0.92em;
+  font-weight: 800;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.step[data-kind="refused"] .step-answer {
+  background: #ffc2cf;
+}
+
+.reply p {
+  margin: 0 0 0.6em;
+}
+
+.reply p:last-child,
+.reply ul:last-child,
+.reply ol:last-child,
+.reply pre:last-child {
+  margin-bottom: 0;
+}
+
+.reply ul,
+.reply ol {
+  margin: 0 0 0.6em;
+  padding-left: 1.25em;
+}
+
+.reply strong {
+  font-weight: 800;
+}
+
+.reply a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--blush);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/* The site a link's words lead to, named beside them. */
+.link-host {
+  /* The site's name keeps its own direction, whatever the words around it do. */
+  unicode-bidi: isolate;
+  color: var(--ink-soft);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.reply code,
+.permission-detail {
+  font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+  font-size: 0.86em;
+}
+
+.reply code {
+  padding: 0.08em 0.36em;
+  border-radius: 6px;
+  background: #eef0fb;
+}
+
+.reply pre {
+  margin: 0 0 0.6em;
+  padding: 9px 11px;
+  border: 1.5px solid var(--ink);
+  border-radius: 10px;
+  background: #f4f5fd;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.reply pre code {
+  padding: 0;
+  background: none;
+}
+
+/* When what she said and what actually happened do not match. */
+.caution {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: #ffc2cf;
+  font-size: 0.92em;
+}
+
+.reply.is-error {
+  color: #a3123f;
+}
+
+/* ---------- what she is doing right now ---------- */
+
+.activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 7px 14px;
+  border-top: 1.5px dashed var(--ink-soft);
+  color: var(--ink-soft);
+  font-size: 0.9em;
+  user-select: none;
+}
+
+#activity-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.activity-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--blush);
+  animation: hop 1s ease-in-out infinite;
+}
+
+.activity-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.activity-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes hop {
+  30% {
+    transform: translateY(-4px);
+  }
+  60% {
+    transform: none;
+  }
+}
+
+.activity-stop {
+  border: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.activity-stop:hover {
+  background: var(--lemon);
+}
+
+/* ---------- asking before she changes something ---------- */
+
+/* Never inside the scrolling part, and never taller than the room there is: the command
+   and the reason each scroll inside a box of their own, so the three buttons are always
+   in the window. Where even that is too much (a very short screen), the card itself
+   scrolls and the buttons stay pinned to its foot. */
+.permission {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0 12px 12px;
+  padding: 11px 12px 0;
+  border: var(--outline);
+  border-radius: 14px;
+  background: var(--lemon);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.permission > * {
+  flex: none;
+}
+
+.permission.is-sensitive {
+  background: #ffc2cf;
+}
+
+.permission-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 6px;
+}
+
+.permission-title {
+  font-weight: 800;
+}
+
+/* A request that reaches passwords, keys or sign-in data says so in words, not only in colour. */
+.permission-flag {
+  flex: none;
+  padding: 1px 8px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--paper);
+  font-size: 0.8em;
+  font-weight: 800;
+}
+
+.permission .permission-detail {
+  flex: 0 1 auto;
+  /* Two lines at the least. */
+  min-height: 4.5em;
+  margin: 0;
+  padding: 7px 9px;
+  max-height: 132px;
+  overflow: auto;
+  border: 1.5px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Why she wants to. The model writes this, at any length: it gets about four lines and
+   scrolls inside them, so nothing of it is cut and nothing below it is pushed away. */
+.permission .permission-note {
+  /* Short of room, the reason gives way before the command does, down to two lines. */
+  flex: 0 3 auto;
+  min-height: 3em;
+  max-height: 6.4em;
+  margin: 6px 0 0;
+  overflow-y: auto;
+  font-size: 0.9em;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.permission-note:empty {
+  display: none;
+}
+
+.permission-detail:focus-visible,
+.permission-note:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+/* Says in words that a box holds more than it shows. */
+.permission-more {
+  margin: 2px 0 0;
+  font-size: 0.8em;
+  font-weight: 800;
+  user-select: none;
+}
+
+/* "Don't" stands apart on the left, so a hurried click on the right never lands on it
+   by mistake, nor the other way round. */
+.permission-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  /* The card's own colour, so what scrolls under the buttons does not show through. */
+  margin: 0 -4px;
+  padding: 9px 4px 12px;
+  background: inherit;
+}
+
+.permission-actions .button {
+  padding: 5px 12px;
+  font-size: 0.94em;
+}
+
+.permission-actions .button:first-child {
+  margin-right: auto;
+}
+
+/* While she waits on a question, its own buttons are the controls; the line that says
+   what she is doing would only say it a third time. */
+.permission:not([hidden]) ~ .activity {
+  display: none;
+}
+
+/* ---------- the conversation so far ---------- */
+
+.log {
+  position: absolute;
+  top: 12px;
+  bottom: 14px;
+  left: 12px;
+  right: calc(var(--stage-width) + 12px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--paper);
+  border: var(--outline);
+  border-radius: 18px;
+  box-shadow: var(--drop);
+  user-select: text;
+}
+
+/* Where the window cannot grow sideways, the panel takes the balloon's place above her. */
+body[data-fixed="true"] .log {
+  left: auto;
+  right: 20px;
+  width: 404px;
+  bottom: calc(var(--stage-height) - 22px);
+}
+
+.log-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 10px 8px 16px;
+  border-bottom: var(--outline);
+  background: var(--sky);
+}
+
+.log-title {
+  margin: 0;
+  font-size: 1.02em;
+  font-weight: 800;
+}
+
+.log-head .round-button {
+  color: var(--ink);
+}
+
+.log-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 14px 14px 16px;
+  overflow-y: auto;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  background-image: var(--dots);
+  background-size: 11px 11px;
+}
+
+.log-list:empty {
+  display: none;
+}
+
+.log-empty {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 28px 22px;
+  color: var(--ink-soft);
+  text-align: center;
+  background-image: var(--dots);
+  background-size: 11px 11px;
+}
+
+.log-list:not(:empty) + .log-empty {
+  display: none;
+}
+
+/* A new day, or the line between earlier sessions and this one. */
+.log-day {
+  align-self: center;
+  margin: 4px 0 2px;
+  padding: 1px 12px;
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-size: 0.8em;
+  font-weight: 800;
+}
+
+/* What Captain said: a caption box, squared off, where her words are rounded. */
+.log-said {
+  align-self: flex-end;
+  max-width: 86%;
+  padding: 6px 11px 7px;
+  border: 2px solid var(--ink);
+  border-radius: 4px;
+  background: var(--lemon);
+  box-shadow: 2px 2px 0 var(--ink);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* Which of the user's devices it came from. */
+.log-from {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 0.8em;
+  font-weight: 800;
+}
+
+/* Something about an exchange that is neither side's words. */
+.log-note {
+  align-self: flex-start;
+  padding: 0 0 0 8px;
+  color: var(--ink-soft);
+  font-size: 0.84em;
+}
+
+.log-said.is-event {
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-size: 0.88em;
+  box-shadow: none;
+  border-style: dashed;
+}
+
+.log-steps {
+  align-self: flex-start;
+  max-width: 92%;
+  margin: 0;
+  padding: 0 0 0 8px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--ink-soft);
+  font-size: 0.84em;
+}
+
+.log-her {
+  align-self: flex-start;
+  max-width: 94%;
+  padding: 9px 13px 6px;
+  border: 2px solid var(--ink);
+  border-radius: 16px 16px 16px 4px;
+  background: var(--paper);
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.log-her .caution {
+  margin: 8px 0 2px;
+}
+
+.log-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 0.78em;
+  user-select: none;
+}
+
+.log-meta time {
+  flex: 1;
+}
+
+.copy {
+  padding: 0 7px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.copy:hover {
+  background: var(--lemon);
+  color: var(--ink);
+}
+
+.log-live {
+  flex: none;
+  max-height: 48%;
+  display: flex;
+  flex-direction: column;
+  border-top: var(--outline);
+  background: var(--paper);
+}
+
+/* A question needs its room more than the list above it does: while one is up, what is
+   live may take as much of the panel as it needs, and the list gives way first. */
+.log-live:has(.permission:not([hidden])) {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
+.log:has(.permission:not([hidden])) .log-list,
+.log:has(.permission:not([hidden])) .log-empty {
+  flex-shrink: 1000;
+  min-height: 0;
+}
+
+/* Its padding would hold it open; centred instead, it can shrink away to nothing. */
+.log:has(.permission:not([hidden])) .log-list:empty + .log-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-block: 0;
+  overflow: hidden;
+}
+
+/* Above her head there is little room: there the list makes way altogether. */
+body[data-fixed="true"] .log:has(.permission:not([hidden])) .log-list,
+body[data-fixed="true"] .log:has(.permission:not([hidden])) .log-empty {
+  display: none;
+}
+
+/* On a short screen even that is not enough for the command to be read before it is
+     answered, so the message box steps aside until the question is settled. */
+@media (max-height: 760px) {
+  body[data-fixed="true"] .log:has(.permission:not([hidden])) .log-ask {
+    display: none;
+  }
+}
+
+/* Suggestions of what to ask are put away while she is the one asking. */
+.log:has(.permission:not([hidden])) .chips {
+  display: none;
+}
+
+.log-ask {
+  flex: none;
+  padding: 9px 10px 10px;
+  border-top: 1.5px dashed var(--ink-soft);
+}
+
+.log-live:not([hidden]) + .log-ask {
+  border-top: 0;
+  padding-top: 2px;
+}
+
+/* ---------- buttons and the message box ---------- */
+
+.button {
+  padding: 5px 12px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.button:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.button:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+.button-primary {
+  background: var(--blush);
+}
+
+/* The message box. It floats over the stand at her feet, or sits at the foot of the
+   conversation panel while that is open. */
+.ask {
+  position: absolute;
+  right: 20px;
+  width: 404px;
+  bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.log-ask .ask {
+  position: static;
+  width: auto;
+}
+
+.ask-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 6px 6px 16px;
+  background: var(--paper);
+  border: var(--outline);
+  border-radius: 22px;
+  box-shadow: var(--drop);
+}
+
+.log-ask .ask-row {
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.ask-input {
+  flex: 1;
+  min-width: 0;
+  max-height: 7.6em;
+  padding: 4px 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  overflow-y: auto;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+}
+
+.ask-input::placeholder {
+  color: var(--ink-soft);
+}
+
+.ask-row:focus-within {
+  border-color: var(--ink);
+  box-shadow:
+    var(--drop),
+    0 0 0 3px var(--sky);
+}
+
+.log-ask .ask-row:focus-within {
+  box-shadow:
+    2px 2px 0 var(--ink),
+    0 0 0 3px var(--sky);
+}
+
+.ask-send {
+  box-shadow: none;
+}
+
+.ask-send:hover {
+  transform: none;
+  box-shadow: none;
+  background: #ff86b2;
+}
+
+/* A few things she really does, offered while the box is empty. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.chips:empty,
+.ask[data-typing="true"] .chips {
+  display: none;
+}
+
+.chip {
+  padding: 3px 11px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.88em;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.chip:hover {
+  background: var(--lemon);
+}
+
+/* A file held over the window: the whole window says it can be dropped. */
+body[data-dropping="true"] .stage-wrap::after {
+  content: "Drop it to give her the path";
+  position: absolute;
+  inset: 14px;
+  display: grid;
+  place-items: center;
+  border: 3px dashed var(--ink);
+  border-radius: 18px;
+  background: rgb(255 226 122 / 82%);
+  font-weight: 800;
+  text-align: center;
+  pointer-events: none;
+}
+
+button:focus-visible,
+a:focus-visible,
+.permission-detail:focus-visible {
+  outline: 3px solid var(--sky);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stand-in-body,
+  .stand-in-body span,
+  .activity-dots i,
+  .reply.is-streaming > :last-child::after,
+  .mic[data-state="starting"] {
+    animation: none;
+  }
+  .button:hover,
+  .button:active {
+    transform: none;
+  }
+}

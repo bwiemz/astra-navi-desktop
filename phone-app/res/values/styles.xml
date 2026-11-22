@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The colours of her page (src/core/stationPage.ts), so the app and the page are one thing. -->
+    <color name="sky">#59C8F5</color>
+    <color name="ink">#1B1F3B</color>
+    <color name="paper">#FFFDF6</color>
+    <color name="blush">#FF6FA3</color>
+    <color name="sun">#FFE27A</color>
+
+    <!-- What each is used for. values-night swaps these for the ones her page uses in the dark. -->
+    <color name="page">#59C8F5</color>
+    <color name="card">#FFFDF6</color>
+    <color name="text">#1B1F3B</color>
+    <color name="soft">#4D5279</color>
+    <color name="top">#1B1F3B</color>
+    <color name="top_text">#FFFDF6</color>
+    <bool name="night">false</bool>
+
+    <!--
+      The bar at the top of the phone takes the colour of her page's header and the one at
+      the bottom the colour of its composer, so the page runs edge to edge.
+    -->
+    <style name="Station" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/page</item>
+        <item name="android:statusBarColor">@color/top</item>
+        <item name="android:navigationBarColor">@color/card</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:colorAccent">@color/blush</item>
+        <item name="android:textColorPrimary">@color/text</item>
+    </style>
+</resources>

@@ -1,0 +1,58 @@
+{
+  "name": "ai-chan-desktop",
+  "version": "0.1.0",
+  "description": "Local-first desktop AI companion with 3D MMD avatar support (ships with original Astra Navi chibi character & BYO-MMD import), explicit permission gating, and an offline evaluation suite.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bwiemz/ai-chan-desktop.git"
+  },
+  "homepage": "https://github.com/bwiemz/ai-chan-desktop#readme",
+  "bugs": {
+    "url": "https://github.com/bwiemz/ai-chan-desktop/issues"
+  },
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron-vite preview",
+    "build": "electron-vite build",
+    "chat": "node scripts/chat.ts",
+    "eval": "node scripts/eval.ts",
+    "prompt-size": "node scripts/prompt-size.ts",
+    "route-check": "node scripts/route-check.ts",
+    "export-pairs": "node scripts/export-pairs.ts",
+    "idle-eval": "node scripts/idle-eval.ts",
+    "import-model": "electron-vite build && env -u ELECTRON_RUN_AS_NODE electron . --import-model",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run lint && npm run test",
+    "setup-voice": "bash scripts/setup-voice.sh",
+    "install-launcher": "bash scripts/install-launcher.sh"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
+    "electron": "^45.4.1",
+    "electron-vite": "^6.0.0",
+    "eslint": "^10.15.0",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.73.0",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^9.37.1",
+    "@fontsource/m-plus-rounded-1c": "^5.3.0",
+    "@huggingface/transformers": "^3.8.1",
+    "babylon-mmd": "^1.3.0",
+    "kokoro-js": "^1.2.1",
+    "node-llama-cpp": "^3.22.3",
+    "zod": "^4.6.7"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

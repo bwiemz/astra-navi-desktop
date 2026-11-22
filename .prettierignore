@@ -1,0 +1,6 @@
+out
+node_modules
+package-lock.json
+phone-app/build
+evals/results/*
+!evals/results/README.md

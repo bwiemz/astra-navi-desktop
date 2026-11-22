@@ -1,0 +1,32 @@
+node_modules/
+out/
+dist/
+*.log
+*.blend1
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# Keep third-party character model files out of git while shipping our original Astra Navi asset.
+model-src/
+*.pmx
+!assets/models/ai-navigator/ai-navigator.pmx
+*.pmd
+*.fbx
+*.vrm
+*.vmd
+*.vpd
+*.bpmx
+*.aichan
+
+# Excluded internal planning / evaluation documents
+docs/scorecard.md
+docs/ai chan plan.pdf
+docs/tier_10_architecture_and_technical_specification.md
+
+# The built phone app: made on each computer by scripts/build-android.sh.
+phone-app/build/
+
+# Reports from her test suite: made on each computer by `npm run eval`.
+evals/results/*
+!evals/results/README.md

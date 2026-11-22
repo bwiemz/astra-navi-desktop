@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AI-chan</string>
+    <string name="notice">AI-chan Desktop is an unofficial, non-commercial fan project. It is free and must never be sold. AI-chan, Honkai Impact 3rd and the character model are © miHoYo / HoYoverse. This project is not affiliated with, sponsored by or endorsed by miHoYo / HoYoverse.</string>
+    <string name="setup_title">Find her on your network</string>
+    <string name="fan_line">Unofficial fan project</string>
+    <string name="setup_step_1">On the PC, open her Settings and find \"Your other devices\".</string>
+    <string name="setup_step_2">Type the address shown there.</string>
+    <string name="setup_label">Her address</string>
+    <string name="setup_network">This phone has to be on the same home network as the PC.</string>
+    <string name="setup_browser">Already talking to her in this phone\'s browser? Open the menu on her page and choose \"Open it, paired\". That sets this up for you.</string>
+    <string name="setup_hint">192.168.1.20:47821</string>
+    <string name="setup_connect">Connect</string>
+    <string name="setup_bad_address">That does not look like her address. It is an address on your home network: four numbers with dots, a colon, and a port, like 192.168.1.20:47821.</string>
+    <string name="trust_title">Is this her?</string>
+    <string name="trust_before">The PC at %1$s answered with a certificate whose fingerprint ends in</string>
+    <string name="trust_after">Compare that with the ending shown in her Settings on the PC. Only go on if they match.</string>
+    <string name="link_before">A link asks this app to connect to the PC at %1$s, whose certificate fingerprint ends in</string>
+    <string name="link_after">Only go on if you just asked for this from her own page, and that ending is the one shown in her Settings on the PC.</string>
+    <string name="trust_yes">They match</string>
+    <string name="trust_no">Cancel</string>
+    <string name="mismatch_title">This is not the PC you paired with</string>
+    <string name="mismatch_words">Something at %1$s answered, but not with her certificate. Nothing was sent to it. If you set her up afresh on the PC, connect again from the start.</string>
+    <string name="unreachable_title">She cannot be reached</string>
+    <string name="unreachable_words">Nothing answered at %1$s. Check that the PC is on, that she is running with \"Let my other devices talk to her\" switched on, and that this phone is on the same network.</string>
+    <string name="try_again">Try again</string>
+    <string name="check_title">Open AI-chan</string>
+    <string name="check_keep_title">Let this phone open AI-chan</string>
+    <string name="check_sub">Unofficial fan project</string>
+    <string name="check_cancel">Use the password</string>
+    <string name="start_over">Connect from the start</string>
+    <string name="outbox_hint">Queue a message while away…</string>
+    <string name="outbox_queue">Queue for when back in range</string>
+    <string name="outbox_count_one">1 message queued to send</string>
+    <string name="outbox_count_many">%1$d messages queued to send</string>
+    <string name="alerts_channel_name">Standing-order alerts</string>
+    <string name="alerts_channel_desc">Notifications when a standing order condition triggers on your desktop.</string>
+    <string name="alerts_fallback_title">Standing order alert</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "perky",
+  "description": "A high, youthful female voice in the style of an energetic virtual idol or mascot character. Excited, expressive and quick, with an adorable, slightly nasal quality and lots of emphasis.",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "seed": 23
+}

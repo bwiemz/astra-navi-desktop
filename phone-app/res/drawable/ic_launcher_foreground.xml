@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A speech balloon with a four-point spark in it. Drawn for this app; not character art. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#1F2340"
+        android:pathData="M33,33h46a9,9 0 0 1 9,9v26a9,9 0 0 1 -9,9H55l-13,11v-11h-9a9,9 0 0 1 -9,-9V42a9,9 0 0 1 9,-9z" />
+    <path
+        android:fillColor="#FFFCF4"
+        android:pathData="M30,30h46a9,9 0 0 1 9,9v26a9,9 0 0 1 -9,9H52l-13,11v-11h-9a9,9 0 0 1 -9,-9V39a9,9 0 0 1 9,-9z"
+        android:strokeColor="#1F2340"
+        android:strokeWidth="3" />
+    <path
+        android:fillColor="#FF5C93"
+        android:pathData="M53,38l4,10l10,4l-10,4l-4,10l-4,-10l-10,-4l10,-4z"
+        android:strokeColor="#1F2340"
+        android:strokeLineJoin="round"
+        android:strokeWidth="2.5" />
+</vector>

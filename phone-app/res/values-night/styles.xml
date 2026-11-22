@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The phone is in its dark mode: the colours her page uses then. -->
+    <color name="page">#12152B</color>
+    <color name="card">#252A4D</color>
+    <color name="text">#F4F1E4</color>
+    <color name="soft">#B4B8D6</color>
+    <color name="top">#090B1A</color>
+    <color name="top_text">#FFFDF6</color>
+    <bool name="night">true</bool>
+
+    <!--
+      A dark parent, not only dark colours: it is the theme's own light-or-dark that tells
+      her page (through prefers-color-scheme) which of its two looks to wear.
+    -->
+    <style name="Station" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/page</item>
+        <item name="android:statusBarColor">@color/top</item>
+        <item name="android:navigationBarColor">@color/card</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:colorAccent">@color/blush</item>
+        <item name="android:textColorPrimary">@color/text</item>
+    </style>
+</resources>

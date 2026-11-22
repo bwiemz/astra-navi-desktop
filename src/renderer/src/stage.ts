@@ -1,0 +1,803 @@
+import "babylon-mmd/esm/Loader/pmxLoader";
+import "babylon-mmd/esm/Loader/pmdLoader";
+import "babylon-mmd/esm/Loader/mmdOutlineRenderer";
+
+import { FreeCamera } from "@babylonjs/core/Cameras/freeCamera";
+import { Engine } from "@babylonjs/core/Engines/engine";
+import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
+import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
+import { LoadAssetContainerAsync } from "@babylonjs/core/Loading/sceneLoader";
+import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
+import { Quaternion, Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { VertexBuffer } from "@babylonjs/core/Buffers/buffer";
+import type { Mesh } from "@babylonjs/core/Meshes/mesh";
+import { Scene } from "@babylonjs/core/scene";
+import { MmdStandardMaterialBuilder } from "babylon-mmd/esm/Loader/mmdStandardMaterialBuilder";
+import { SdefInjector } from "babylon-mmd/esm/Loader/sdefInjector";
+import type { IMmdRuntimeLinkedBone } from "babylon-mmd/esm/Runtime/IMmdRuntimeLinkedBone";
+import type { MmdModel } from "babylon-mmd/esm/Runtime/mmdModel";
+import { MmdRuntime } from "babylon-mmd/esm/Runtime/mmdRuntime";
+import { MmdStandardMaterialProxy } from "babylon-mmd/esm/Runtime/mmdStandardMaterialProxy";
+import { MmdWasmInstanceTypeSPR } from "babylon-mmd/esm/Runtime/Optimized/InstanceType/singlePhysicsRelease";
+import { GetMmdWasmInstance } from "babylon-mmd/esm/Runtime/Optimized/mmdWasmInstance";
+import { MultiPhysicsRuntime } from "babylon-mmd/esm/Runtime/Optimized/Physics/Bind/Impl/multiPhysicsRuntime";
+import { MmdBulletPhysics } from "babylon-mmd/esm/Runtime/Optimized/Physics/mmdBulletPhysics";
+import type { Mood } from "../../shared/ipc.ts";
+import {
+  sampleVisemeWeights,
+  VISEME_MORPH_CANDIDATES,
+  type VisemeFrame,
+  type VisemeWeights,
+  type VowelViseme,
+} from "../../shared/visemes.ts";
+
+/**
+ * Face shapes for each mood, using the standard MMD morph names. Each slot lists
+ * alternatives in order of preference, because models do not all carry the same set.
+ */
+const MOOD_FACES: Record<Mood, readonly (readonly [names: readonly string[], weight: number])[]> = {
+  neutral: [],
+  happy: [
+    [["口角上げ", "にっこり", "にこり口"], 0.7],
+    [["にこり"], 0.5],
+    [["笑い", "なごみ"], 0.3],
+  ],
+  excited: [
+    [["ワ", "わ", "あ２", "お1", "あ"], 0.6],
+    [["にこり"], 0.6],
+    [["上"], 0.3],
+  ],
+  thinking: [
+    [["真面目"], 0.45],
+    [["ん", "う"], 0.4],
+    [["じと目"], 0.25],
+  ],
+  surprised: [
+    [["びっくり"], 0.85],
+    [["上"], 0.6],
+    [["お", "□"], 0.55],
+  ],
+  worried: [
+    [["困る"], 0.8],
+    [["口角下げ", "∧"], 0.5],
+  ],
+  smug: [
+    [["にやり", "にやり２", "口角上げ"], 0.7],
+    [["じと目"], 0.4],
+    [["真面目"], 0.3],
+  ],
+  sad: [
+    [["困る"], 0.7],
+    [["口角下げ", "∧"], 0.7],
+    [["下"], 0.3],
+    [["まばたき"], 0.2],
+  ],
+};
+
+const BLINK_MORPH = "まばたき";
+const BROW_UP_MORPHS = ["上", "眉上"] as const;
+const SURPRISE_MORPHS = ["びっくり", "びっくり1"] as const;
+
+/**
+ * How often she is drawn. A figure standing still does not need the screen's full rate,
+ * and every frame she takes is one the graphics card is not giving to a game.
+ */
+const FRAMES_PER_SECOND = { lively: 60, idle: 20, asleep: 6 } as const;
+/** After something happens she stays at the lively rate this long, so easing finishes smoothly. */
+const LIVELY_FOR_MS = 2500;
+
+/** A short movement she makes once: its name and how long it lasts, in seconds. */
+const GESTURES = { nod: 0.9, shake: 1.0, perk: 0.7, wave: 2.0 } as const;
+export type Gesture = keyof typeof GESTURES;
+const TALK_MORPHS = ["あ", "a", "A"] as const;
+const DEG = Math.PI / 180;
+
+/** Moves a value toward its target at a rate that does not depend on the frame rate. */
+function approach(current: number, target: number, perSecond: number, dt: number): number {
+  return current + (target - current) * (1 - Math.exp(-perSecond * dt));
+}
+
+interface Rig {
+  model: MmdModel;
+  morphNames: ReadonlySet<string>;
+  bones: {
+    upper: IMmdRuntimeLinkedBone | null;
+    neck: IMmdRuntimeLinkedBone | null;
+    head: IMmdRuntimeLinkedBone | null;
+    eyes: IMmdRuntimeLinkedBone | null;
+    leftEye: IMmdRuntimeLinkedBone | null;
+    rightEye: IMmdRuntimeLinkedBone | null;
+    leftArm: IMmdRuntimeLinkedBone | null;
+    rightArm: IMmdRuntimeLinkedBone | null;
+    leftElbow: IMmdRuntimeLinkedBone | null;
+    rightElbow: IMmdRuntimeLinkedBone | null;
+  };
+  talkMorph: string | null;
+  visemeMorphs: Record<VowelViseme, string | null>;
+  visemeWeights: VisemeWeights;
+  /** Everything the loader created for this model, so it can all be released together. */
+  dispose(): void;
+  /** Morph weights currently applied for the mood, eased toward their targets. */
+  face: Map<string, number>;
+}
+
+/** The 3D character: loads the model and keeps it alive with small procedural motion. */
+export class Stage {
+  private readonly canvas: HTMLCanvasElement;
+  private readonly engine: Engine;
+  private readonly scene: Scene;
+  private readonly camera: FreeCamera;
+  private readonly mmdRuntime: MmdRuntime;
+  private readonly hasPhysics: boolean;
+  private rig: Rig | null = null;
+  private loadToken = 0;
+
+  private mood: Mood = "neutral";
+  private thinking = false;
+  private talkUntil = 0;
+  private talkLevel = 0;
+  /** Loudness of her spoken voice right now, or null when she is not speaking aloud. */
+  private voiceLevel: number | null = null;
+  private mouthOpen = 0;
+  private visemeTrack: {
+    frames: readonly VisemeFrame[];
+    startedAtMs: number;
+    totalDurationMs: number;
+  } | null = null;
+  private clock = 0;
+  private nextBlinkAt = 2;
+  private blinkStartedAt = -1;
+  private gaze = { x: 0, y: 0 };
+  private gazeTarget = { x: 0, y: 0 };
+  private tilt = 0;
+  private lookUp = 0;
+  /** 0 awake to 1 asleep, eased. */
+  private sleep = 0;
+  private asleep = false;
+  /** 0 to 1 while she is listening to someone speak, eased. */
+  private attention = 0;
+  private listening = false;
+  private gesture: { kind: Gesture; startedAt: number } | null = null;
+  /** A start that fades by itself: used when she is woken. */
+  private startle = 0;
+  private visible = true;
+  private livelyUntil = 0;
+  private breathingScale = 1;
+  private talkGestureScale = 1;
+  private paralinguisticTarget = { leanForward: 0, headTiltDeg: 0, energyScale: 1 };
+  private paralinguistic = { leanForward: 0, headTiltDeg: 0, energyScale: 1 };
+  private lastFrameAt = 0;
+  private frameRequest = 0;
+  private framesDrawn = 0;
+  private countedSince = 0;
+
+  /** Sets up the scene. Hair and cloth physics are loaded first; the character still works without them. */
+  static async create(canvas: HTMLCanvasElement): Promise<Stage> {
+    const engine = new Engine(canvas, true, {
+      alpha: true,
+      premultipliedAlpha: true,
+      stencil: true,
+      preserveDrawingBuffer: false,
+      powerPreference: "low-power",
+    });
+    // Lets the loader's spherical deformation (smoother elbows and knees) work.
+    SdefInjector.OverrideEngineCreateEffect(engine);
+    const scene = new Scene(engine);
+    let physics: MmdBulletPhysics | null = null;
+    try {
+      const wasm = await GetMmdWasmInstance(new MmdWasmInstanceTypeSPR());
+      const physicsRuntime = new MultiPhysicsRuntime(wasm);
+      physicsRuntime.setGravity(new Vector3(0, -98, 0));
+      physicsRuntime.register(scene);
+      physics = new MmdBulletPhysics(physicsRuntime);
+    } catch (error) {
+      console.warn("Physics engine did not load; hair and cloth will not move.", error);
+    }
+    return new Stage(canvas, engine, scene, physics);
+  }
+
+  private constructor(
+    canvas: HTMLCanvasElement,
+    engine: Engine,
+    scene: Scene,
+    physics: MmdBulletPhysics | null,
+  ) {
+    this.canvas = canvas;
+    this.engine = engine;
+    this.scene = scene;
+    this.hasPhysics = physics !== null;
+    this.scene.clearColor = new Color4(0, 0, 0, 0);
+    this.scene.ambientColor = new Color3(0.5, 0.5, 0.5);
+
+    this.camera = new FreeCamera("camera", new Vector3(0, 10, -45), this.scene);
+    this.camera.fov = 20 * DEG;
+    this.camera.minZ = 1;
+    this.camera.maxZ = 500;
+    this.camera.setTarget(new Vector3(0, 10, 0));
+
+    const sky = new HemisphericLight("sky", new Vector3(0, 1, 0), this.scene);
+    sky.intensity = 0.35;
+    const sun = new DirectionalLight("sun", new Vector3(0.4, -1, 1), this.scene);
+    sun.intensity = 0.85;
+
+    this.mmdRuntime = new MmdRuntime(this.scene, physics);
+    // Our motion has to be written to the bones before the runtime reads them each frame.
+    this.scene.onBeforeAnimationsObservable.add(() => this.animate());
+    this.mmdRuntime.register(this.scene);
+
+    this.frameRequest = requestAnimationFrame(this.tick);
+    new ResizeObserver(() => {
+      this.engine.resize();
+      this.stir();
+    }).observe(canvas);
+  }
+
+  get hasModel(): boolean {
+    return this.rig !== null;
+  }
+
+  /**
+   * The drawing loop. It runs at the screen's rate but only draws when a frame is due:
+   * sixty a second while something is happening, far fewer while she just stands
+   * there, and none at all while her window is hidden.
+   */
+  private readonly tick = (now: number): void => {
+    this.frameRequest = this.visible ? requestAnimationFrame(this.tick) : 0;
+    const pace =
+      this.asleep && now > this.livelyUntil ? "asleep" : now < this.livelyUntil ? "lively" : "idle";
+    // A little slack, or a frame that arrives a hair early would be skipped and the rate halved.
+    if (now - this.lastFrameAt < 1000 / FRAMES_PER_SECOND[pace] - 2) return;
+    this.lastFrameAt = now;
+    this.engine.beginFrame();
+    this.scene.render();
+    this.engine.endFrame();
+    // For checking the pacing: how many frames were really drawn, every ten seconds.
+    this.framesDrawn += 1;
+    if (now - this.countedSince >= 10_000) {
+      console.debug(
+        `[stage] ${(this.framesDrawn / ((now - this.countedSince) / 1000)).toFixed(1)} frames a second (${pace})`,
+      );
+      this.framesDrawn = 0;
+      this.countedSince = now;
+    }
+  };
+
+  /** Something is happening: draw at the full rate for a little while. */
+  private stir(): void {
+    this.livelyUntil = performance.now() + LIVELY_FOR_MS;
+  }
+
+  /** Stops drawing while her window cannot be seen, and picks up again when it can. */
+  setVisible(visible: boolean): void {
+    if (visible === this.visible) return;
+    this.visible = visible;
+    if (visible && this.frameRequest === 0) {
+      this.stir();
+      this.frameRequest = requestAnimationFrame(this.tick);
+    }
+  }
+
+  setMood(mood: Mood): void {
+    if (mood !== this.mood) this.stir();
+    this.mood = mood;
+    if (mood === "excited") this.play("perk");
+  }
+
+  setThinking(thinking: boolean): void {
+    if (thinking !== this.thinking) this.stir();
+    this.thinking = thinking;
+  }
+
+  /** Call whenever new words arrive; the mouth keeps moving for a moment afterwards. */
+  talk(): void {
+    this.talkUntil = this.clock + 0.35;
+    this.stir();
+  }
+
+  /** Drives her mouth from the sound of her voice. Pass null when she stops speaking. */
+  setVoiceLevel(level: number | null): void {
+    this.voiceLevel = level;
+    if (level !== null) this.stir();
+  }
+
+  /** Drives multi-vowel lip-sync from time-aligned phoneme visemes synchronized to audio playback. */
+  setVisemes(frames: readonly VisemeFrame[], startedAtMs = performance.now()): void {
+    if (frames.length === 0) {
+      this.clearVisemes();
+      return;
+    }
+    const last = frames[frames.length - 1];
+    const totalDurationMs = last ? last.timeMs + last.durationMs : 0;
+    this.visemeTrack = { frames: [...frames], startedAtMs, totalDurationMs };
+    this.stir();
+  }
+
+  /** Clears active viseme track cleanly (for barge-in interruption or end of speech). */
+  clearVisemes(): void {
+    this.visemeTrack = null;
+  }
+
+  /** Where to look, each axis from -1 to 1 across the window. */
+  lookAt(x: number, y: number): void {
+    this.gazeTarget = { x: Math.max(-1, Math.min(1, x)), y: Math.max(-1, Math.min(1, y)) };
+    this.stir();
+  }
+
+  /** Maps normalized [0..1] screen coordinates from vision/input onto directional eye and head gaze. */
+  setScreenGaze(normX: number, normY: number): void {
+    const nx = Math.max(0, Math.min(1, normX));
+    const ny = Math.max(0, Math.min(1, normY));
+    this.lookAt((nx - 0.5) * 2, (0.5 - ny) * 2);
+  }
+
+  /** She leans in and pays attention while someone is speaking to her. */
+  setListening(listening: boolean): void {
+    if (listening !== this.listening) this.stir();
+    this.listening = listening;
+  }
+
+  /**
+   * Asleep is how she looks while her brain is put away to give the graphics card back:
+   * eyes closed, head down, breathing slowly. Waking is a small start, then herself again.
+   */
+  setAsleep(asleep: boolean): void {
+    if (asleep === this.asleep) return;
+    this.asleep = asleep;
+    if (!asleep) this.startle = 1;
+    this.stir();
+  }
+
+  /** Makes one short movement: a nod, a shake of the head, a little bounce, a wave. */
+  play(kind: Gesture): void {
+    this.gesture = { kind, startedAt: this.clock };
+    this.livelyUntil = performance.now() + GESTURES[kind] * 1000 + LIVELY_FOR_MS;
+  }
+
+  /** Applies paralinguistic posture hints from native S2S audio analysis. */
+  setParalinguisticPosture(hint: {
+    leanForward: number;
+    headTiltDeg: number;
+    energyScale: number;
+  }): void {
+    this.paralinguisticTarget = {
+      leanForward: Math.max(-1, Math.min(1, hint.leanForward)),
+      headTiltDeg: Math.max(-12, Math.min(12, hint.headTiltDeg)),
+      energyScale: Math.max(0.6, Math.min(1.6, hint.energyScale)),
+    };
+    this.stir();
+  }
+
+  /** Applies custom mmdStandard/mmdOutline shader presets from a signed character `.bundle`. */
+  applyShaderPreset(preset: {
+    outlineWidth?: number;
+    outlineColor?: string;
+    specularScale?: number;
+  }): void {
+    for (const mat of this.scene.materials) {
+      const mmdMat = mat as unknown as {
+        outlineWidth?: number;
+        outlineColor?: Color3;
+        specularPower?: number;
+      };
+      if (typeof preset.outlineWidth === "number" && typeof mmdMat.outlineWidth === "number") {
+        mmdMat.outlineWidth = preset.outlineWidth;
+      }
+      if (preset.outlineColor && mmdMat.outlineColor instanceof Color3) {
+        mmdMat.outlineColor = Color3.FromHexString(preset.outlineColor);
+      }
+      if (typeof preset.specularScale === "number" && typeof mmdMat.specularPower === "number") {
+        mmdMat.specularPower = Math.max(1, 32 * preset.specularScale);
+      }
+    }
+    this.stir();
+  }
+
+  /** Applies idle breathing and speech gesture scale presets from a character `.bundle`. */
+  applyAnimationPreset(preset: {
+    breathingAmplitude?: number;
+    talkGestureScale?: number;
+  }): void {
+    if (typeof preset.breathingAmplitude === "number") {
+      this.breathingScale = Math.max(0.2, Math.min(2, preset.breathingAmplitude));
+    }
+    if (typeof preset.talkGestureScale === "number") {
+      this.talkGestureScale = Math.max(0.2, Math.min(2, preset.talkGestureScale));
+    }
+    this.stir();
+  }
+
+  /** Removes the current model, if any. */
+  clearModel(): void {
+    this.loadToken += 1;
+    const rig = this.rig;
+    this.rig = null;
+    if (!rig) return;
+    this.mmdRuntime.destroyMmdModel(rig.model);
+    rig.dispose();
+  }
+
+  /** Loads a model. Resolves to false when a newer load or a removal overtook this one. */
+  async loadModel(url: string): Promise<boolean> {
+    this.clearModel();
+    const token = this.loadToken;
+
+    const container = await LoadAssetContainerAsync(url, this.scene, {
+      pluginExtension: url.toLowerCase().endsWith(".pmd") ? ".pmd" : ".pmx",
+      // Passed explicitly: without a builder the loader produces meshes with no materials.
+      pluginOptions: { mmdmodel: { materialBuilder: new MmdStandardMaterialBuilder() } },
+    });
+    if (token !== this.loadToken) {
+      container.dispose();
+      return false;
+    }
+    container.addAllToScene();
+    const mesh = container.meshes[0] as Mesh | undefined;
+
+    let model: MmdModel;
+    try {
+      if (!mesh) throw new Error("The model file contains no mesh.");
+      try {
+        model = this.mmdRuntime.createMmdModel(mesh, {
+          materialProxyConstructor: MmdStandardMaterialProxy,
+          buildPhysics: this.hasPhysics,
+        });
+      } catch (error) {
+        console.warn(
+          "Hair and cloth physics could not be set up for this model; showing it without.",
+          error,
+        );
+        model = this.mmdRuntime.createMmdModel(mesh, {
+          materialProxyConstructor: MmdStandardMaterialProxy,
+          buildPhysics: false,
+        });
+      }
+    } catch (error) {
+      container.dispose();
+      throw error;
+    }
+
+    const bone = (...names: string[]): IMmdRuntimeLinkedBone | null => {
+      for (const name of names) {
+        const found = model.runtimeBones.find((candidate) => candidate.name === name);
+        if (found) return found.linkedBone;
+      }
+      return null;
+    };
+    const morphNames = new Set(model.morph.morphs.map((morph) => morph.name));
+    const visemeMorph = (key: VowelViseme): string | null =>
+      VISEME_MORPH_CANDIDATES[key].find((name) => morphNames.has(name)) ?? null;
+    this.rig = {
+      model,
+      morphNames,
+      bones: {
+        upper: bone("上半身"),
+        neck: bone("首"),
+        head: bone("頭"),
+        eyes: bone("両目"),
+        leftEye: bone("左目"),
+        rightEye: bone("右目"),
+        leftArm: bone("左腕"),
+        rightArm: bone("右腕"),
+        leftElbow: bone("左ひじ"),
+        rightElbow: bone("右ひじ"),
+      },
+      talkMorph: TALK_MORPHS.find((name) => morphNames.has(name)) ?? null,
+      visemeMorphs: {
+        A: visemeMorph("A"),
+        I: visemeMorph("I"),
+        U: visemeMorph("U"),
+        E: visemeMorph("E"),
+        O: visemeMorph("O"),
+      },
+      visemeWeights: { A: 0, I: 0, U: 0, E: 0, O: 0 },
+      face: new Map(),
+      dispose: () => container.dispose(),
+    };
+    this.frame(mesh);
+    console.info(
+      `Model loaded: ${model.runtimeBones.length} bones, ${morphNames.size} morphs, physics ${this.hasPhysics ? "on" : "off"}.`,
+      `Face morphs available: ${[...morphNames].join(" ")}`,
+    );
+    return true;
+  }
+
+  /** Developer aid: scene numbers plus a picture of the canvas as it is right now. */
+  debugSnapshot(): { info: Record<string, unknown>; image: string } {
+    this.engine.beginFrame();
+    this.scene.render();
+    this.engine.endFrame();
+    const image = this.canvas.toDataURL("image/png");
+    return {
+      image,
+      info: {
+        canvas: [this.canvas.width, this.canvas.height],
+        cameraPosition: this.camera.position.asArray(),
+        cameraTarget: this.camera.getTarget().asArray(),
+        meshes: this.scene.meshes.length,
+        activeMeshes: this.scene.getActiveMeshes().length,
+        materials: this.scene.materials.length,
+        texturesReady: this.scene.textures.filter((texture) => texture.isReady()).length,
+        textures: this.scene.textures.length,
+        multiMaterials: this.scene.multiMaterials.length,
+        activeCamera: this.scene.activeCamera?.name ?? null,
+        sample: this.scene.meshes.slice(0, 6).map((mesh) => ({
+          name: mesh.name,
+          cls: mesh.getClassName(),
+          material: mesh.material ? `${mesh.material.getClassName()}:${mesh.material.name}` : null,
+          materialReady: mesh.material?.isReady(mesh) ?? null,
+          alpha: mesh.material?.alpha ?? null,
+          visible: mesh.isVisible,
+          enabled: mesh.isEnabled(),
+          vertices: mesh.getTotalVertices(),
+          subMeshes: mesh.subMeshes?.length ?? 0,
+          ready: mesh.isReady(),
+          abs: mesh.getAbsolutePosition().asArray(),
+        })),
+      },
+    };
+  }
+
+  /** Points the camera so the whole figure fills the canvas with a little headroom. */
+  private frame(mesh: Mesh): void {
+    // Measure the figure from its vertices; bounding boxes are padded for physics.
+    let bottom = Infinity;
+    let top = -Infinity;
+    let left = Infinity;
+    let right = -Infinity;
+    for (const part of [mesh, ...mesh.getChildMeshes()]) {
+      const positions = part.getVerticesData(VertexBuffer.PositionKind);
+      if (!positions) continue;
+      for (let i = 0; i < positions.length; i += 3) {
+        const x = positions[i] ?? 0;
+        const y = positions[i + 1] ?? 0;
+        if (y < bottom) bottom = y;
+        if (y > top) top = y;
+        if (x < left) left = x;
+        if (x > right) right = x;
+      }
+    }
+    if (!Number.isFinite(bottom) || !Number.isFinite(top)) {
+      bottom = 0;
+      top = 20;
+      left = -5;
+      right = 5;
+    }
+    const height = Math.max(1, top - bottom);
+    const centerX = (left + right) / 2;
+    const centerY = bottom + height / 2;
+    const distance = (height * 0.56) / Math.tan(this.camera.fov / 2);
+    this.camera.position = new Vector3(centerX, centerY, -distance);
+    this.camera.setTarget(new Vector3(centerX, centerY, 0));
+    this.camera.maxZ = distance * 3;
+  }
+
+  private animate(): void {
+    const dt = Math.min(0.1, this.engine.getDeltaTime() / 1000);
+    this.clock += dt;
+    const rig = this.rig;
+    if (!rig) return;
+    const t = this.clock;
+
+    // --- face ---------------------------------------------------------------
+    const targets = new Map<string, number>();
+    const mood: Mood = this.thinking && this.mood === "neutral" ? "thinking" : this.mood;
+    for (const [names, weight] of MOOD_FACES[mood]) {
+      const name = names.find((candidate) => rig.morphNames.has(candidate));
+      if (name) targets.set(name, weight);
+    }
+    for (const name of new Set([...rig.face.keys(), ...targets.keys()])) {
+      const next = approach(rig.face.get(name) ?? 0, targets.get(name) ?? 0, 7, dt);
+      if (next < 0.002 && !targets.has(name)) {
+        rig.face.delete(name);
+        rig.model.morph.setMorphWeight(name, 0);
+      } else {
+        rig.face.set(name, next);
+      }
+    }
+
+    this.sleep = approach(this.sleep, this.asleep ? 1 : 0, this.asleep ? 1.2 : 5, dt);
+    this.attention = approach(this.attention, this.listening && !this.asleep ? 1 : 0, 5, dt);
+    this.startle = approach(this.startle, 0, 2.5, dt);
+
+    // One-off movements, each a curve from 0 to 1 over its length.
+    let nod = 0;
+    let shake = 0;
+    let perk = 0;
+    let wave = 0;
+    let waveSwing = 0;
+    if (this.gesture) {
+      const phase = (t - this.gesture.startedAt) / GESTURES[this.gesture.kind];
+      if (phase >= 1) this.gesture = null;
+      else {
+        const envelope = Math.sin(phase * Math.PI);
+        if (this.gesture.kind === "nod") nod = Math.sin(phase * Math.PI * 4) * envelope;
+        if (this.gesture.kind === "shake") shake = Math.sin(phase * Math.PI * 5) * envelope;
+        if (this.gesture.kind === "perk") perk = envelope;
+        if (this.gesture.kind === "wave") {
+          // Up quickly, wave, down again.
+          wave = Math.min(1, phase * 5, (1 - phase) * 5);
+          waveSwing = Math.sin(phase * Math.PI * 7) * wave;
+        }
+      }
+    }
+
+    if (this.blinkStartedAt < 0 && t >= this.nextBlinkAt) this.blinkStartedAt = t;
+    let blink = 0;
+    if (this.blinkStartedAt >= 0) {
+      const phase = (t - this.blinkStartedAt) / 0.2;
+      if (phase >= 1) {
+        this.blinkStartedAt = -1;
+        this.nextBlinkAt = t + 1.8 + Math.random() * 4.2;
+      } else {
+        blink = Math.sin(phase * Math.PI);
+      }
+    }
+
+    this.talkLevel = approach(this.talkLevel, t < this.talkUntil ? 1 : 0, 14, dt);
+    // With a real voice the mouth follows its loudness or phoneme visemes; otherwise it flaps while text arrives.
+    let targetVisemes: VisemeWeights = { A: 0, I: 0, U: 0, E: 0, O: 0 };
+    if (this.visemeTrack) {
+      const elapsedMs = Math.max(0, performance.now() - this.visemeTrack.startedAtMs);
+      if (elapsedMs > this.visemeTrack.totalDurationMs + 150) {
+        this.visemeTrack = null;
+      } else {
+        targetVisemes = sampleVisemeWeights(this.visemeTrack.frames, elapsedMs);
+      }
+    }
+    const visemeKeys: readonly VowelViseme[] = ["A", "I", "U", "E", "O"];
+    for (const key of visemeKeys) {
+      rig.visemeWeights[key] = approach(rig.visemeWeights[key], targetVisemes[key], 28, dt);
+    }
+    const visemesDriving =
+      this.visemeTrack !== null ||
+      visemeKeys.some((key) => rig.visemeWeights[key] > 0.015);
+
+    const wanted =
+      this.voiceLevel !== null
+        ? this.voiceLevel * 0.75
+        : this.talkLevel * (0.2 + 0.4 * Math.abs(Math.sin(t * 13.5) * Math.sin(t * 5.1 + 1)));
+    this.mouthOpen = approach(this.mouthOpen, wanted, 30, dt);
+    const mouth = this.mouthOpen;
+
+    const applied = new Map(rig.face);
+    if (rig.morphNames.has(BLINK_MORPH)) {
+      // Asleep, her eyes stay closed; otherwise they only blink.
+      applied.set(BLINK_MORPH, Math.max(applied.get(BLINK_MORPH) ?? 0, blink, this.sleep));
+    }
+    const browUp = BROW_UP_MORPHS.find((name) => rig.morphNames.has(name));
+    if (browUp && this.attention > 0.01) {
+      applied.set(browUp, Math.max(applied.get(browUp) ?? 0, this.attention * 0.3));
+    }
+    const surprise = SURPRISE_MORPHS.find((name) => rig.morphNames.has(name));
+    if (surprise && this.startle > 0.02) {
+      applied.set(surprise, Math.max(applied.get(surprise) ?? 0, this.startle * 0.7));
+    } else if (surprise && !rig.face.has(surprise)) {
+      applied.set(surprise, 0);
+    }
+    if (browUp && this.attention <= 0.01 && !rig.face.has(browUp)) applied.set(browUp, 0);
+    if (visemesDriving) {
+      for (const key of visemeKeys) {
+        const morphName = rig.visemeMorphs[key];
+        if (!morphName) continue;
+        applied.set(morphName, Math.max(applied.get(morphName) ?? 0, rig.visemeWeights[key]));
+      }
+    } else {
+      for (const key of visemeKeys) {
+        const morphName = rig.visemeMorphs[key];
+        if (morphName && !rig.face.has(morphName)) applied.set(morphName, 0);
+      }
+      if (rig.talkMorph) applied.set(rig.talkMorph, Math.max(applied.get(rig.talkMorph) ?? 0, mouth));
+    }
+    for (const [name, weight] of applied) rig.model.morph.setMorphWeight(name, weight);
+
+    // --- body ---------------------------------------------------------------
+    // Asleep she does not follow the pointer.
+    const awake = 1 - this.sleep;
+    this.gaze.x = approach(this.gaze.x, this.gazeTarget.x * awake, 4, dt);
+    this.gaze.y = approach(this.gaze.y, this.gazeTarget.y * awake, 4, dt);
+    this.tilt = approach(this.tilt, mood === "thinking" ? 1 : 0, 3, dt);
+    this.lookUp = approach(this.lookUp, mood === "thinking" ? 1 : mood === "sad" ? -1 : 0, 3, dt);
+
+    // Slower, deeper breathing in sleep, and she stops shifting about.
+    this.paralinguistic.leanForward = approach(
+      this.paralinguistic.leanForward,
+      this.paralinguisticTarget.leanForward,
+      4,
+      dt,
+    );
+    this.paralinguistic.headTiltDeg = approach(
+      this.paralinguistic.headTiltDeg,
+      this.paralinguisticTarget.headTiltDeg,
+      4,
+      dt,
+    );
+    this.paralinguistic.energyScale = approach(
+      this.paralinguistic.energyScale,
+      this.paralinguisticTarget.energyScale,
+      4,
+      dt,
+    );
+    const breath =
+      Math.sin(t * (1.7 - 0.8 * this.sleep)) *
+      (1 + 0.8 * this.sleep) *
+      this.breathingScale *
+      this.paralinguistic.energyScale;
+    const sway = Math.sin(t * 0.53) * awake * this.talkGestureScale;
+    const drift = Math.sin(t * 0.31 + 1.3) * awake;
+    // In this rig a positive pitch tips backwards, so leaning in and drooping are negative.
+    const lean =
+      -this.attention * 3 - this.paralinguistic.leanForward * 4 * awake + perk * 2 - this.sleep * 4;
+
+    const { upper, neck, head, eyes, leftEye, rightEye, leftArm, rightArm, leftElbow, rightElbow } =
+      rig.bones;
+    const eyeRotation = Quaternion.RotationYawPitchRoll(
+      this.gaze.x * 8 * DEG * awake,
+      this.gaze.y * 6 * DEG * awake,
+      0,
+    );
+    if (eyes) {
+      eyes.rotationQuaternion = eyeRotation;
+    } else {
+      if (leftEye) leftEye.rotationQuaternion = eyeRotation.clone();
+      if (rightEye) rightEye.rotationQuaternion = eyeRotation.clone();
+    }
+    if (upper) {
+      upper.rotationQuaternion = Quaternion.RotationYawPitchRoll(
+        sway * 1.2 * DEG + this.gaze.x * 3 * DEG,
+        breath * 0.7 * DEG + lean * DEG,
+        drift * 0.8 * DEG,
+      );
+    }
+    if (neck) {
+      neck.rotationQuaternion = Quaternion.RotationYawPitchRoll(
+        this.gaze.x * 6 * DEG,
+        this.gaze.y * 3 * DEG,
+        0,
+      );
+    }
+    if (head) {
+      head.rotationQuaternion = Quaternion.RotationYawPitchRoll(
+        this.gaze.x * 10 * DEG + sway * 1.5 * DEG + shake * 12 * DEG,
+        this.gaze.y * 7 * DEG +
+          this.lookUp * 6 * DEG * awake -
+          breath * 0.5 * DEG -
+          nod * 9 * DEG -
+          this.sleep * 20 * DEG +
+          this.startle * 6 * DEG,
+        this.tilt * 9 * DEG * awake +
+          this.paralinguistic.headTiltDeg * DEG * awake +
+          drift * 1.5 * DEG +
+          this.attention * 5 * DEG +
+          this.sleep * 6 * DEG,
+      );
+    }
+    // MMD models rest with their arms held out at an angle. Standing at ease, her upper arms
+    // come down to her sides and her elbows give a little, forearms a touch forward and in,
+    // so her hands hang by her hips behind the drums she wears there. (Much further down and
+    // the forearms pass through those drums; this was set by eye, from the front and the side.)
+    const armDrop = 36 * DEG + breath * 0.6 * DEG - perk * 7 * DEG;
+    const elbowForward = 14 * DEG + breath * 0.8 * DEG;
+    const elbowIn = 8 * DEG;
+    // Her right arm leaves that pose to wave and comes back to it.
+    const atEase = 1 - wave;
+    if (leftArm) leftArm.rotationQuaternion = Quaternion.RotationYawPitchRoll(0, 0, -armDrop);
+    if (leftElbow) {
+      leftElbow.rotationQuaternion = Quaternion.RotationYawPitchRoll(elbowForward, 0, -elbowIn);
+    }
+    // To wave, her right arm comes up past the shoulder and the forearm swings.
+    if (rightArm) {
+      rightArm.rotationQuaternion = Quaternion.RotationYawPitchRoll(
+        wave * -15 * DEG,
+        0,
+        armDrop - wave * 86 * DEG, // as high as it always went: 50 degrees above its rest
+      );
+    }
+    if (rightElbow) {
+      rightElbow.rotationQuaternion = Quaternion.RotationYawPitchRoll(
+        -elbowForward * atEase,
+        0,
+        elbowIn * atEase + wave * (-70 + waveSwing * 28) * DEG,
+      );
+    }
+  }
+}
