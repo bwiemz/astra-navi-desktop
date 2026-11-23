@@ -373,6 +373,7 @@ describe("PlatformAdapter & Windows/Linux backends", () => {
       };
 
       const sight = new Sight(dir, dir, { adapter: spyAdapter });
+      vi.spyOn(sight, "read").mockResolvedValue({ description: "mocked", text: "" });
       await expect(sight.lookAtScreen()).resolves.toBeDefined();
       expect(customScreen).toHaveBeenCalledTimes(1);
 

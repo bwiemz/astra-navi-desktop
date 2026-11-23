@@ -6,12 +6,34 @@ on:
   pull_request:
 
 jobs:
-  verify:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  verify-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install Linux test CLI tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils fd-find ripgrep
+          sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npm run eval -- --fuzz
+      - run: npm run eval -- --audit
+      - run: npm run prompt-size -- --ci
+      - run: npm run route-check -- --words-only
+      - run: npm run package:dry
+      - run: npm run publish:dry
+
+  verify-windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -21,12 +43,29 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npm run check
+      - run: npm run typecheck
+      - run: npm run lint
       - run: npm run build
       - run: npm run eval -- --fuzz
       - run: npm run eval -- --audit
       - run: npm run prompt-size -- --ci
       - run: npm run route-check -- --words-only
+      - run: npm run package:dry
+      - run: npm run publish:dry
+      - name: Run Windows & cross-platform Vitest suites
+        run: >
+          npx vitest run
+          tests/platformAdapter.test.ts
+          tests/semanticBridge.test.ts
+          tests/bootstrap.test.ts
+          tests/editionSplit.test.ts
+          tests/onboardingSettings.test.ts
+          tests/customModel.test.ts
+          tests/persona.test.ts
+          tests/fuzz.test.ts
+          tests/evalWorld.test.ts
+          tests/dryRun.test.ts
+          tests/permissions.test.ts
 
   win-hands-native:
     runs-on: windows-latest

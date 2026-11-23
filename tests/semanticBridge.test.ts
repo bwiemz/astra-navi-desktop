@@ -112,7 +112,10 @@ describe("Semantic bridges: PipeWire, LSP, Browser DOM, KWin", () => {
 
   it("queries NativeBrowserDomClient over local IPC socket and builds cross-platform host manifests", async () => {
     const dir = await mkdtemp(join(tmpdir(), "astranavi-dom-"));
-    const sock = join(dir, "dom.sock");
+    const sock =
+      process.platform === "win32"
+        ? `\\\\.\\pipe\\astranavi-dom-test-${process.pid}-${Date.now()}`
+        : join(dir, "dom.sock");
     const server = createServer((conn) => {
       conn.on("data", (chunk: Buffer) => {
         const { messages } = decodeNativeMessages(chunk);

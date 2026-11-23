@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { BlockList, isIP } from "node:net";
 import { homedir } from "node:os";
@@ -52,18 +53,42 @@ export const SENSITIVE_REASON =
 export const BROAD_REASON =
   "This reaches across folders where passwords, keys or sign-in data are kept.";
 
+function canonicalSync(path: string): string {
+  if (!isAbsolute(path)) return path;
+  let current = path;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...tail);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return path;
+      tail.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function normalizeComparePath(path: string): string {
+  const canon = canonicalSync(path).split(sep).join("/").replace(/\/+$/, "") || "/";
+  return process.platform === "win32" ? canon.toLowerCase() : canon;
+}
+
 export function isSensitivePath(path: string): boolean {
-  const normalized = path.split(sep).join("/");
+  const normalized = path.split(sep).join("/").replace(/^[a-zA-Z]:(?=\/)/, "");
   return SENSITIVE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 /** As `isSensitivePath`, and also true inside her own data folders, wherever those are. */
 export function isPrivatePath(path: string, context: PolicyContext): boolean {
   if (isSensitivePath(path)) return true;
-  const normalized = path.split(sep).join("/").replace(/\/+$/, "");
+  const normalized = normalizeComparePath(path);
   return (context.privateDirs ?? []).some((dir) => {
-    const folder = dir.split(sep).join("/").replace(/\/+$/, "");
-    return folder.length > 1 && (normalized === folder || normalized.startsWith(`${folder}/`));
+    const folder = normalizeComparePath(dir);
+    return (
+      folder.replace(/^[a-z]:(?=\/|$)/i, "").length > 1 &&
+      (normalized === folder || normalized.startsWith(`${folder}/`))
+    );
   });
 }
 
@@ -72,22 +97,20 @@ export function isPrivatePath(path: string, context: PolicyContext): boolean {
  * the home folder and everything above it, and the folders where apps keep their data.
  */
 export function isBroadPath(path: string, home: string): boolean {
-  const normalized = path.split(sep).join("/").replace(/\/+$/, "") || "/";
-  const homeDir = home.split(sep).join("/").replace(/\/+$/, "");
-  if (normalized === "/" || normalized === homeDir || homeDir.startsWith(`${normalized}/`))
+  const normalized = normalizeComparePath(path);
+  const homeDir = normalizeComparePath(home);
+  const posixNorm = normalized.replace(/^[a-z]:(?=\/|$)/i, "") || "/";
+  if (posixNorm === "/" || normalized === homeDir || homeDir.startsWith(`${normalized}/`))
     return true;
-  return [
-    `${homeDir}/.config`,
-    `${homeDir}/.local`,
-    `${homeDir}/.local/share`,
-    `${homeDir}/.var`,
-    "/etc",
-    "/proc",
-    "/root",
-    "/var",
-    "/run",
-    "/run/user",
-  ].includes(normalized);
+  return (
+    [
+      `${homeDir}/.config`,
+      `${homeDir}/.local`,
+      `${homeDir}/.local/share`,
+      `${homeDir}/.var`,
+    ].includes(normalized) ||
+    ["/etc", "/proc", "/root", "/var", "/run", "/run/user"].includes(posixNorm)
+  );
 }
 
 function expandHome(path: string, home: string): string {
@@ -119,7 +142,9 @@ export async function resolvePath(raw: string, context: PolicyContext): Promise<
 }
 
 export function isInside(path: string, folder: string): boolean {
-  return path === folder || path.startsWith(folder.endsWith(sep) ? folder : `${folder}${sep}`);
+  const p = normalizeComparePath(path);
+  const f = normalizeComparePath(folder);
+  return p === f || p.startsWith(f.endsWith("/") ? f : `${f}/`);
 }
 
 // ---------- shell commands ----------
