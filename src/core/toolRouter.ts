@@ -1,5 +1,27 @@
+import type { ChatSessionModelFunctions } from "node-llama-cpp";
 import type { Embedder } from "./embedder.ts";
+import {
+  canonicalizeArgs,
+  compileJsonSchemaToGbnf,
+  compileToolsToGbnf,
+  hardenFunctionsForGrammar,
+  hardenJsonSchema,
+  StreamingJsonParamGuard,
+  ToolLoopGuard,
+  validateToolArguments,
+} from "./grammarGuard.ts";
 import { TOOLS } from "./permissions.ts";
+
+export {
+  canonicalizeArgs,
+  compileJsonSchemaToGbnf,
+  compileToolsToGbnf,
+  hardenFunctionsForGrammar,
+  hardenJsonSchema,
+  StreamingJsonParamGuard,
+  ToolLoopGuard,
+  validateToolArguments,
+};
 
 /**
  * Choosing which tools to offer her for one message.
@@ -415,6 +437,31 @@ export class ToolRouter {
     return {
       offered: options.available.filter((tool) => CORE_TOOLS.includes(tool) || tool in why),
       why,
+    };
+  }
+
+  /** Routes relevant tools, hardens nested schemas with `additionalProperties: false`, and compiles GBNF. */
+  async routeWithGrammar(
+    message: string,
+    allFunctions: ChatSessionModelFunctions,
+    options: Omit<RouteOptions, "available"> & { loopGuard?: ToolLoopGuard } = {},
+  ): Promise<{
+    route: Route;
+    functions: ChatSessionModelFunctions;
+    gbnfGrammar: string;
+  }> {
+    const available = Object.keys(allFunctions);
+    const route = await this.route(message, { ...options, available });
+    const selected = Object.fromEntries(
+      route.offered
+        .map((name) => [name, allFunctions[name]] as const)
+        .filter((entry): entry is [string, ChatSessionModelFunctions[string]] => entry[1] !== undefined),
+    );
+    const functions = hardenFunctionsForGrammar(selected, options.loopGuard);
+    return {
+      route,
+      functions,
+      gbnfGrammar: compileToolsToGbnf(functions),
     };
   }
 }

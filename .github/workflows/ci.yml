@@ -77,6 +77,9 @@ jobs:
           tests/vrmAndAnimation.test.ts
           tests/mcpAndWorkshop.test.ts
           tests/macosMlxIos.test.ts
+          tests/spatialStagePresence.test.ts
+          tests/multimodalStreaming.test.ts
+          tests/grammarLoopAndCatalog.test.ts
 
   win-hands-native:
     runs-on: windows-latest

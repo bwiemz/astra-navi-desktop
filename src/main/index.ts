@@ -99,6 +99,12 @@ import {
   type HeldCorner,
   resizeAboutCorner,
 } from "../shared/ipc.ts";
+import {
+  computeMultiMonitorDock,
+  snapBoundsToMonitorEdge,
+  type DisplayWorkArea,
+  type DockEdge,
+} from "../shared/spatialStage.ts";
 import { registerAgendaIpc } from "./agendaIpc.ts";
 import { BrowserDeck } from "./browser.ts";
 import { scheduleDebugAids } from "./debugAids.ts";
@@ -303,6 +309,54 @@ const WINDOW_SIZES: Record<WindowLayout, { width: number; height: number }> = {
 
 /** Set while the window sits moved in from a screen edge so that all of it shows. */
 let heldCorner: HeldCorner | null = null;
+
+/** Returns connected display workAreas in `spatialStage.ts` format for multi-monitor edge docking. */
+function connectedDisplays(): DisplayWorkArea[] {
+  const primaryId = screen.getPrimaryDisplay().id;
+  return screen.getAllDisplays().map((d) => ({
+    id: String(d.id),
+    x: d.workArea.x,
+    y: d.workArea.y,
+    width: d.workArea.width,
+    height: d.workArea.height,
+    scaleFactor: d.scaleFactor,
+    primary: d.id === primaryId,
+  }));
+}
+
+/** Moves the companion window cleanly to an edge/corner on any display monitor. */
+export function dockWindowToEdge(targetDisplayId: string | null, edge: DockEdge): void {
+  if (!mainWindow) return;
+  const bounds = mainWindow.getBounds();
+  const placement = computeMultiMonitorDock(
+    connectedDisplays(),
+    targetDisplayId,
+    edge,
+    { width: bounds.width, height: bounds.height },
+  );
+  heldCorner = null;
+  mainWindow.setBounds({
+    x: placement.x,
+    y: placement.y,
+    width: placement.width,
+    height: placement.height,
+  });
+}
+
+/** Snaps the companion window to a nearby monitor edge after a user drag across displays. */
+export function snapWindowToNearestEdge(thresholdPx = 36): DockEdge | null {
+  if (!mainWindow) return null;
+  const snapped = snapBoundsToMonitorEdge(mainWindow.getBounds(), connectedDisplays(), thresholdPx);
+  if (!snapped) return null;
+  heldCorner = null;
+  mainWindow.setBounds({
+    x: snapped.x,
+    y: snapped.y,
+    width: snapped.width,
+    height: snapped.height,
+  });
+  return snapped.edge;
+}
 
 function resizeWindow(layout: WindowLayout): void {
   if (!mainWindow || !canResize) return;

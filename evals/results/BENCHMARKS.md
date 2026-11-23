@@ -141,3 +141,35 @@ We executed an end-to-end distillation run on the RTX PRO 4500 GPU using real tr
 - **Physical Windows 11 Multi-DPI & Fullscreen DirectX/Vulkan Testing:** Desktop automation (`WinHands` / `win_hands.ps1`) and fullscreen game detection (`SHQueryUserNotificationState`) were verified by unit tests (`tests/platformAdapter.test.ts`) and Windows CI compilation, **not** on a physical Windows 11 multi-monitor GPU rig. Authenticode signing (`scripts/sign-windows.ps1`) requires a release `.pfx` certificate on Windows.
 - **Live-Room Acoustic AEC & Wake-Word Microphone Testing:** Echo cancellation (`src/core/voice/aec.ts`) and wake-word matching (`src/core/wakeName.ts`) were verified in synthetic tests, **not** with live speakers and a desktop microphone in a physical room.
 - **Physical Android Handset Runtime Verification:** APK compilation/signing succeeded locally and TLS pinning/keystore logic is inspected in source, **not** executed interactively on a physical Android phone.
+
+---
+
+---
+
+---
+
+---
+
+---
+
+---
+
+## 6. Rolling Model Catalog, Vetted One-Click Presets & Grammar/Loop Stress Gates
+
+_Generated locally by `npm run benchmark:catalog -- --write-report` (2026-11-23). Live GPU metrics reflect real RTX PRO 4500 Blackwell runs; newer MoE/72B presets remain marked `pending_gpu` until measured on live GPU hardware._
+
+### Rolling Open-Weight Catalog & Sizing Matrix
+
+| Preset ID | Tier | Architecture / Params | Default Quant & Min VRAM | 16k KV Cache | Benchmark Status |
+| --- | --- | --- | --- | --- | --- |
+| `qwen3.5-4b` | small | dense (4B / 4B active) | `Q4_K_M` (`4 GB` min) | `1.13 GB` (std) | Verified (**81.7%**, `170.8 tok/s`) |
+| `qwen3.5-9b` | standard | dense (9B / 9B active) | `Q4_K_M` (`7 GB` min) | `1.50 GB` (std) | Verified (**83.3%**, `113.6 tok/s`) |
+| `qwen3.8-27b` | large | dense (27B / 27B active) | `Q4_K_M` (`19 GB` min) | `2.25 GB` (std) | Verified (**90.6%**, `38.9 tok/s`) |
+| `qwen3-30b-a3b-moe` | large | moe (30B / 3B active) | `Q4_K_M` (`20 GB` min) | `1.50 GB` (std) | `pending_gpu` (needs live GPU eval) |
+| `qwen3.5-72b` | xl | dense (72B / 72B active) | `Q4_K_M` (`48 GB` min) | `5.00 GB` (std) | `pending_gpu` (needs live GPU eval) |
+| `qwen3.5-120b-a16b-moe` | xl | moe (120B / 16B active) | `IQ4_XS` (`66 GB` min) | `2.50 GB` (std) | `pending_gpu` (needs live GPU eval) |
+
+### Deterministic Grammar-Constrained Decoding & Loop-Guard Verification
+
+- **Indirect Prompt-Injection & Taint Fuzzer (`evals/fuzz.ts`, seed `20261122`):** **500/500 passed** (`0` unauthorized allows, `0` unseen leaks).
+- **Grammar & Loop-Breaker Stress Suite (`scripts/benchmark-catalog.ts`):** **24/24 passed** (nested JSON GBNF compilation, strict `additionalProperties: false` enforcement, streaming repetition abort, exact repeat breaker, `A <-> B` oscillation detector, consecutive failure breaker, and turn cap).

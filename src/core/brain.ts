@@ -17,6 +17,11 @@ import type { MemoryStore } from "./memory.ts";
 import { MoodStream } from "./moodStream.ts";
 import { TOOLS, type PolicyContext, type RequestSummary } from "./permissions.ts";
 import { ToolRouter } from "./toolRouter.ts";
+import {
+  hardenFunctionsForGrammar,
+  StreamingJsonParamGuard,
+  ToolLoopGuard,
+} from "./grammarGuard.ts";
 import { clipForTrace, type TracedCall, type TracedCheck, type TurnTrace } from "./trace.ts";
 import {
   AWAY_MARK,
@@ -631,7 +636,23 @@ export class Brain {
               ...(deps.ship ? createShipTools(host, deps.ship) : {}),
             };
       const everyTool = deps.lab?.tools ? deps.lab.tools(usual, host) : usual;
-      const functions = await this.fitting(everyTool, message);
+      const loopGuard = new ToolLoopGuard();
+      const functions = hardenFunctionsForGrammar(
+        await this.fitting(everyTool, message),
+        loopGuard,
+        undefined,
+        (entry) =>
+          host.traced?.({
+            tool: entry.tool,
+            input: entry.input,
+            result: entry.result,
+            outcome: "refused",
+            asked: false,
+            ms: 0,
+            gate: "refused",
+            gateReason: entry.gateReason,
+          }),
+      );
       if (signal.aborted) return;
       this.offeredNow = Object.keys(functions);
       // So that a later change to the conversation does not cost reading the
@@ -670,6 +691,10 @@ export class Brain {
           ? deps.engine.wordBias(FIRST_PERSON_WORDS)
           : null;
       let thinking = false;
+      const paramGuard = new StreamingJsonParamGuard();
+      const promptController = new AbortController();
+      if (signal.aborted) promptController.abort();
+      else signal.addEventListener("abort", () => promptController.abort(), { once: true });
       const promptBegan = Date.now();
       await session.prompt(prompt, {
         ...(bias
@@ -685,7 +710,7 @@ export class Brain {
           : {}),
         functions,
         maxParallelFunctionCalls: 1,
-        signal,
+        signal: promptController.signal,
         stopOnAbortSignal: true,
         maxTokens: MAX_REPLY_TOKENS,
         temperature: deps.lab?.temperature ?? 0.7,
@@ -697,6 +722,13 @@ export class Brain {
           thoughtTokens: message.spoken
             ? Math.min(96, deps.config.value.thinkingTokens)
             : deps.config.value.thinkingTokens,
+        },
+        onFunctionCallParamsChunk: (chunk) => {
+          const check = paramGuard.pushChunk(chunk);
+          if (!check.ok && !promptController.signal.aborted) {
+            console.warn(`[brain] aborted malformed parameter loop: ${check.reason}`);
+            promptController.abort();
+          }
         },
         onTextChunk: (chunk) => {
           this.openReply();

@@ -1,7 +1,8 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, sign, timingSafeEqual, verify } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { z } from "zod";
 
 /**
  * The open-weight language models the assistant can think with. All are Apache-2.0
@@ -245,4 +246,258 @@ export async function verifyModelSha256(
   const ok =
     expectedBuf.length === actualBuf.length && timingSafeEqual(expectedBuf, actualBuf);
   return { ok, actual };
+}
+
+// --- Rolling Model Catalog & Vetted Public Benchmarks --------------------
+
+export interface ModelBenchmarkMetrics {
+  suite: string;
+  casesTotal: number;
+  overallScorePercent: number;
+  toolChoicePercent: number;
+  followThroughPercent: number;
+  injectionSafetyPercent: number;
+  fuzzPassed: number;
+  fuzzTotal: number;
+  medianTtftSec: number;
+  tokensPerSec: number;
+  measuredOn: string;
+  measuredAt: string;
+}
+
+export interface RollingModelEntry {
+  presetId: string;
+  tier: BrainModel["id"];
+  family: string;
+  releaseTag: string;
+  recommended: boolean;
+  benchmarkStatus: "verified" | "pending_gpu";
+  model: BrainModel;
+  benchmarks?: ModelBenchmarkMetrics;
+  notes: string;
+}
+
+/**
+ * Curated rolling catalog of Apache-2.0 open-weight GGUF releases (4B, 9B, 27B,
+ * 30B-A3B MoE, 72B, 120B-A16B MoE) so users get one-click vetted presets alongside
+ * empirical benchmark telemetry from `evals/results/BENCHMARKS.md`.
+ */
+export const ROLLING_MODEL_CATALOG: readonly RollingModelEntry[] = [
+  {
+    presetId: "qwen3.5-4b",
+    tier: "small",
+    family: "Qwen3.5",
+    releaseTag: "2026.11",
+    recommended: true,
+    benchmarkStatus: "verified",
+    model: BRAIN_MODELS.small,
+    benchmarks: {
+      suite: "163-case core + 500-case fuzz",
+      casesTotal: 163,
+      overallScorePercent: 81.7,
+      toolChoicePercent: 91.5,
+      followThroughPercent: 60.0,
+      injectionSafetyPercent: 86.7,
+      fuzzPassed: 500,
+      fuzzTotal: 500,
+      medianTtftSec: 1.15,
+      tokensPerSec: 170.8,
+      measuredOn: "NVIDIA RTX PRO 4500 Blackwell (32,623 MiB VRAM)",
+      measuredAt: "2026-11-22",
+    },
+    notes: "Fast 4 GB laptop/handheld preset with grammar-hardened tool decoding.",
+  },
+  {
+    presetId: "qwen3.5-9b",
+    tier: "standard",
+    family: "Qwen3.5",
+    releaseTag: "2026.11",
+    recommended: true,
+    benchmarkStatus: "verified",
+    model: BRAIN_MODELS.standard,
+    benchmarks: {
+      suite: "163-case core + 500-case fuzz",
+      casesTotal: 163,
+      overallScorePercent: 83.3,
+      toolChoicePercent: 93.6,
+      followThroughPercent: 80.0,
+      injectionSafetyPercent: 86.7,
+      fuzzPassed: 500,
+      fuzzTotal: 500,
+      medianTtftSec: 2.02,
+      tokensPerSec: 113.6,
+      measuredOn: "NVIDIA RTX PRO 4500 Blackwell (32,623 MiB VRAM)",
+      measuredAt: "2026-11-22",
+    },
+    notes: "Default 8 GB GPU desktop sweet spot: high character adherence and reliable tool calling.",
+  },
+  {
+    presetId: "qwen3.8-27b",
+    tier: "large",
+    family: "Qwen3.8",
+    releaseTag: "2026.11",
+    recommended: true,
+    benchmarkStatus: "verified",
+    model: BRAIN_MODELS.large,
+    benchmarks: {
+      suite: "163-case core + 500-case fuzz",
+      casesTotal: 163,
+      overallScorePercent: 90.6,
+      toolChoicePercent: 95.7,
+      followThroughPercent: 100.0,
+      injectionSafetyPercent: 100.0,
+      fuzzPassed: 500,
+      fuzzTotal: 500,
+      medianTtftSec: 4.3,
+      tokensPerSec: 38.9,
+      measuredOn: "NVIDIA RTX PRO 4500 Blackwell (32,623 MiB VRAM)",
+      measuredAt: "2026-11-22",
+    },
+    notes: "24 GB+ / Apple Silicon Pro workstation preset achieving 100% follow-through honesty.",
+  },
+  {
+    presetId: "qwen3-30b-a3b-moe",
+    tier: "large",
+    family: "Qwen3-MoE",
+    releaseTag: "2026.11",
+    recommended: false,
+    benchmarkStatus: "pending_gpu",
+    model: {
+      id: "large",
+      label: "Large MoE (Qwen3 30B-A3B)",
+      fileName: "Qwen3-30B-A3B-Q4_K_M.gguf",
+      url: "https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf",
+      sizeBytes: 18_600_000_000,
+      vramGb: 20,
+      architecture: "moe",
+      quantization: "Q4_K_M",
+      kvBytesPerToken: 98_304,
+      totalParamsB: 30,
+      activeParamsB: 3,
+    },
+    notes: "3B-active Mixture-of-Experts preset for 24 GB GPUs & 36+ GB Apple Silicon; awaiting full 163-case GPU run.",
+  },
+  {
+    presetId: "qwen3.5-72b",
+    tier: "xl",
+    family: "Qwen3.5",
+    releaseTag: "2026.11",
+    recommended: false,
+    benchmarkStatus: "pending_gpu",
+    model: BRAIN_MODELS.xl,
+    notes: "Dense 72B workstation / 96+ GB Apple Silicon Max/Ultra preset; awaiting full 163-case GPU run.",
+  },
+  {
+    presetId: "qwen3.5-120b-a16b-moe",
+    tier: "xl",
+    family: "Qwen3.5-MoE",
+    releaseTag: "2026.11",
+    recommended: false,
+    benchmarkStatus: "pending_gpu",
+    model: MOE_WORKSTATION_MODELS.xlMoe,
+    notes: "16B-active workstation MoE preset for 66+ GB VRAM / 128 GB unified memory; awaiting full 163-case GPU run.",
+  },
+];
+
+export function getVettedPresets(): RollingModelEntry[] {
+  return ROLLING_MODEL_CATALOG.filter((entry) => entry.benchmarkStatus === "verified");
+}
+
+export function findCatalogEntry(presetId: string): RollingModelEntry | null {
+  return ROLLING_MODEL_CATALOG.find((entry) => entry.presetId === presetId) ?? null;
+}
+
+/** Resolves `"auto"`, a tier ID, a rolling catalog `presetId`, or an absolute `.gguf` path. */
+export function resolvePresetChoice(
+  choice: BrainChoice,
+  modelsDir: string,
+  totalVramBytes: number | null,
+): ResolvedModel {
+  const catalogHit = findCatalogEntry(choice);
+  if (catalogHit) {
+    return {
+      label: catalogHit.model.label,
+      path: join(modelsDir, catalogHit.model.fileName),
+      download: catalogHit.model,
+    };
+  }
+  return resolveBrain(choice, modelsDir, totalVramBytes);
+}
+
+const SignedCatalogEntrySchema = z.object({
+  presetId: z.string().regex(/^[a-z0-9][a-z0-9._-]{1,63}$/),
+  tier: z.enum(["small", "standard", "large", "xl"]),
+  benchmarkStatus: z.enum(["verified", "pending_gpu"]),
+  fileName: z.string().min(1).max(160),
+  url: z.string().url().refine((u) => u.startsWith("https://"), "Model URLs must use https://."),
+  sizeBytes: z.number().int().positive(),
+  vramGb: z.number().positive(),
+  architecture: z.enum(["dense", "moe"]).optional(),
+  overallScorePercent: z.number().min(0).max(100).optional(),
+});
+
+export const SignedRollingCatalogSchema = z.object({
+  catalogVersion: z.literal(1),
+  updatedAt: z.string().min(1).max(64),
+  entries: z.array(SignedCatalogEntrySchema).min(1).max(64),
+  signature: z.string().max(512).optional(),
+});
+export type SignedRollingCatalog = z.infer<typeof SignedRollingCatalogSchema>;
+
+function canonicalCatalogBytes(catalog: Omit<SignedRollingCatalog, "signature">): Buffer {
+  const sortVal = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sortVal);
+    if (typeof v === "object" && v !== null) {
+      const rec = v as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(rec).sort((a, b) => a.localeCompare(b))) {
+        if (rec[k] !== undefined) out[k] = sortVal(rec[k]);
+      }
+      return out;
+    }
+    return v;
+  };
+  return Buffer.from(JSON.stringify(sortVal(catalog)), "utf8");
+}
+
+export function signRollingCatalog(
+  catalog: Omit<SignedRollingCatalog, "signature">,
+  privateKeyPem: string,
+): string {
+  const parsed = SignedRollingCatalogSchema.parse(catalog);
+  const { signature: _ignored, ...unsigned } = parsed;
+  void _ignored;
+  return sign(null, canonicalCatalogBytes(unsigned), privateKeyPem).toString("base64");
+}
+
+export function verifyRollingCatalog(
+  raw: unknown,
+  trustedPublicKeysPem: readonly string[],
+): { ok: true; catalog: SignedRollingCatalog } | { ok: false; reason: string } {
+  const parsed = SignedRollingCatalogSchema.safeParse(raw);
+  if (!parsed.success) {
+    return { ok: false, reason: `Invalid rolling catalog: ${parsed.error.message}` };
+  }
+  if (!parsed.data.signature || trustedPublicKeysPem.length === 0) {
+    return { ok: false, reason: "Missing catalog signature or trusted public key." };
+  }
+  let sigBytes: Buffer;
+  try {
+    sigBytes = Buffer.from(parsed.data.signature, "base64");
+  } catch {
+    return { ok: false, reason: "Malformed base64 signature." };
+  }
+  const { signature: _sig, ...unsigned } = parsed.data;
+  void _sig;
+  const payload = canonicalCatalogBytes(unsigned);
+  for (const key of trustedPublicKeysPem) {
+    try {
+      if (verify(null, payload, key, sigBytes)) {
+        return { ok: true, catalog: parsed.data };
+      }
+    } catch {
+      // Try remaining trusted keys.
+    }
+  }
+  return { ok: false, reason: "Rolling catalog Ed25519 signature verification failed." };
 }

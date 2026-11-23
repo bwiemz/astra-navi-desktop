@@ -7,10 +7,14 @@ import { Engine } from "@babylonjs/core/Engines/engine";
 import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { LoadAssetContainerAsync } from "@babylonjs/core/Loading/sceneLoader";
+import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { Quaternion, Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { VertexBuffer } from "@babylonjs/core/Buffers/buffer";
+import { CreateBox } from "@babylonjs/core/Meshes/Builders/boxBuilder";
+import { CreateGround } from "@babylonjs/core/Meshes/Builders/groundBuilder";
 import type { Mesh } from "@babylonjs/core/Meshes/mesh";
+import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { Scene } from "@babylonjs/core/scene";
 import { MmdStandardMaterialBuilder } from "babylon-mmd/esm/Loader/mmdStandardMaterialBuilder";
 import { SdefInjector } from "babylon-mmd/esm/Loader/sdefInjector";
@@ -29,6 +33,17 @@ import {
   type Gesture,
   type GestureMotionSample,
 } from "../../shared/gestures.ts";
+import {
+  blendAmbientScreenLighting,
+  computeTimeOfDayLighting,
+  facingYawForEdge,
+  PresenceTracker,
+  ROOM_SCENE_SPECS,
+  type DockEdge,
+  type PresenceUpdate,
+  type RoomScenePreset,
+  type StageLightingState,
+} from "../../shared/spatialStage.ts";
 import {
   sampleVisemeWeights,
   VISEME_MORPH_CANDIDATES,
@@ -150,10 +165,22 @@ export class Stage {
   private readonly engine: Engine;
   private readonly scene: Scene;
   private readonly camera: FreeCamera;
+  private readonly skyLight: HemisphericLight;
+  private readonly sunLight: DirectionalLight;
   private readonly mmdRuntime: MmdRuntime;
   private readonly hasPhysics: boolean;
   private rig: Rig | null = null;
   private loadToken = 0;
+
+  private dockFacingDeg = 0;
+  private dockFacingDegTarget = 0;
+  private roomGroup: TransformNode | null = null;
+  private roomPreset: RoomScenePreset = "none";
+  private lightingMode: "default" | "time-of-day" | "screen-ambient" = "default";
+  private currentLighting: StageLightingState = computeTimeOfDayLighting(13);
+  private readonly presenceTracker = new PresenceTracker({ enabled: false });
+  private webcamStream: MediaStream | null = null;
+  private webcamTimer: number | null = null;
 
   private mood: Mood = "neutral";
   private thinking = false;
@@ -243,10 +270,10 @@ export class Stage {
     this.camera.maxZ = 500;
     this.camera.setTarget(new Vector3(0, 10, 0));
 
-    const sky = new HemisphericLight("sky", new Vector3(0, 1, 0), this.scene);
-    sky.intensity = 0.35;
-    const sun = new DirectionalLight("sun", new Vector3(0.4, -1, 1), this.scene);
-    sun.intensity = 0.85;
+    this.skyLight = new HemisphericLight("sky", new Vector3(0, 1, 0), this.scene);
+    this.skyLight.intensity = 0.35;
+    this.sunLight = new DirectionalLight("sun", new Vector3(0.4, -1, 1), this.scene);
+    this.sunLight.intensity = 0.85;
 
     this.mmdRuntime = new MmdRuntime(this.scene, physics);
     // Our motion has to be written to the bones before the runtime reads them each frame.
@@ -318,10 +345,213 @@ export class Stage {
   setSolidBackdrop(on: boolean): void {
     if (on === this.solidBackdrop) return;
     this.solidBackdrop = on;
-    this.scene.clearColor = on
-      ? new Color4(0x14 / 255, 0x18 / 255, 0x24 / 255, 1)
-      : new Color4(0, 0, 0, 0);
+    if (this.roomPreset === "none") {
+      this.scene.clearColor = on
+        ? new Color4(0x14 / 255, 0x18 / 255, 0x24 / 255, 1)
+        : new Color4(0, 0, 0, 0);
+    }
     this.stir();
+  }
+
+  /** Orients Astra slightly toward the desktop center when docked on left/right monitor edges. */
+  setDockEdge(edge: DockEdge): void {
+    this.dockFacingDegTarget = facingYawForEdge(edge);
+    this.stir();
+  }
+
+  private disposeRoomScene(): void {
+    if (!this.roomGroup) return;
+    for (const child of this.roomGroup.getChildren()) {
+      const asMesh = child as Mesh;
+      asMesh.material?.dispose();
+      asMesh.dispose?.();
+    }
+    this.roomGroup.dispose();
+    this.roomGroup = null;
+  }
+
+  /** Builds or removes lightweight procedural 3D desk/room scenery behind the character. */
+  setRoomScene(preset: RoomScenePreset): void {
+    if (preset === this.roomPreset && this.roomGroup) return;
+    this.roomPreset = preset;
+    this.disposeRoomScene();
+    const spec = ROOM_SCENE_SPECS[preset];
+    if (preset === "none") {
+      this.scene.clearColor = this.solidBackdrop
+        ? new Color4(0x14 / 255, 0x18 / 255, 0x24 / 255, 1)
+        : new Color4(0, 0, 0, 0);
+      this.stir();
+      return;
+    }
+
+    const [cr, cg, cb, ca] = spec.backdropColor;
+    this.scene.clearColor = new Color4(cr, cg, cb, ca);
+    const group = new TransformNode(`room:${preset}`, this.scene);
+    const floorMat = new StandardMaterial(`room-floor-mat:${preset}`, this.scene);
+    floorMat.diffuseColor = new Color3(spec.floorColor[0], spec.floorColor[1], spec.floorColor[2]);
+    floorMat.specularColor = new Color3(0.05, 0.05, 0.05);
+
+    const floor = CreateGround(`room-floor:${preset}`, { width: 42, height: 32 }, this.scene);
+    floor.position = new Vector3(0, -0.05, 4);
+    floor.material = floorMat;
+    floor.parent = group;
+
+    const deskMat = new StandardMaterial(`room-desk-mat:${preset}`, this.scene);
+    deskMat.diffuseColor = new Color3(spec.deskColor[0], spec.deskColor[1], spec.deskColor[2]);
+    deskMat.specularColor = new Color3(0.12, 0.12, 0.12);
+
+    const deskTop = CreateBox(`room-desk:${preset}`, { width: 22, height: 0.9, depth: 8 }, this.scene);
+    deskTop.position = new Vector3(0, 6.2, 11);
+    deskTop.material = deskMat;
+    deskTop.parent = group;
+
+    const accentMat = new StandardMaterial(`room-accent-mat:${preset}`, this.scene);
+    accentMat.emissiveColor = new Color3(
+      spec.accentColor[0] * 0.45,
+      spec.accentColor[1] * 0.45,
+      spec.accentColor[2] * 0.45,
+    );
+    accentMat.diffuseColor = new Color3(spec.accentColor[0], spec.accentColor[1], spec.accentColor[2]);
+
+    const accentStrip = CreateBox(`room-accent:${preset}`, { width: 16, height: 0.35, depth: 0.4 }, this.scene);
+    accentStrip.position = new Vector3(0, 7.0, 14.2);
+    accentStrip.material = accentMat;
+    accentStrip.parent = group;
+
+    this.roomGroup = group;
+    this.stir();
+  }
+
+  private applyLightingState(state: StageLightingState): void {
+    this.currentLighting = state;
+    this.skyLight.diffuse = new Color3(state.skyColor[0], state.skyColor[1], state.skyColor[2]);
+    this.skyLight.groundColor = new Color3(
+      state.groundColor[0],
+      state.groundColor[1],
+      state.groundColor[2],
+    );
+    this.skyLight.intensity = state.skyIntensity;
+    this.sunLight.diffuse = new Color3(state.sunColor[0], state.sunColor[1], state.sunColor[2]);
+    this.sunLight.direction = new Vector3(
+      state.sunDirection[0],
+      state.sunDirection[1],
+      state.sunDirection[2],
+    );
+    this.sunLight.intensity = state.sunIntensity;
+    this.scene.ambientColor = new Color3(
+      state.ambientColor[0],
+      state.ambientColor[1],
+      state.ambientColor[2],
+    );
+    this.stir();
+  }
+
+  setLightingMode(mode: "default" | "time-of-day" | "screen-ambient", now = new Date()): void {
+    this.lightingMode = mode;
+    if (mode === "default") {
+      this.skyLight.intensity = 0.35;
+      this.sunLight.intensity = 0.85;
+      this.sunLight.direction = new Vector3(0.4, -1, 1);
+      this.scene.ambientColor = new Color3(0.5, 0.5, 0.5);
+      this.stir();
+      return;
+    }
+    this.applyTimeOfDayLighting(now);
+  }
+
+  applyTimeOfDayLighting(now = new Date()): StageLightingState {
+    const computed = computeTimeOfDayLighting(now);
+    if (this.lightingMode !== "screen-ambient") {
+      this.applyLightingState(computed);
+    } else {
+      this.currentLighting = computed;
+    }
+    return computed;
+  }
+
+  applyScreenAmbientColor(rgb: readonly [number, number, number], strength = 0.45): StageLightingState {
+    const blended = blendAmbientScreenLighting(this.currentLighting, rgb, strength);
+    this.applyLightingState(blended);
+    return blended;
+  }
+
+  /**
+   * Feeds a tiny grayscale webcam frame strictly in memory for opt-in presence/gaze tracking.
+   * Zero frames are persisted or transmitted off-device.
+   */
+  feedPresenceFrame(
+    luma: Uint8Array,
+    width: number,
+    height: number,
+    nowMs = Date.now(),
+  ): PresenceUpdate {
+    const update = this.presenceTracker.processFrame(luma, width, height, nowMs);
+    if (!update.enabled) return update;
+    if (update.action === "wake") this.setAsleep(false);
+    else if (update.action === "sleep") this.setAsleep(true);
+    if (update.present && update.gazeTarget) {
+      this.lookAt(update.gazeTarget.x, update.gazeTarget.y);
+    }
+    return update;
+  }
+
+  private stopWebcamPresence(): void {
+    if (this.webcamTimer !== null && typeof window !== "undefined") {
+      window.clearInterval(this.webcamTimer);
+    }
+    this.webcamTimer = null;
+    if (this.webcamStream) {
+      for (const track of this.webcamStream.getTracks()) track.stop();
+      this.webcamStream = null;
+    }
+  }
+
+  /** Enables or disables local opt-in webcam presence detection (`false` by default). */
+  async setWebcamPresenceEnabled(enabled: boolean): Promise<boolean> {
+    this.presenceTracker.setEnabled(enabled);
+    this.stopWebcamPresence();
+    if (!enabled) return false;
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      return true;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 160, height: 120 },
+        audio: false,
+      });
+      if (!this.presenceTracker.enabled) {
+        for (const t of stream.getTracks()) t.stop();
+        return false;
+      }
+      this.webcamStream = stream;
+      const video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = stream;
+      void video.play().catch(() => undefined);
+      const sampleCanvas = document.createElement("canvas");
+      sampleCanvas.width = 32;
+      sampleCanvas.height = 24;
+      const ctx = sampleCanvas.getContext("2d", { willReadFrequently: true });
+      this.webcamTimer = window.setInterval(() => {
+        if (!ctx || video.readyState < 2) return;
+        ctx.drawImage(video, 0, 0, 32, 24);
+        const rgba = ctx.getImageData(0, 0, 32, 24).data;
+        const luma = new Uint8Array(32 * 24);
+        for (let i = 0; i < luma.length; i += 1) {
+          const base = i * 4;
+          luma[i] = Math.round(
+            0.299 * (rgba[base] ?? 0) +
+              0.587 * (rgba[base + 1] ?? 0) +
+              0.114 * (rgba[base + 2] ?? 0),
+          );
+        }
+        this.feedPresenceFrame(luma, 32, 24, Date.now());
+      }, 500);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   setMood(mood: Mood): void {
@@ -824,6 +1054,7 @@ export class Stage {
 
     this.gaze.x = approach(this.gaze.x, this.gazeTarget.x * awake, 4, dt);
     this.gaze.y = approach(this.gaze.y, this.gazeTarget.y * awake, 4, dt);
+    this.dockFacingDeg = approach(this.dockFacingDeg, this.dockFacingDegTarget * awake, 3, dt);
     this.tilt = approach(this.tilt, mood === "thinking" ? 1 : 0, 3, dt);
     this.lookUp = approach(this.lookUp, mood === "thinking" ? 1 : mood === "sad" ? -1 : 0, 3, dt);
 
@@ -877,14 +1108,18 @@ export class Stage {
     rig.setBoneRotation(
       "upper",
       Quaternion.RotationYawPitchRoll(
-        sway * 1.2 * DEG + this.gaze.x * 3 * DEG - motion.point * 7 * DEG,
+        (sway * 1.2 + this.gaze.x * 3 + this.dockFacingDeg * 0.45) * DEG - motion.point * 7 * DEG,
         breath * 0.75 * DEG + lean * DEG,
         drift * 0.8 * DEG - weightShift * 0.5 * DEG,
       ),
     );
     rig.setBoneRotation(
       "neck",
-      Quaternion.RotationYawPitchRoll(this.gaze.x * 6 * DEG, this.gaze.y * 3 * DEG - motion.bow * 6 * DEG, 0),
+      Quaternion.RotationYawPitchRoll(
+        (this.gaze.x * 6 + this.dockFacingDeg * 0.25) * DEG,
+        this.gaze.y * 3 * DEG - motion.bow * 6 * DEG,
+        0,
+      ),
     );
     rig.setBoneRotation(
       "head",
@@ -960,5 +1195,16 @@ export class Stage {
     );
 
     rig.stepPhysics(dt);
+  }
+
+  dispose(): void {
+    this.stopWebcamPresence();
+    this.disposeRoomScene();
+    this.clearModel();
+    if (this.frameRequest !== 0) {
+      cancelAnimationFrame(this.frameRequest);
+      this.frameRequest = 0;
+    }
+    this.engine.dispose();
   }
 }
