@@ -560,7 +560,7 @@ describe("carrying a mission out", () => {
 
   it("does not let a game ending cut short the wait between two tries", async () => {
     results["flaky"] = [{ ok: false, output: "busy" }];
-    const missions = board({ retryAfterMs: 150 });
+    const missions = board({ retryAfterMs: 500 });
     const { id } = await missions.add(plan([{ command: "flaky", retries: 1 }]));
     await until(() => ran.length === 1 && missions.get(id)?.state === "planned");
     missions.nudge();
