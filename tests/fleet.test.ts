@@ -839,7 +839,7 @@ describe.skipIf(!haveSshd)("reaching a real machine over SSH", () => {
     }
     expect(existsSync(join(base, "home", "PWNED"))).toBe(false);
     await expect(fleet.readFile(machine, "/usr/bin/true")).rejects.toThrow("not text");
-  });
+  }, 15_000);
 
   it("leaves the old file whole when a send cannot be read here after all", async () => {
     const there = join(base, "files", "precious");

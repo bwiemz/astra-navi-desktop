@@ -24,7 +24,7 @@ platform_sum="0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0"
 build_tools_sum="bd3a4966912eb8b30ed0d00b0cda6b6543b949d5ffe00bea54c04c81e1561d88"
 
 fetch_checked() { # <address> <file to save as> <expected sha256>
-  curl -fL --retry 3 -o "$2" "$1"
+  curl -fsSL --retry 3 -o "$2" "$1"
   if ! echo "$3  $2" | sha256sum --check --status; then
     rm -f "$2"
     echo "The download from $1 is not the file this script expects. Nothing was installed from it." >&2

@@ -2,6 +2,7 @@
   "name": "astra-navi-desktop",
   "version": "0.1.0",
   "description": "Local-first AI desktop navigator with 3D MMD avatar support (ships with original Astra Navi chibi character & BYO-MMD import), explicit permission gating, and an offline evaluation suite.",
+  "author": "Astra Navi Contributors <maintainers@astranavi.app>",
   "license": "MIT",
   "repository": {
     "type": "git",

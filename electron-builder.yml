@@ -1,10 +1,14 @@
 appId: app.astranavi.desktop
 productName: Astra Navi Desktop
 copyright: Copyright © 2026 Astra Navi Contributors (MIT)
+npmRebuild: false
 directories:
   output: dist
   buildResources: assets
 asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/*.wasm"
 files:
   - out/**/*
   - package.json
@@ -27,6 +31,7 @@ linux:
     - deb
   icon: assets/icon.png
   category: Utility
+  maintainer: Astra Navi Contributors <maintainers@astranavi.app>
   desktop:
     entry:
       Name: Astra Navi Desktop

@@ -6,16 +6,45 @@
  *   node scripts/package-release.ts --edition supporter --platform win --dry-run
  *   node scripts/package-release.ts --edition community --platform linux --checksums
  */
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { promisify } from "node:util";
 import { editionFeatures, resolveEdition, type Edition } from "../src/shared/edition.ts";
 
-const execFileAsync = promisify(execFile);
 const ROOT = resolve(import.meta.dirname, "..");
+
+function runCommand(
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const needsCmdShim =
+      process.platform === "win32" && !command.includes("/") && !command.includes("\\");
+    const child = spawn(command, [...args], {
+      cwd: ROOT,
+      env,
+      stdio: "inherit",
+      shell: needsCmdShim,
+    });
+    child.on("error", rejectPromise);
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        resolvePromise();
+      } else {
+        rejectPromise(
+          new Error(
+            `${command} ${args.join(" ")} exited with ${
+              code !== null ? `code ${code}` : `signal ${signal ?? "unknown"}`
+            }`,
+          ),
+        );
+      }
+    });
+  });
+}
 
 function parseFlag(name: string): string | null {
   const idx = process.argv.indexOf(name);
@@ -68,10 +97,8 @@ if (dryRun) {
   process.exit(0);
 }
 
-await execFileAsync("npm", ["run", "build"], { cwd: ROOT });
-await execFileAsync(process.execPath, [join(ROOT, "scripts", "package-extension.ts")], {
-  cwd: ROOT,
-});
+await runCommand("npm", ["run", "build"]);
+await runCommand(process.execPath, [join(ROOT, "scripts", "package-extension.ts")]);
 
 const distDir = join(ROOT, "dist");
 await mkdir(distDir, { recursive: true });
@@ -86,9 +113,9 @@ if (platform === "linux") builderArgs.push("--linux", "AppImage", "deb");
 else if (platform === "win") builderArgs.push("--win", "nsis", "portable");
 else builderArgs.push("--linux", "AppImage", "deb", "--win", "nsis", "portable");
 
-await execFileAsync("npx", ["--yes", "electron-builder", ...builderArgs], {
-  cwd: ROOT,
-  env: { ...process.env, ASTRA_NAVI_EDITION: edition },
+await runCommand("npx", ["--yes", "electron-builder", ...builderArgs], {
+  ...process.env,
+  ASTRA_NAVI_EDITION: edition,
 });
 
 const extrasDir = join(distDir, "extras");
