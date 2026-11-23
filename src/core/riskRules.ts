@@ -59,7 +59,7 @@ function canonicalSync(path: string): string {
   const tail: string[] = [];
   for (;;) {
     try {
-      return join(realpathSync(current), ...tail);
+      return join(realpathSync.native(current), ...tail);
     } catch {
       const parent = dirname(current);
       if (parent === current) return path;
@@ -201,9 +201,11 @@ export async function classifyCommand(
   context: PolicyContext,
 ): Promise<CommandRisk> {
   const home = context.home ?? homedir();
-  // Quotes and backslashes can split a name in the text (`.s""sh`) that the shell joins back up.
-  const unquoted = command.replace(/["'\\]/g, "");
-  if (ENVIRONMENT_DUMP.test(unquoted)) return "sensitive";
+  // Quotes and backslashes can split a name in the text (`.s""sh` or `.s\sh`), while Windows paths use `\` literally.
+  const dequoted = command.replace(/["']/g, "");
+  const unquoted = dequoted.replace(/\\/g, "");
+  const variants = unquoted === dequoted ? [unquoted] : [unquoted, dequoted];
+  if (variants.some((variant) => ENVIRONMENT_DUMP.test(variant))) return "sensitive";
 
   /**
    * Where a word points if it is a file name. Commands run inside the assistant's own
@@ -217,42 +219,51 @@ export async function classifyCommand(
 
   let otherAccount = false;
   let deviceFile = false;
-  for (const word of unquoted.split(/[\s;|&<>()=,]+/).filter(Boolean)) {
-    if (isPrivatePath(expandHome(word, home), context)) return "sensitive";
-    const path = await target(word);
-    if (path !== null && isPrivatePath(path, context)) return "sensitive";
-    // "~name" is another account's home folder; the shell works out where that is.
-    if (/^~[^/]/.test(word)) otherAccount = true;
-  }
   const workspace = await canonical(context.workspace);
-  for (const segment of unquoted.split(/\|\||&&|[|;\n]/)) {
-    const words = segment.split(/[\s<>()=,]+/).filter(Boolean);
-    const name = words[0] ?? "";
-    // A search through a whole folder reads files nobody named: `.env`, keys, anything in
-    // there. Outside her own folder that is the user's call.
-    const recursive =
-      /^(?:rg|ag|ack)$/.test(name) ||
-      (/^(?:e|f)?grep$/.test(name) &&
-        words.some(
-          (word) => /^-[a-zA-Z]*[rR]/.test(word) || /^--(?:dereference-)?recursive$/.test(word),
-        ));
-    for (const word of words.slice(1)) {
+
+  for (const text of variants) {
+    for (const word of text.split(/[\s;|&<>()=,]+/).filter(Boolean)) {
+      if (isPrivatePath(expandHome(word, home), context)) return "sensitive";
       const path = await target(word);
-      if (path === null) continue;
-      // A search pattern resolves to a name inside her folder and so passes; only a real
-      // path leading somewhere else trips this.
-      if (recursive && !isInside(path, workspace)) return "broad";
-      // Device files never end (`/dev/zero`) or are not text; reading one is not a look-only act.
-      if (path.startsWith("/dev/") && path !== "/dev/null") deviceFile = true;
+      if (path !== null && isPrivatePath(path, context)) return "sensitive";
+      // "~name" is another account's home folder; the shell works out where that is.
+      if (/^~[^/]/.test(word)) otherAccount = true;
     }
   }
+
+  for (const text of variants) {
+    for (const segment of text.split(/\|\||&&|[|;\n]/)) {
+      const words = segment.split(/[\s<>()=,]+/).filter(Boolean);
+      const name = words[0] ?? "";
+      // A search through a whole folder reads files nobody named: `.env`, keys, anything in
+      // there. Outside her own folder that is the user's call.
+      const recursive =
+        /^(?:rg|ag|ack)$/.test(name) ||
+        (/^(?:e|f)?grep$/.test(name) &&
+          words.some(
+            (word) => /^-[a-zA-Z]*[rR]/.test(word) || /^--(?:dereference-)?recursive$/.test(word),
+          ));
+      for (const word of words.slice(1)) {
+        const path = await target(word);
+        if (path === null) continue;
+        // A search pattern resolves to a name inside her folder and so passes; only a real
+        // path leading somewhere else trips this.
+        if (recursive && !isInside(path, workspace)) return "broad";
+        // Device files never end (`/dev/zero`) or are not text; reading one is not a look-only act.
+        if (path.startsWith("/dev/") && path !== "/dev/null") deviceFile = true;
+      }
+    }
+  }
+
   // Judged one command at a time, so `df -h / | tail -1` is not mistaken for reading all of `/`.
-  for (const segment of unquoted.split(/\|\||&&|[|;\n]/)) {
-    if (!READS_WIDELY.test(segment)) continue;
-    const words = segment.split(/[\s<>()=,]+/).filter(Boolean);
-    for (const word of words.slice(1)) {
-      const path = await target(word);
-      if (path !== null && isBroadPath(path, home)) return "broad";
+  for (const text of variants) {
+    for (const segment of text.split(/\|\||&&|[|;\n]/)) {
+      if (!READS_WIDELY.test(segment)) continue;
+      const words = segment.split(/[\s<>()=,]+/).filter(Boolean);
+      for (const word of words.slice(1)) {
+        const path = await target(word);
+        if (path !== null && isBroadPath(path, home)) return "broad";
+      }
     }
   }
   return otherAccount || deviceFile || hasShellExpansion(command) ? "opaque" : "plain";

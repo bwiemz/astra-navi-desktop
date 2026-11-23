@@ -667,6 +667,7 @@ export class MissionBoard {
   private readonly timers = new Map<string, NodeJS.Timeout>();
   /** The missions whose timer is the wait between two tries of a failed step. */
   private readonly retrying = new Set<string>();
+  private readonly pendingNudge = new Set<string>();
   private readonly pendingArtifacts = new Set<Promise<void>>();
   private readonly pendingCleanups = new Set<Promise<void>>();
   private saveChain: Promise<void> = Promise.resolve();
@@ -1145,6 +1146,7 @@ export class MissionBoard {
     if (timer) clearTimeout(timer);
     this.timers.delete(id);
     this.retrying.delete(id);
+    this.pendingNudge.delete(id);
   }
 
   /** Stops everything, for when she closes. What was running is found interrupted next time. */
@@ -1177,12 +1179,12 @@ export class MissionBoard {
    */
   nudge(): void {
     for (const mission of this.missions) {
-      if (
-        mission.state === "planned" &&
-        !this.working.has(mission.id) &&
-        !this.retrying.has(mission.id)
-      ) {
-        this.advance(mission.id);
+      if (mission.state === "planned" && !this.retrying.has(mission.id)) {
+        if (this.working.has(mission.id)) {
+          this.pendingNudge.add(mission.id);
+        } else {
+          this.advance(mission.id);
+        }
       }
     }
   }
@@ -1202,6 +1204,9 @@ export class MissionBoard {
       .catch((error: unknown) => console.warn("[missions] a mission could not go on:", error))
       .finally(() => {
         if (this.working.get(id) === stop) this.working.delete(id);
+        if (!this.disposed && this.pendingNudge.delete(id)) {
+          this.advance(id);
+        }
       });
   }
 

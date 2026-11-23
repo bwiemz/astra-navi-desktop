@@ -145,7 +145,7 @@ describe("toolVerdict", () => {
     for (const command of [
       "cat ../../.ssh/id_ed25519",
       "cat notes/config",
-      "cat ../../../../../../../../proc/self/environ",
+      "cat ../../../../../../../../../../../../proc/self/environ",
     ]) {
       expect(await verdict(TOOLS.runCommand, { command }), command).toMatchObject({
         sensitive: true,
