@@ -10,9 +10,21 @@ import type { PlatformAdapter } from "./platform/adapter.ts";
  * (KWin, MPRIS, PipeWire, Klipper, logind), started with fixed arguments and no shell.
  */
 
-function run(program: string, args: readonly string[], timeoutMs = 6000): Promise<string> {
+export type DesktopRunner = (
+  program: string,
+  args: readonly string[],
+  timeoutMs?: number,
+  stdinText?: string,
+) => Promise<string>;
+
+function run(
+  program: string,
+  args: readonly string[],
+  timeoutMs = 6000,
+  stdinText?: string,
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       program,
       args,
       { timeout: timeoutMs, encoding: "utf8", maxBuffer: 2 * 1024 * 1024 },
@@ -28,6 +40,9 @@ function run(program: string, args: readonly string[], timeoutMs = 6000): Promis
         );
       },
     );
+    if (stdinText !== undefined && child.stdin) {
+      child.stdin.end(stdinText);
+    }
   });
 }
 
@@ -51,6 +66,21 @@ export interface DesktopWindow {
 }
 
 export type WindowAction = "focus" | "minimize" | "maximize" | "close";
+
+export function mapKwinError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /org\.kde\.KWin/i.test(message) ||
+    /ServiceUnknown/i.test(message) ||
+    /was not provided by any \.service files/i.test(message) ||
+    /This needs "dbus-send", which is not installed/i.test(message)
+  ) {
+    return new Error(
+      "Window listing and management currently require KDE Plasma (KWin) on Linux; unavailable on this desktop session.",
+    );
+  }
+  return error instanceof Error ? error : new Error(message);
+}
 
 /**
  * KWin runs small scripts on request but has no way to hand a value back, so the script
@@ -103,6 +133,8 @@ async function askKwin(scriptDir: string, body: string): Promise<unknown> {
         return JSON.parse(line.slice(line.indexOf(`${mark} `) + mark.length + 1)) as unknown;
     }
     throw new Error("The window manager did not answer.");
+  } catch (error) {
+    throw mapKwinError(error);
   } finally {
     await scripting("unloadScript", name).catch(() => undefined);
     await rm(file, { force: true });
@@ -528,22 +560,64 @@ export async function setMuted(muted: boolean): Promise<{ percent: number; muted
 
 const KLIPPER = ["org.kde.klipper", "/klipper", "org.kde.klipper.klipper"] as const;
 
-export async function readClipboard(): Promise<string> {
-  const raw = await run("busctl", [
-    "--user",
-    "--json=short",
-    "call",
-    ...KLIPPER,
-    "getClipboardContents",
-  ]);
-  const data = (JSON.parse(raw) as { data?: unknown }).data;
-  return Array.isArray(data) && typeof data[0] === "string" ? data[0] : "";
+export async function readClipboard(runner: DesktopRunner = run): Promise<string> {
+  try {
+    const raw = await runner("busctl", [
+      "--user",
+      "--json=short",
+      "call",
+      ...KLIPPER,
+      "getClipboardContents",
+    ]);
+    const data = (JSON.parse(raw) as { data?: unknown }).data;
+    return Array.isArray(data) && typeof data[0] === "string" ? data[0] : "";
+  } catch {
+    // Klipper is unavailable on non-KDE sessions; try standard Wayland/X11 clipboard tools.
+  }
+
+  const fallbacks: readonly [string, readonly string[]][] = [
+    ["wl-paste", ["--no-newline"]],
+    ["xclip", ["-selection", "clipboard", "-o"]],
+    ["xsel", ["--clipboard", "--output"]],
+  ];
+  for (const [program, args] of fallbacks) {
+    try {
+      return await runner(program, args, 4000);
+    } catch {
+      // Try next clipboard utility.
+    }
+  }
+  throw new Error(
+    "Could not read the clipboard: org.kde.klipper, wl-paste, xclip, and xsel are all unavailable or failed.",
+  );
 }
 
-export async function writeClipboard(text: string): Promise<void> {
+export async function writeClipboard(text: string, runner: DesktopRunner = run): Promise<void> {
   if (rehearsing()) return;
-  // The "--" matters: without it, text starting with a dash is read as an option.
-  await run("busctl", ["--user", "call", ...KLIPPER, "setClipboardContents", "--", "s", text]);
+  try {
+    // The "--" matters: without it, text starting with a dash is read as an option.
+    await runner("busctl", ["--user", "call", ...KLIPPER, "setClipboardContents", "--", "s", text]);
+    return;
+  } catch {
+    // Klipper is unavailable on non-KDE sessions; try standard Wayland/X11 clipboard tools.
+  }
+
+  const fallbacks: readonly [string, readonly string[]][] = [
+    ["wl-copy", []],
+    ["xclip", ["-selection", "clipboard", "-i"]],
+    ["xsel", ["--clipboard", "--input"]],
+  ];
+  for (const [program, args] of fallbacks) {
+    try {
+      await runner(program, args, 4000, text);
+      return;
+    } catch {
+      // Try next clipboard utility.
+    }
+  }
+  throw new Error(
+    "Could not write to the clipboard: org.kde.klipper, wl-copy, xclip, and xsel are all unavailable or failed.",
+  );
 }
 
 export async function lockScreen(): Promise<void> {

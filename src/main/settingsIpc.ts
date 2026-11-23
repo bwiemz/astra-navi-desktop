@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { describeSource } from "../core/agenda.ts";
 import {
   checkBootstrapStatus,
@@ -24,16 +24,20 @@ import { dataDir, ordersFile, stationDir } from "../core/paths.ts";
 import type { Reach } from "../core/reach.ts";
 import { auditSecurityRules } from "../core/ruleAudit.ts";
 import type { SearchBudget } from "../core/searchBudget.ts";
+import type { SelfCheckResult } from "../core/selfCheck.ts";
 import { excerpt, type StandingOrder } from "../core/standingOrders.ts";
 import { StationAccount, whyNotThese } from "../core/stationAccount.ts";
+import { buildRedactedSupportBundle, formatSupportBundleJson } from "../core/supportBundle.ts";
 import { forShow, type ShownTrace, type TraceKeeper } from "../core/trace.ts";
 import type { ConversationArchive } from "../core/archive.ts";
+import { resolveEdition } from "../shared/edition.ts";
 import type {
   BootstrapStatusView,
   HardwareRecommendationView,
   PolicyAuditSummaryView,
   SettingsPatch,
   SettingsView,
+  SupportBundleResultView,
 } from "../shared/settings.ts";
 import { setStartAtLogin } from "./loginStart.ts";
 import { SettingsPatchSchema, StationAccountSchema } from "./settingsSchema.ts";
@@ -70,6 +74,9 @@ export interface SettingsIpcDeps {
   showLearned(): Promise<void>;
   showActions(): Promise<void>;
   showSelfCheck(): Promise<void>;
+  runSelfCheck?(): Promise<SelfCheckResult>;
+  desktopSessionNotice?(): string | null;
+  recentErrors?(): readonly string[];
   sendToWindow(channel: string, payload?: unknown): void;
   rebuildTrayMenu(): void;
 }
@@ -268,8 +275,30 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       canAskPassword,
       onboardingComplete: config.value.onboardingComplete,
       advancedSettings: config.value.advancedSettings,
+      desktopSessionNotice: deps.desktopSessionNotice?.() ?? null,
       ...(lastBootstrapStatus ? { bootstrapStatus: lastBootstrapStatus } : {}),
       tier10: { ...config.value.tier10 },
+    };
+  }
+
+  async function probeHardwareView(force: boolean): Promise<HardwareRecommendationView> {
+    const GIB = 1024 ** 3;
+    const { profile, recommendation } = await benchmarkFirstLaunchHardware(
+      join(dataDir(), "hardware-profile.json"),
+      { force },
+    );
+    return {
+      gpuName: profile.gpuName,
+      totalVramGb: Number((profile.totalVramBytes / GIB).toFixed(1)),
+      freeVramGb: Number((profile.freeVramBytes / GIB).toFixed(1)),
+      systemRamGb: Number((profile.systemRamBytes / GIB).toFixed(1)),
+      cpuThreads: profile.cpuThreads,
+      memoryBandwidthGbps: profile.memoryBandwidthGbps ?? null,
+      recommendedTier: recommendation.tier,
+      quantization: recommendation.quantization,
+      contextSize: recommendation.contextSize,
+      leanMemory: recommendation.leanMemory,
+      reason: recommendation.reason,
     };
   }
 
@@ -636,24 +665,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       "settings:hardware-profile",
       async (event, force?: unknown): Promise<HardwareRecommendationView> => {
         if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
-        const GIB = 1024 ** 3;
-        const { profile, recommendation } = await benchmarkFirstLaunchHardware(
-          join(dataDir(), "hardware-profile.json"),
-          { force: force === true },
-        );
-        return {
-          gpuName: profile.gpuName,
-          totalVramGb: Number((profile.totalVramBytes / GIB).toFixed(1)),
-          freeVramGb: Number((profile.freeVramBytes / GIB).toFixed(1)),
-          systemRamGb: Number((profile.systemRamBytes / GIB).toFixed(1)),
-          cpuThreads: profile.cpuThreads,
-          memoryBandwidthGbps: profile.memoryBandwidthGbps ?? null,
-          recommendedTier: recommendation.tier,
-          quantization: recommendation.quantization,
-          contextSize: recommendation.contextSize,
-          leanMemory: recommendation.leanMemory,
-          reason: recommendation.reason,
-        };
+        return probeHardwareView(force === true);
       },
     );
     ipcMain.handle(
@@ -721,6 +733,75 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         })),
       };
     });
+    ipcMain.handle(
+      "settings:export-support-bundle",
+      async (event): Promise<SupportBundleResultView> => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const [selfRes, hwRes, bootRes] = await Promise.allSettled([
+          deps.runSelfCheck ? deps.runSelfCheck() : Promise.resolve(null),
+          probeHardwareView(false),
+          checkBootstrapStatus(),
+        ]);
+
+        const extraSecrets: string[] = [
+          config.value.search.braveApiKey,
+          config.value.search.searxngUrl,
+          stationAccount()?.username,
+          ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
+        ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+
+        const enabledTier10Flags = Object.entries(config.value.tier10)
+          .filter(([, enabled]) => enabled)
+          .map(([key]) => key);
+
+        const bundle = buildRedactedSupportBundle({
+          appVersion: app.getVersion(),
+          edition: resolveEdition(),
+          platform: process.platform,
+          arch: process.arch,
+          nodeVersion: process.versions.node,
+          electronVersion: process.versions.electron,
+          desktopSessionNotice: deps.desktopSessionNotice?.() ?? null,
+          selfCheck: selfRes.status === "fulfilled" ? selfRes.value : null,
+          hardware: hwRes.status === "fulfilled" ? hwRes.value : null,
+          bootstrapStatus: bootRes.status === "fulfilled" ? bootRes.value : null,
+          recentErrors: deps.recentErrors?.() ?? [],
+          settingsSummary: {
+            brain: config.value.brain,
+            language: config.value.language,
+            voiceEngine: config.value.voice.engine,
+            speak: config.value.voice.speak,
+            handsOff: config.value.handsOff,
+            lookWithoutAsking: config.value.sight.withoutAsking,
+            yieldToGames: config.value.yieldToGames,
+            quietInGames: config.value.quietInGames,
+            fittingTools: config.value.fittingTools,
+            keepTraces: config.value.keepTraces,
+            advancedSettings: config.value.advancedSettings,
+            stationOpen: config.value.devices.station,
+            enabledTier10Flags,
+          },
+          extraSecretLiterals: extraSecrets,
+        });
+
+        const json = formatSupportBundleJson(bundle);
+        const dir = join(dataDir(), "support-bundles");
+        await mkdir(dir, { recursive: true, mode: 0o700 });
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const filePath = join(dir, `astra-navi-support-${stamp}.json`);
+        await writeFile(filePath, json, { encoding: "utf8", mode: 0o600 });
+        try {
+          shell.showItemInFolder(filePath);
+        } catch {
+          // Headless / sandboxed environments may lack a file manager portal.
+        }
+        return {
+          path: filePath,
+          bytes: Buffer.byteLength(json, "utf8"),
+          redactions: bundle.redactionsApplied,
+        };
+      },
+    );
   }
 
   return {

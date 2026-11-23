@@ -1,11 +1,73 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 import type { PlatformCompanionOverlay } from "../core/platform/adapter.ts";
 
 const run = promisify(execFile);
-const PLUGIN_NAME = "ai-chan-desktop-helper";
+
+const PLUGIN_NAME = "astra-navi-desktop-helper";
+const LEGACY_PLUGIN_NAME = "ai-chan-desktop-helper";
+
+export interface LinuxDesktopEnvironment {
+  desktop: string;
+  sessionType: string;
+  isKdeWayland: boolean;
+  isFlatpak: boolean;
+  overlayMode: "kwin-script" | "gtk-layer-fallback" | "x11-overlay";
+  notice: string | null;
+}
+
+export function detectLinuxDesktopEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = existsSync,
+): LinuxDesktopEnvironment {
+  const desktop = (env["XDG_CURRENT_DESKTOP"] ?? env["DESKTOP_SESSION"] ?? "unknown").trim() || "unknown";
+  const sessionType = (env["XDG_SESSION_TYPE"] ?? "unknown").trim().toLowerCase() || "unknown";
+  const desktopUpper = desktop.toUpperCase();
+  const isKde = desktopUpper.includes("KDE") || desktopUpper.includes("PLASMA");
+  const isKdeWayland = sessionType === "wayland" && isKde;
+  const isFlatpak = Boolean(env["FLATPAK_ID"]) || exists("/.flatpak-info");
+
+  let overlayMode: LinuxDesktopEnvironment["overlayMode"] = "x11-overlay";
+  if (isKdeWayland) {
+    overlayMode = "kwin-script";
+  } else if (sessionType === "wayland") {
+    overlayMode = "gtk-layer-fallback";
+  }
+
+  const reasons: string[] = [];
+  if (isFlatpak) {
+    reasons.push(
+      "Running inside a Flatpak sandbox: local host D-Bus calls, local voice servers, and shell automation require explicit portal/host permissions.",
+    );
+  }
+  if (!isKdeWayland) {
+    if (sessionType === "wayland") {
+      reasons.push(
+        `Non-KDE Wayland session detected (${desktop}): KWin overlay pinning and window automation are disabled; Astra falls back to standard always-on-top overlay behavior.`,
+      );
+    } else if (sessionType === "x11") {
+      reasons.push(
+        `X11 session detected (${desktop}): KWin Wayland helper is skipped; standard X11 always-on-top overlay and xclip/xsel clipboard fallbacks are used.`,
+      );
+    } else {
+      reasons.push(
+        `Desktop session (${desktop} / ${sessionType}) is not KDE Plasma on Wayland: KWin helper is skipped and Astra uses fallback overlay behavior.`,
+      );
+    }
+  }
+
+  return {
+    desktop,
+    sessionType,
+    isKdeWayland,
+    isFlatpak,
+    overlayMode,
+    notice: reasons.length > 0 ? reasons.join(" ") : null,
+  };
+}
 
 /**
  * On Wayland a window cannot keep itself above others, hide from the taskbar or choose
@@ -136,10 +198,11 @@ async function kwin(method: string, ...args: string[]): Promise<string> {
   return stdout;
 }
 
-export function isKdeWayland(): boolean {
+export function isKdeWayland(env: NodeJS.ProcessEnv = process.env): boolean {
   return (
-    process.env["XDG_SESSION_TYPE"] === "wayland" &&
-    (process.env["XDG_CURRENT_DESKTOP"] ?? "").toUpperCase().includes("KDE")
+    (env["XDG_SESSION_TYPE"] ?? "").trim().toLowerCase() === "wayland" &&
+    ((env["XDG_CURRENT_DESKTOP"] ?? "").toUpperCase().includes("KDE") ||
+      (env["XDG_CURRENT_DESKTOP"] ?? "").toUpperCase().includes("PLASMA"))
   );
 }
 
@@ -155,10 +218,12 @@ export async function installKwinHelper(options: {
   margin: { right: number; bottom: number };
 }): Promise<(() => Promise<void>) | null> {
   const remove = async (): Promise<void> => {
-    try {
-      await kwin("unloadScript", PLUGIN_NAME);
-    } catch {
-      // Not loaded, or KWin is gone; either way there is nothing left to remove.
+    for (const name of [PLUGIN_NAME, LEGACY_PLUGIN_NAME]) {
+      try {
+        await kwin("unloadScript", name);
+      } catch {
+        // Not loaded, or KWin is gone; either way there is nothing left to remove.
+      }
     }
   };
   try {

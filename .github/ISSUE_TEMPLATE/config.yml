@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Disclosure
+    url: https://github.com/bwiemz/astra-navi-desktop/security/advisories/new
+    about: Do not open public issues for security vulnerabilities. Report privately following SECURITY.md.

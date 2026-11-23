@@ -278,6 +278,9 @@ function show(view: SettingsView): void {
   element<HTMLInputElement>("leanMemory").checked = view.leanMemory;
   element<HTMLInputElement>("fittingTools").checked = view.fittingTools;
   element<HTMLInputElement>("keepTraces").checked = view.keepTraces;
+  const sessionNotice = element("desktop-session-notice");
+  sessionNotice.hidden = !view.desktopSessionNotice;
+  sessionNotice.textContent = view.desktopSessionNotice ?? "";
   showTier10(view.tier10);
 
   fill(
@@ -958,6 +961,25 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-o
 }
 element<HTMLButtonElement>("forget").addEventListener("click", () => {
   void bridge.forgetConversations().then(show);
+});
+
+const exportBundleBtn = element<HTMLButtonElement>("export-support-bundle");
+const supportBundleStatus = element("support-bundle-status");
+exportBundleBtn.addEventListener("click", () => {
+  exportBundleBtn.disabled = true;
+  supportBundleStatus.textContent = "Building redacted diagnostics bundle…";
+  void bridge
+    .exportSupportBundle()
+    .then((result) => {
+      supportBundleStatus.textContent = `Saved redacted bundle (${result.bytes} B, ${result.redactions} secrets/paths scrubbed): ${result.path}`;
+    })
+    .catch((error: unknown) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      supportBundleStatus.textContent = `Could not export support bundle: ${msg}`;
+    })
+    .finally(() => {
+      exportBundleBtn.disabled = false;
+    });
 });
 
 // ---------- the strip of section names: go to one, and see which one is in view ----------

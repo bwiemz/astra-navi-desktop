@@ -45,7 +45,7 @@ export function scheduleDebugAids(deps: DebugDeps): void {
         {
           type: "text",
           delta:
-            "Kdenlive is in the official repos, Captain. **AI-chan** will install it with `pacman`, so you'll get a password prompt.\n\n- about 310 MB\n- no AUR needed",
+            "Kdenlive is in the official repos, Captain. **Astra** will install it with `pacman`, so you'll get a password prompt.\n\n- about 310 MB\n- no AUR needed",
         },
         // In the order her tools really work: the question comes first, and the step is
         // only named once it has been allowed.

@@ -1,0 +1,249 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: "Release edition (community or supporter)"
+        required: true
+        default: "community"
+        type: choice
+        options:
+          - community
+          - supporter
+      require_windows_signing:
+        description: "Fail build if Windows Authenticode signing secrets are absent"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  win-hands-native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Build NativeAOT Windows Hands helper
+        run: >
+          dotnet publish hands/win-hands-native/WinHands.csproj
+          -c Release -r win-x64 -p:PublishAot=true --self-contained
+          -o hands/win-hands-native/bin/Release/net9.0/win-x64/publish
+
+      - name: Smoke test win-hands.exe
+        shell: pwsh
+        run: |
+          ./hands/win-hands-native/bin/Release/net9.0/win-x64/publish/win-hands.exe ping
+          ./hands/win-hands-native/bin/Release/net9.0/win-x64/publish/win-hands.exe version
+
+      - name: Sign win-hands.exe (when credentials configured)
+        shell: pwsh
+        env:
+          AZURE_CODE_SIGNING_ENDPOINT: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
+          AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
+          AZURE_CODE_SIGNING_CERT_PROFILE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE }}
+          ASTRA_NAVI_CERT_PFX_B64: ${{ secrets.ASTRA_NAVI_CERT_PFX_B64 }}
+          ASTRA_NAVI_CERT_PASS: ${{ secrets.ASTRA_NAVI_CERT_PASS }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORG_SLUG: ${{ secrets.SIGNPATH_ORG_SLUG }}
+          SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+        run: |
+          $hasCert = $false
+          if ($env:ASTRA_NAVI_CERT_PFX_B64) {
+            $pfxOut = Join-Path $env:RUNNER_TEMP "release-cert.pfx"
+            [IO.File]::WriteAllBytes($pfxOut, [Convert]::FromBase64String($env:ASTRA_NAVI_CERT_PFX_B64))
+            $env:ASTRA_NAVI_CERT_PFX = $pfxOut
+            $hasCert = $true
+          } elseif ($env:AZURE_CODE_SIGNING_ENDPOINT -and $env:AZURE_CODE_SIGNING_ACCOUNT -and $env:AZURE_CODE_SIGNING_CERT_PROFILE) {
+            $hasCert = $true
+          }
+          if ($hasCert) {
+            pwsh -File scripts/sign-windows.ps1 -Targets "hands\win-hands-native\bin\Release\net9.0\win-x64\publish\win-hands.exe"
+          } else {
+            Write-Host "No Windows signing credentials configured; skipping Authenticode signature on win-hands.exe."
+            pwsh -File scripts/sign-windows.ps1 -DryRun
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-hands-native-win-x64
+          path: hands/win-hands-native/bin/Release/net9.0/win-x64/publish/win-hands.exe
+
+  browser-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run package:extension
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-bridge-store-zips
+          path: |
+            dist/astra-navi-browser-bridge-chromium-*.zip
+            dist/astra-navi-browser-bridge-firefox-*.zip
+            dist/browser-bridge-checksums.txt
+
+  android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release APK when Android release keystore is configured
+        env:
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+          ASTRA_NAVI_ANDROID_RELEASE_PASS: ${{ secrets.ASTRA_NAVI_ANDROID_RELEASE_PASS }}
+          ASTRA_NAVI_ANDROID_RELEASE_ALIAS: ${{ secrets.ASTRA_NAVI_ANDROID_RELEASE_ALIAS }}
+        run: |
+          if [[ -z "${ANDROID_RELEASE_KEYSTORE_B64}" || -z "${ASTRA_NAVI_ANDROID_RELEASE_PASS}" ]]; then
+            echo "Android release secrets not set; skipping APK build for this run."
+            mkdir -p phone-app/build
+            echo "skipped" > phone-app/build/SKIPPED.txt
+            exit 0
+          fi
+          bash scripts/setup-android.sh
+          key_path="${RUNNER_TEMP}/astranavi-android-release.p12"
+          printf '%s' "${ANDROID_RELEASE_KEYSTORE_B64}" | base64 --decode > "${key_path}"
+          chmod 600 "${key_path}"
+          ASTRA_NAVI_ANDROID_RELEASE_KEYSTORE="${key_path}" bash scripts/build-android.sh --release
+          rm -f "${key_path}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: phone-app/build/
+
+  package-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils fd-find ripgrep rpm
+          sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npm run eval -- --fuzz
+      - run: npm run eval -- --audit
+      - name: Package Linux AppImage & .deb
+        env:
+          ASTRA_NAVI_EDITION: ${{ inputs.edition || 'community' }}
+        run: node scripts/package-release.ts --edition "${ASTRA_NAVI_EDITION}" --platform linux --checksums
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/edition-manifest.json
+            dist/SHA256SUMS.txt
+
+  package-windows:
+    runs-on: windows-latest
+    needs: [win-hands-native]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-hands-native-win-x64
+          path: hands/win-hands-native/bin/Release/net9.0/win-x64/publish
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npm run eval -- --fuzz
+      - run: npm run eval -- --audit
+      - name: Package Windows NSIS & Portable
+        shell: pwsh
+        env:
+          ASTRA_NAVI_EDITION: ${{ inputs.edition || 'community' }}
+        run: node scripts/package-release.ts --edition $env:ASTRA_NAVI_EDITION --platform win
+      - name: Sign Windows installers (when configured)
+        shell: pwsh
+        env:
+          REQUIRE_SIGNING: ${{ inputs.require_windows_signing }}
+          AZURE_CODE_SIGNING_ENDPOINT: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
+          AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
+          AZURE_CODE_SIGNING_CERT_PROFILE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE }}
+          ASTRA_NAVI_CERT_PFX_B64: ${{ secrets.ASTRA_NAVI_CERT_PFX_B64 }}
+          ASTRA_NAVI_CERT_PASS: ${{ secrets.ASTRA_NAVI_CERT_PASS }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORG_SLUG: ${{ secrets.SIGNPATH_ORG_SLUG }}
+          SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+        run: |
+          $hasCreds = $false
+          if ($env:ASTRA_NAVI_CERT_PFX_B64) {
+            $pfxOut = Join-Path $env:RUNNER_TEMP "release-cert.pfx"
+            [IO.File]::WriteAllBytes($pfxOut, [Convert]::FromBase64String($env:ASTRA_NAVI_CERT_PFX_B64))
+            $env:ASTRA_NAVI_CERT_PFX = $pfxOut
+            $hasCreds = $true
+          } elseif (($env:AZURE_CODE_SIGNING_ENDPOINT -and $env:AZURE_CODE_SIGNING_ACCOUNT -and $env:AZURE_CODE_SIGNING_CERT_PROFILE) -or ($env:SIGNPATH_API_TOKEN -and $env:SIGNPATH_ORG_SLUG -and $env:SIGNPATH_PROJECT_SLUG)) {
+            $hasCreds = $true
+          }
+          if ($hasCreds) {
+            pwsh -File scripts/sign-windows.ps1
+          } elseif ($env:REQUIRE_SIGNING -eq "true") {
+            throw "Windows signing secrets are missing and require_windows_signing=true."
+          } else {
+            Write-Host "No Windows signing secrets set; writing unsigned draft artifacts."
+            pwsh -File scripts/sign-windows.ps1 -DryRun
+          }
+      - name: Compute Windows SHA-256 checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist\*.exe | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$h  $($_.Name)"
+          } | Set-Content -Path dist\SHA256SUMS-windows.txt -Encoding UTF8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/SHA256SUMS-windows.txt
+
+  draft-github-release:
+    runs-on: ubuntu-latest
+    needs: [browser-extension, android-apk, package-linux, package-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      - name: Consolidate artifacts & compute unified SHA256SUMS.txt
+        run: |
+          mkdir -p upload
+          find release-artifacts -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.blockmap' -o -name '*.zip' -o -name '*.apk' -o -name 'edition-manifest.json' \) -exec cp -v {} upload/ \;
+          (cd upload && sha256sum * > SHA256SUMS.txt)
+      - name: Create Draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "${TAG}" upload/* \
+            --draft \
+            --verify-tag \
+            --title "Astra Navi Desktop ${TAG}" \
+            --notes-file CHANGELOG.md

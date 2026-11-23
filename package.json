@@ -33,6 +33,7 @@
     "setup-ocr": "node scripts/bootstrap.ts ocr",
     "setup-browser-bridge": "node scripts/bootstrap.ts browser-bridge",
     "install-launcher": "node scripts/bootstrap.ts launcher",
+    "package:extension": "node scripts/package-extension.ts",
     "package:dry": "node scripts/package-release.ts --dry-run",
     "publish:dry": "node scripts/publish-store.ts --dry-run"
   },

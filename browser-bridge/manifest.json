@@ -3,6 +3,12 @@
   "name": "Astra Navi Local DOM Bridge",
   "version": "0.1.0",
   "description": "Read-only local DOM and media companion communicating strictly via native messaging with Astra Navi Desktop.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "permissions": ["activeTab", "scripting", "nativeMessaging"],
   "background": {
     "service_worker": "background.js",

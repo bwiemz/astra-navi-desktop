@@ -1,0 +1,63 @@
+name: Bug Report
+description: Report a bug, crash, packaging issue, or unexpected desktop behavior in Astra Navi Desktop.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve **Astra Navi Desktop**!
+        Please attach a **Redacted Support Bundle** from **Settings -> Her mind -> Export Support Bundle (Redacted)** if relevant.
+        **Never attach raw `config.json`, `her.db`, `memory.json`, `conversations.jsonl`, SSH hostnames, or API keys.**
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating System & Desktop Session
+      options:
+        - Windows 11 (x64)
+        - Linux — KDE Plasma (Wayland)
+        - Linux — KDE Plasma (X11)
+        - Linux — GNOME (Wayland)
+        - Linux — GNOME (X11)
+        - Linux — Hyprland / Sway (Wayland)
+        - Linux — Flatpak
+        - Android Station App
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App Version & Edition
+      description: Example: v0.1.0 Community (GitHub) or v0.1.0 Supporter (Steam / itch.io)
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: GPU, VRAM, System RAM & Brain Tier
+      description: Example: RTX 4070 12 GB VRAM / 32 GB RAM / Standard 9B
+      placeholder: Auto (9B) / CPU-only
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear description of the bug and what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      value: |
+        1. Open...
+        2. Trigger...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Redacted Support Bundle / Relevant Errors (optional)
+      description: Paste output from Settings -> Her mind -> Export Support Bundle (Redacted), or upload the generated JSON file directly.
+      render: json

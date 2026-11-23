@@ -392,25 +392,25 @@ describe("Initiative", () => {
 
 describe("afterWakeName", () => {
   it.each([
-    ["AI-chan, what time is it?", "what time is it?"],
-    ["Hey AI Chan what's the weather", "what's the weather"],
-    ["I-chan, open Firefox.", "open Firefox."],
-    ["Aichan?", ""],
-    ["ok, ai-chan: set a timer", "set a timer"],
-    ["I chon set a timer for 5 minutes", "set a timer for 5 minutes"],
-    ["I, John, set a timer for five minutes.", "set a timer for five minutes."],
-    ["I chant", ""],
-    ["Hey ai channel", ""],
-    ["愛ちゃん、今何時？", "今何時？"],
-    ["ねえアイちゃん、タイマーをセットして", "タイマーをセットして"],
-    ["爱酱，现在几点？", "现在几点？"],
+    ["Astra, what time is it?", "what time is it?"],
+    ["Hey Astra Navi what's the weather", "what's the weather"],
+    ["Astra, open Firefox.", "open Firefox."],
+    ["Astra?", ""],
+    ["ok, astra: set a timer", "set a timer"],
+    ["Yo Astra-Navi set a timer for 5 minutes", "set a timer for 5 minutes"],
+    ["アストラ、今何時？", "今何時？"],
+    ["ねえアストラナビ、タイマーをセットして", "タイマーをセットして"],
+    ["阿斯特拉，现在几点？", "现在几点？"],
+    ["星航领航员，查看温度", "查看温度"],
   ])("hears her name in %s", (heard, rest) => {
     expect(afterWakeName(heard)).toBe(rest);
   });
 
-  it("also answers to names the user has chosen, and only as whole words", () => {
+  it("also answers to names the user has chosen (including legacy aliases), and only as whole words", () => {
     expect(afterWakeName("Computer, lights on", ["Computer"])).toBe("lights on");
     expect(afterWakeName("hey ship ai what's up", ["Ship AI"])).toBe("what's up");
+    expect(afterWakeName("AI-chan, lights on", ["AI-chan"])).toBe("lights on");
+    expect(afterWakeName("AI-chan, lights on")).toBeNull();
     expect(afterWakeName("Computers are great", ["Computer"])).toBeNull();
     expect(afterWakeName("Computer, lights on")).toBeNull();
     expect(afterWakeName("a.b, hello", ["a.b", "x"])).toBe("hello");
@@ -419,8 +419,8 @@ describe("afterWakeName", () => {
 
   it.each([
     "What time is it?",
-    "I think AI-chan is cute",
-    "The chain broke",
+    "I think Astra is helpful",
+    "The astronaut called",
     "今日はいい天気",
     "Aidan called",
   ])("does not take %s as addressed to her", (heard) => {

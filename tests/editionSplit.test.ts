@@ -18,6 +18,9 @@ describe("Open-Core vs Supporter Edition Split", () => {
     expect(community.preTunedLoraPack).toBe(false);
     expect(community.supporterAvatarPacks).toBe(false);
     expect(community.storeAutoUpdate).toBe(false);
+    expect(community.signedInstallers).toBe(false);
+    expect(community.prebuiltAndroidApk).toBe(false);
+    expect(community.packagedBrowserBridge).toBe(false);
 
     const supporter = editionFeatures("supporter");
     expect(supporter.coreRuntime).toBe(true);
@@ -25,5 +28,8 @@ describe("Open-Core vs Supporter Edition Split", () => {
     expect(supporter.preTunedLoraPack).toBe(true);
     expect(supporter.supporterAvatarPacks).toBe(true);
     expect(supporter.storeAutoUpdate).toBe(true);
+    expect(supporter.signedInstallers).toBe(true);
+    expect(supporter.prebuiltAndroidApk).toBe(true);
+    expect(supporter.packagedBrowserBridge).toBe(true);
   });
 });

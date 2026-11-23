@@ -10,10 +10,15 @@ export interface EditionFeatures {
   offlineEvalSuite: true;
   localLoraTrainer: true;
   mobileStation: true;
-  // Optional supporter convenience packs & storefront distribution conveniences
+  // Storefront distribution conveniences & optional supporter perks:
+  // `preTunedLoraPack` only ships when a LoRA checkpoint clears `npm run eval -- --compare`;
+  // v1.0.0 distributes verified baseline GGUF weights without a tuned adapter.
   preTunedLoraPack: boolean;
   supporterAvatarPacks: boolean;
   storeAutoUpdate: boolean;
+  signedInstallers: boolean;
+  prebuiltAndroidApk: boolean;
+  packagedBrowserBridge: boolean;
 }
 
 /**
@@ -43,5 +48,8 @@ export function editionFeatures(edition: Edition): EditionFeatures {
     preTunedLoraPack: isSupporter,
     supporterAvatarPacks: isSupporter,
     storeAutoUpdate: isSupporter,
+    signedInstallers: isSupporter,
+    prebuiltAndroidApk: isSupporter,
+    packagedBrowserBridge: isSupporter,
   };
 }

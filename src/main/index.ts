@@ -104,7 +104,11 @@ import { BrowserDeck } from "./browser.ts";
 import { scheduleDebugAids } from "./debugAids.ts";
 import { registerDesktopIpc } from "./desktopIpc.ts";
 import { registerFleetIpc } from "./fleetIpc.ts";
-import { installKwinHelper, isKdeWayland } from "./kwin.ts";
+import {
+  detectLinuxDesktopEnvironment,
+  installKwinHelper,
+  type LinuxDesktopEnvironment,
+} from "./kwin.ts";
 import { startsAtLogin } from "./loginStart.ts";
 import { createModelFiles } from "./modelFiles.ts";
 import { createReports } from "./reports.ts";
@@ -120,6 +124,23 @@ const APP_ORIGIN = `${SCHEME}://app`;
 const CORNER_MARGIN = { right: 24, bottom: 8 };
 const WINDOW_TITLE = "Astra Navi Desktop";
 const RENDERER_DIR = join(import.meta.dirname, "../renderer");
+const MAX_RECENT_ERRORS = 30;
+const recentErrors: string[] = [];
+const linuxDesktopEnv: LinuxDesktopEnvironment | null =
+  process.platform === "linux" ? detectLinuxDesktopEnvironment() : null;
+
+function recordRecentError(source: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const entry = `[${new Date().toISOString()}] [${source}] ${message.split("\n")[0] ?? message}`;
+  recentErrors.push(entry.slice(0, 400));
+  if (recentErrors.length > MAX_RECENT_ERRORS) {
+    recentErrors.splice(0, recentErrors.length - MAX_RECENT_ERRORS);
+  }
+}
+
+process.on("unhandledRejection", (reason) => {
+  recordRecentError("unhandledRejection", reason);
+});
 
 // Draw through the session's own display system. (Going through XWayland instead was
 // tried for its self-positioning windows; with NVIDIA drivers the window never appears.)
@@ -464,6 +485,9 @@ const settings = createSettingsController({
   showLearned,
   showActions,
   showSelfCheck,
+  runSelfCheck,
+  desktopSessionNotice: () => linuxDesktopEnv?.notice ?? null,
+  recentErrors: () => [...recentErrors],
   sendToWindow,
   rebuildTrayMenu: () => rebuildTrayMenu(),
 });
@@ -1190,6 +1214,7 @@ async function main(): Promise<void> {
     },
     onProblem: (message) => {
       console.warn(`[reach] ${message}`);
+      recordRecentError("reach", message);
       sendToWindow("brain:event", { type: "caution", message } satisfies BrainEvent);
     },
   });
@@ -1354,7 +1379,7 @@ async function main(): Promise<void> {
     fromSettingsWindow: settings.fromSettingsWindow,
     settingsView: settings.settingsView,
   });
-  if (isKdeWayland()) {
+  if (linuxDesktopEnv?.isKdeWayland) {
     removeKwinHelper = await installKwinHelper({
       appId: app.getName(),
       title: WINDOW_TITLE,
@@ -1362,6 +1387,8 @@ async function main(): Promise<void> {
       margin: CORNER_MARGIN,
     });
     canResize = removeKwinHelper !== null;
+  } else if (linuxDesktopEnv?.notice) {
+    console.info(`[desktop] ${linuxDesktopEnv.notice}`);
   }
   settings.noteStartAtLogin(await startsAtLogin());
   createWindow();

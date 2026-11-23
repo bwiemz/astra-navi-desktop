@@ -483,6 +483,7 @@
 
       <section id="sec-mind" class="panel">
         <h2>Her mind</h2>
+        <p id="desktop-session-notice" class="why" hidden></p>
         <label class="row">
           <span class="what">Brain</span>
           <select id="brain"></select>
@@ -532,6 +533,14 @@
             waking her.</span
           >
         </label>
+        <div class="row">
+          <span class="what">Support diagnostics</span>
+          <button id="export-support-bundle" type="button">Export Support Bundle (Redacted)</button>
+          <span id="support-bundle-status" class="why" role="status" aria-live="polite"
+            >Exports hardware, self-check, bootstrap status, and redacted recent errors. Never
+            includes chat history, memory, SSH hosts, or keys.</span
+          >
+        </div>
         <label class="row switch advanced-only">
           <input id="leanMemory" type="checkbox" />
           <span class="what">Use less graphics memory (experimental)</span>

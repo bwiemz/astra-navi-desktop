@@ -52,7 +52,7 @@ npm run setup-voice                # Create isolated Qwen3-TTS Python voice envi
 npm run install-launcher           # Register desktop app launcher shortcut
 ```
 
-For existing **AI-chan Desktop** installs upgrading to **Astra Navi Desktop**: user data paths automatically fall back from `~/.local/share/astra-navi/` (and `~/Documents/Astra-Navi/`) to existing `~/.local/share/ai-chan/` (and `~/Documents/AI-chan/`) and `model.aichan` bundles (`src/core/paths.ts`), so models, memory, and conversations continue working seamlessly. Both `astranavi://` and legacy `aichan://` protocols and wake words (`"Astra"`, `"Astra Navi"`, `"AI-chan"`) are supported.
+For existing installs upgrading from an earlier build: user data paths automatically fall back from `~/.local/share/astra-navi/` (and `~/Documents/Astra-Navi/`) to existing `~/.local/share/ai-chan/` (and `~/Documents/AI-chan/`) and `model.aichan` bundles (`src/core/paths.ts`), so models, memory, and conversations continue working seamlessly. Both `astranavi://` and legacy `aichan://` deep-link protocols work, and default wake words are `"Astra"` / `"Astra Navi"` (custom nicknames can be added in Settings).
 
 ---
 

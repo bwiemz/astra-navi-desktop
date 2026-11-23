@@ -9,6 +9,7 @@ import type {
   SettingsBridge,
   SettingsPatch,
   SettingsView,
+  SupportBundleResultView,
 } from "../shared/settings.ts";
 
 const bridge: SettingsBridge = {
@@ -67,6 +68,8 @@ const bridge: SettingsBridge = {
     }>,
   runPolicyAudit: () =>
     ipcRenderer.invoke("settings:run-policy-audit") as Promise<PolicyAuditSummaryView>,
+  exportSupportBundle: () =>
+    ipcRenderer.invoke("settings:export-support-bundle") as Promise<SupportBundleResultView>,
 };
 
 contextBridge.exposeInMainWorld("aichanSettings", bridge);

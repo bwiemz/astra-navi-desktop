@@ -16,34 +16,52 @@ Users may supply any MMD (`.pmx`) model they are permitted to use and import it 
 - **In-memory decryption:** Files are decrypted in memory on demand over the app's private custom protocol without writing loose model files back to disk.
 - **Honest scope:** Local bundle packing deters casual extraction and redistribution; it is not DRM, since software running on a user's own hardware always has access to the assets it renders.
 
-## Her voice
+## Synthetic Voices
 
-Her voices are synthetic. The designed voices in `assets/voice` were invented by the Qwen3-TTS VoiceDesign model from written descriptions (kept beside each clip); the light voice is a built-in voice of the Kokoro model. None of them is a recording, sample or clone of the character's voice actresses. The fan-use terms above cover the character model, not her voice, and a performer's voice is their own.
+Astra Navi's bundled and optional voices are **100% synthetic**. The designed voice presets in `assets/voice` were synthesized from written timbre descriptions using the Apache-2.0 **Qwen3-TTS VoiceDesign** model; the built-in light voice uses the Apache-2.0 **Kokoro-82M** model. No voice is recorded, sampled, or cloned from any human voice actor.
 
-## The assistant
+## Open-Weight Local AI Models
 
-The assistant runs entirely on the user's computer. It uses open-weight models, each under its own licence:
+The assistant runs entirely on the user's computer using open-weight models downloaded from Hugging Face on user opt-in (none of their makers is affiliated with this project):
 
-| Part                | Model                                                     | Licence         |
+| Part                | Model                                                     | License         |
 | ------------------- | --------------------------------------------------------- | --------------- |
-| Language            | Qwen3.5 4B / 9B, Qwen3.8 27B (GGUF builds by Unsloth)     | Apache-2.0      |
+| Language            | Qwen3.5 4B / 9B / 72B, Qwen3.8 27B (GGUF by Unsloth)      | Apache-2.0      |
 | Speech (designed)   | Qwen3-TTS 0.6B Base, 1.7B VoiceDesign                     | Apache-2.0      |
 | Speech (light)      | Kokoro-82M                                                | Apache-2.0      |
 | Speech recognition  | Moonshine Base (English), Whisper Small (other languages) | MIT, Apache-2.0 |
 | Voice detection     | Silero VAD                                                | MIT             |
 | Finding notes       | multilingual-e5-small (ONNX build by Xenova)              | MIT             |
 | Describing pictures | Florence-2 base (ONNX build by onnx-community)            | MIT             |
+| Screen OCR (setup)  | PaddleOCR v4 ONNX detection & recognition weights         | Apache-2.0      |
 
-The models are downloaded from Hugging Face by each user and are not part of this repository. None of their makers is affiliated with this project.
+## Commercial & Redistributed Software Licenses
 
-## Her reach beyond the window
+All direct production npm packages and optional runtimes redistributed or invoked by **Astra Navi Desktop** (including commercial Supporter Edition builds) use permissive open-source licenses compatible with commercial distribution (`npm notice`, `OFL-1.1` font attribution):
 
-Working inside other programs uses the desktop's own accessibility service (AT-SPI on Linux via `python-gobject`, and Win32 / UI Automation via `hands/win-hands-native/` on Windows). The phone link uses KDE Connect as installed by the user. The page served to paired home devices carries the project notice above, contains no character art, and never serves the 3D character model: the model stays in its encrypted bundle on the PC. Its certificate is generated locally with OpenSSL.
+| Component / Package | Role | License |
+| --- | --- | --- |
+| `electron` | Cross-platform desktop shell & Chromium/Node runtime | MIT |
+| `@babylonjs/core` | WebGL 3D character renderer & PBR shaders | Apache-2.0 |
+| `babylon-mmd` | PMX/VMD MMD model loader, physics & skeletal runtime | MIT |
+| `@fontsource/m-plus-rounded-1c` | Bundled UI typography (`SIL Open Font License 1.1`) | OFL-1.1 |
+| `node-llama-cpp` | Local GGUF LLM inference bindings (`llama.cpp`) | MIT |
+| `@huggingface/transformers` | Local embeddings, STT, and vision pipelines | Apache-2.0 |
+| `kokoro-js` | Built-in lightweight neural TTS | Apache-2.0 |
+| `onnxruntime-node` | Local ONNX model execution (OCR, embeddings, VAD) | MIT |
+| `sharp` | Local image resizing/format conversion for vision | Apache-2.0 |
+| `zod` | IPC, configuration, and tool-schema validation | MIT |
+| `.NET 9` NativeAOT (`WinHands`) | Self-contained Windows UI Automation & input helper | MIT |
+| PyTorch (optional `voice-server`) | Local Python GPU runtime for Qwen3-TTS (user setup) | BSD-3-Clause |
 
-Reaching the user's other machines uses OpenSSH as installed on the computer. Her keys for them are made on the user's computer and never leave it.
+## System Integrations & Companion Apps
 
-The Android app (`app.astranavi.station`, built by `scripts/build-android.sh`) is compiled locally on your computer with OpenJDK (Eclipse Temurin) and Google's Android build tools, which are fetched by `scripts/setup-android.sh` (using them means accepting Google's Android SDK license). It contains no character art and no part of the language model, is signed with a key made on your computer, and is handed only to devices you have paired.
+Working inside other programs uses the desktop's own accessibility service (AT-SPI on Linux via `python-gobject`, and Win32 / UI Automation via `hands/win-hands-native/` on Windows). The phone link uses KDE Connect as installed by the user. The Station page served to paired home devices contains no character art and never serves the 3D character model: the model stays in its local bundle on the PC, and its self-signed TLS certificate is generated locally with OpenSSL.
 
-## Where she looks things up
+Reaching the user's other machines uses OpenSSH as installed on the computer. Per-host ED25519 keys are generated on the user's computer and never leave it.
 
-Lookups go to services that publish an interface for programs. Each has its own terms, and none is affiliated with this project: Wikipedia (text under CC BY-SA), DuckDuckGo's Instant Answer API, the Stack Exchange API (content under CC BY-SA), the Arch Linux wiki, the Hacker News search API by Algolia, and Open-Meteo for weather (data under CC BY 4.0). She identifies herself honestly to all of them and does not try to get past a site that refuses automated visitors. A search engine is used only when the user sets up their own.
+The Android app (`app.astranavi.station`, built by `scripts/build-android.sh`) is compiled with OpenJDK (Eclipse Temurin) and Google's Android build tools (`scripts/setup-android.sh`, subject to the Android SDK License), contains no character art or LLM weights, and communicates only with the user's paired Station.
+
+## Public Knowledge Lookups
+
+Lookups go to public APIs (`Wikipedia` CC BY-SA, `DuckDuckGo` Instant Answer, `Stack Exchange` CC BY-SA, `Arch Linux Wiki`, `Hacker News / Algolia`, and `Open-Meteo` CC BY 4.0) or the user's own configured SearXNG/Brave Search key. Astra Navi identifies itself honestly and never attempts to bypass anti-bot or authentication walls.

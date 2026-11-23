@@ -34,3 +34,12 @@ phone-app/build/
 evals/results/*
 !evals/results/README.md
 !evals/results/BENCHMARKS.md
+
+# Signing keys, keystores, and proprietary Steamworks SDK must never enter git.
+*.p12
+*.jks
+*.keystore
+*.pfx
+*.cer
+*.snk
+steamworks-sdk/

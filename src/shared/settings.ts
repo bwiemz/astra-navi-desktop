@@ -99,6 +99,8 @@ export interface SettingsView {
   onboardingComplete: boolean;
   /** Whether Advanced power-user controls are shown in Settings. */
   advancedSettings: boolean;
+  /** Optional desktop session / compositor compatibility note (e.g. non-KDE Wayland or Flatpak). */
+  desktopSessionNotice?: string | null;
   /** Optional local service availability reported by the cross-platform bootstrapper. */
   bootstrapStatus?: BootstrapStatusView;
   /** Default-off Tier 10 experimental capability switches. */
@@ -314,4 +316,12 @@ export interface SettingsBridge {
   ): Promise<{ ok: boolean; summary: string[]; status: BootstrapStatusView }>;
   /** Runs static security policy audit against current config & standing orders. */
   runPolicyAudit(): Promise<PolicyAuditSummaryView>;
+  /** Builds a redacted diagnostics bundle (no chat history/memory/secrets) and reveals it in the file manager. */
+  exportSupportBundle(): Promise<SupportBundleResultView>;
+}
+
+export interface SupportBundleResultView {
+  path: string;
+  bytes: number;
+  redactions: number;
 }

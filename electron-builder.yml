@@ -35,7 +35,8 @@ linux:
 win:
   target:
     - nsis
-  icon: assets/icon.png
+    - portable
+  icon: assets/icon.ico
   signAndEditExecutable: true
 nsis:
   oneClick: false
@@ -43,3 +44,5 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
+  installerIcon: assets/icon.ico
+  uninstallerIcon: assets/icon.ico

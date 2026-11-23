@@ -1,4 +1,4 @@
-"""Speech server for AI-chan's full voice.
+"""Speech server for Astra Navi's full voice.
 
 Runs Qwen3-TTS on this computer and speaks sentences in one consistent voice: the
 designed reference clip in ``assets/voice``. The desktop app starts this program and
@@ -50,7 +50,7 @@ def send(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Speech server for AI-chan's full voice."
+        description="Speech server for Astra Navi's full voice."
     )
     parser.add_argument("--model", default="Qwen/Qwen3-TTS-12Hz-0.6B-Base")
     parser.add_argument(

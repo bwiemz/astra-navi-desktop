@@ -1,0 +1,35 @@
+name: Feature Request
+description: Propose a new capability, platform adapter, evaluation case, or UX improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the workflow gap or pain point you are running into.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Behavior
+      description: How should Astra Navi behave, and should it be opt-in or gated by an explicit confirmation prompt?
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Target Platforms
+      multiple: true
+      options:
+        - Linux (KDE / Wayland / X11 / Flatpak)
+        - Windows 11
+        - Android Station
+        - Browser Bridge Extension
+        - Offline Evaluation / Training Suite
+  - type: textarea
+    id: privacy_impact
+    attributes:
+      label: Local-First & Security Considerations
+      description: Confirm whether this requires any external network endpoints, new permissions, or OS privileges.

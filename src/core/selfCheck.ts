@@ -84,10 +84,18 @@ export async function storageReport(
       bytes: voices,
     });
   }
+  const primaryModelPath = join(dataDir, "model.astranavi");
+  const legacyModelPath = join(dataDir, "model.aichan");
+  const packedModelPath =
+    (await sizeOf(primaryModelPath)) > 0
+      ? primaryModelPath
+      : (await sizeOf(legacyModelPath)) > 0
+        ? legacyModelPath
+        : primaryModelPath;
   const parts: [string, string][] = [
     ["Hearing, sight and note-finding models", join(modelsDir, "speech")],
     ["Designed-voice software", join(dataDir, "voice-env")],
-    ["The packed character model", join(dataDir, "model.aichan")],
+    ["The packed character model", packedModelPath],
     ["Her records database", join(dataDir, "her.db")],
     ["Past conversations", join(dataDir, "conversations.jsonl")],
     ["Her notes", join(dataDir, "memory.json")],

@@ -107,14 +107,14 @@ describe("Full-Duplex AEC, Sub-150ms Barge-In & Room Wake Gating (Tier 10 §7.1)
 
   it("rejects low-SNR ambient noise and mismatched speaker profile in live room wake gating", () => {
     const noisy = evaluateWakeRoomGate({
-      text: "AI-chan open terminal",
+      text: "Astra open terminal",
       signalRms: 0.03,
       noiseFloorRms: 0.025, // ~1.6 dB SNR < 6 dB
     });
     expect(noisy.accepted).toBe(false);
 
     const wrongSpeaker = evaluateWakeRoomGate({
-      text: "AI-chan check temps",
+      text: "Astra check temps",
       signalRms: 0.15,
       noiseFloorRms: 0.02,
       speakerCosine: 0.45,
@@ -122,7 +122,7 @@ describe("Full-Duplex AEC, Sub-150ms Barge-In & Room Wake Gating (Tier 10 §7.1)
     expect(wrongSpeaker.accepted).toBe(false);
 
     const valid = evaluateWakeRoomGate({
-      text: "Hey AI-chan, what are the CPU temperatures?",
+      text: "Hey Astra Navi, what are the CPU temperatures?",
       signalRms: 0.18,
       noiseFloorRms: 0.02,
       speakerCosine: 0.89,
