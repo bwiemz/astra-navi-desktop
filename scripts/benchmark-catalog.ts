@@ -278,7 +278,8 @@ async function main(): Promise<void> {
     const existing = await readFile(reportPath, "utf8");
     const marker = "\n## 6. ";
     const idx = existing.indexOf(marker);
-    const prefix = idx >= 0 ? existing.slice(0, idx).trimEnd() : existing.trimEnd();
+    const rawPrefix = idx >= 0 ? existing.slice(0, idx).trimEnd() : existing.trimEnd();
+    const prefix = rawPrefix.replace(/(?:\n+---)+$/g, "").trimEnd();
     const section = buildSection6Markdown(fuzz, stress);
     await writeFile(reportPath, `${prefix}\n\n---\n\n${section}`, "utf8");
   }

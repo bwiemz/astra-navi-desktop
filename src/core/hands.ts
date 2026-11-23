@@ -5,18 +5,28 @@ import { createInterface } from "node:readline";
 import type { PlatformAdapter } from "./platform/adapter.ts";
 
 /** Locates the compiled Rust `linux-hands` binary when built locally or bundled alongside `hands/`. */
-export function resolveNativeLinuxHandsBinary(appRoot?: string): string | null {
+export function resolveNativeLinuxHandsBinary(
+  appRootOrHandsDir?: string,
+  resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+): string | null {
   if (process.env["ASTRA_NAVI_FORCE_PYTHON_HANDS"] === "1") return null;
   const override = process.env["ASTRA_NAVI_LINUX_HANDS_BIN"];
   if (override && existsSync(override)) return override;
-  const root = appRoot ? resolve(appRoot) : resolve(dirname(import.meta.dirname), "..");
-  for (const candidate of [
-    join(root, "hands", "linux-hands-native", "bin", "linux-hands"),
-    join(root, "hands", "linux-hands-native", "target", "release", "linux-hands"),
-  ]) {
-    if (existsSync(candidate)) return candidate;
+  const bases = new Set<string>();
+  if (appRootOrHandsDir) bases.add(resolve(appRootOrHandsDir));
+  if (resourcesPath) bases.add(resolve(resourcesPath));
+  bases.add(resolve(dirname(import.meta.dirname), ".."));
+
+  const candidates: string[] = [];
+  for (const base of bases) {
+    candidates.push(
+      join(base, "hands", "linux-hands-native", "bin", "linux-hands"),
+      join(base, "hands", "linux-hands-native", "target", "release", "linux-hands"),
+      join(base, "linux-hands-native", "bin", "linux-hands"),
+      join(base, "linux-hands-native", "target", "release", "linux-hands"),
+    );
   }
-  return null;
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
 /**
@@ -216,7 +226,7 @@ export class Hands {
     const python = this.options.python ?? "python3";
     const nativeBin =
       !this.options.start && process.platform === "linux"
-        ? resolveNativeLinuxHandsBinary()
+        ? resolveNativeLinuxHandsBinary(dirname(this.options.script))
         : null;
     const child =
       this.options.start?.(python, this.options.script) ??

@@ -80,6 +80,7 @@ import {
   ordersFile,
   playLogFile,
   remindersFile,
+  resolveBundledRoot,
   storeFile,
   tracesFile,
   trainingPairsFile,
@@ -286,7 +287,7 @@ const modelFiles = createModelFiles({
   rendererDir: RENDERER_DIR,
   sendToWindow,
   appState,
-  defaultModelPath: join(app.getAppPath(), "assets", "models", "ai-navigator", "ai-navigator.pmx"),
+  defaultModelPath: join(resolveBundledRoot(app.getAppPath()), "assets", "models", "ai-navigator", "ai-navigator.pmx"),
 });
 const { loadModelBundle, packIntoBundle, registerProtocol, importModel, removeModel } = modelFiles;
 
@@ -1353,10 +1354,10 @@ async function main(): Promise<void> {
     sight,
     scriptDir: scratchDir(),
     modelsCacheDir: join(modelsDir(), "speech"),
-    handsScript: join(app.getAppPath(), "hands", "hands.py"),
+    handsScript: join(resolveBundledRoot(app.getAppPath()), "hands", "hands.py"),
     ownApps: [app.getName(), "astra-navi-desktop", "ai-chan-desktop"],
     stationDir: stationDir(),
-    phoneAppFile: join(app.getAppPath(), "phone-app", "build", "astra-navi.apk"),
+    phoneAppFile: join(resolveBundledRoot(app.getAppPath()), "phone-app", "build", "astra-navi.apk"),
     onNotice: (text) =>
       initiative?.raise({ kind: "alert", requested: false, outsideText: true, text }),
     // Shown in her window too, and before her reply to it starts: see takeAwayMessage.

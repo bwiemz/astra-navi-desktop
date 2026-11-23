@@ -16,6 +16,12 @@ files:
 extraResources:
   - from: assets
     to: assets
+    filter:
+      - "**/*"
+      - "!**/*.blend"
+      - "!**/*.blend1"
+      - "!**/*.xcf"
+      - "!**/*.psd"
   - from: hands
     to: hands
     filter:

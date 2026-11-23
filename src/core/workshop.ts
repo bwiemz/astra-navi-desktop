@@ -1,21 +1,55 @@
-import { createHash, sign, timingSafeEqual, verify } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { createHash, randomBytes, sign, timingSafeEqual, verify } from "node:crypto";
+import {
+  constants as fsConstants,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  stat,
+} from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 import { inspectCharacterBundle, openSignedCharacterBundle } from "./characterBundle.ts";
-import { canonicalJsonBytes, PluginManifestSchema, verifyPluginBundle } from "./pluginSdk.ts";
+import { isPrivateIpv4 } from "./permissions.ts";
+import {
+  canonicalJsonBytes,
+  PluginManifestSchema,
+  verifyPluginBundle,
+} from "./pluginSdk.ts";
 import { isInside } from "./riskRules.ts";
+import { isPrivateLanHost } from "./workerMesh.ts";
 
 /**
  * Steam Workshop & Signed Creator Pack Distribution.
  *
  * - Scans local Steam Workshop subscriptions (`libraryfolders.vdf` +
- *   `steamapps/workshop/content/<appId>/<itemId>/`) across Linux, Windows, and macOS.
+ *   `steamapps/workshop/content/<appId>/<itemId>/`) across Linux, Windows, and macOS
+ *   with symlink/realpath escape protection and strict size limits.
  * - Imports signed HTTPS Creator Catalogs for GitHub Releases / itch.io / direct
- *   downloads using Ed25519 signature verification and per-pack SHA-256 checks.
- * - Supports characters (`.pmx`, `.pmd`, `.vrm`, `.bundle`), outfits, animations,
- *   voice profiles, and verified plugin packs with zero path-traversal exposure.
+ *   downloads using Ed25519 signature verification, redirect validation, streaming
+ *   byte caps, and per-pack SHA-256 checks.
+ * - Plugin packs always require explicit user approval (`approvedByUser: false` on install).
  */
+
+const MAX_MANIFEST_BYTES = 256 * 1024;
+const MAX_PLUGIN_ENTRY_BYTES = 4 * 1024 * 1024;
+const MAX_CREATOR_PACK_BYTES = 512 * 1024 * 1024;
+const MAX_HTTPS_REDIRECTS = 3;
+
+const BLOCKED_CREATOR_HOSTS = new Set([
+  "localhost",
+  "127.0.0.1",
+  "::1",
+  "0.0.0.0",
+  "::",
+  "::ffff:0.0.0.0",
+  "169.254.169.254",
+  "metadata.google.internal",
+  "100.100.100.200",
+]);
 
 export const CREATOR_PACK_KINDS = [
   "character",
@@ -25,6 +59,47 @@ export const CREATOR_PACK_KINDS = [
   "voice",
 ] as const;
 export type CreatorPackKind = (typeof CREATOR_PACK_KINDS)[number];
+
+function normalizeMappedIpv4(host: string): string {
+  if (!host.startsWith("::ffff:")) return host;
+  const rest = host.slice("::ffff:".length);
+  const hexPair = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+  if (!hexPair) return rest;
+  const hi = Number.parseInt(hexPair[1] ?? "0", 16);
+  const lo = Number.parseInt(hexPair[2] ?? "0", 16);
+  return `${(hi >>> 8) & 0xff}.${hi & 0xff}.${(lo >>> 8) & 0xff}.${lo & 0xff}`;
+}
+
+export function validatePublicHttpsPackUrl(rawUrl: string): { ok: true; url: URL } | { ok: false; reason: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return { ok: false, reason: "Invalid creator pack URL." };
+  }
+  if (parsed.protocol !== "https:") {
+    return { ok: false, reason: `Creator pack URL must use https:// (got "${parsed.protocol}").` };
+  }
+  if (parsed.username || parsed.password) {
+    return { ok: false, reason: "Creator pack URLs must not embed credentials." };
+  }
+  const rawHost = parsed.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+  const host = (rawHost.split("%")[0] ?? rawHost).replace(/\.+$/, "");
+  const mappedV4 = normalizeMappedIpv4(host);
+  if (
+    !host ||
+    BLOCKED_CREATOR_HOSTS.has(host) ||
+    BLOCKED_CREATOR_HOSTS.has(mappedV4) ||
+    mappedV4.startsWith("169.254.") ||
+    mappedV4.startsWith("0.") ||
+    host.startsWith("fe80:") ||
+    isPrivateLanHost(mappedV4) ||
+    isPrivateIpv4(mappedV4)
+  ) {
+    return { ok: false, reason: `Blocked private, loopback, link-local, or metadata host "${host}".` };
+  }
+  return { ok: true, url: parsed };
+}
 
 export const CreatorPackEntrySchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9._-]{1,63}$/),
@@ -37,9 +112,9 @@ export const CreatorPackEntrySchema = z.object({
     .string()
     .url()
     .max(512)
-    .refine((u) => u.startsWith("https://"), "Creator pack URLs must use https://."),
+    .refine((u) => validatePublicHttpsPackUrl(u).ok, "Creator pack URLs must use public https://."),
   sha256: z.string().regex(/^[0-9a-f]{64}$/i),
-  sizeBytes: z.number().int().min(1).max(512 * 1024 * 1024),
+  sizeBytes: z.number().int().min(1).max(MAX_CREATOR_PACK_BYTES),
   description: z.string().max(400).optional(),
   tags: z.array(z.string().max(32)).max(12).optional(),
 });
@@ -54,6 +129,12 @@ export const CreatorCatalogSchema = z.object({
 });
 export type CreatorCatalog = z.infer<typeof CreatorCatalogSchema>;
 
+function isSafeRelativePath(p: string): boolean {
+  if (!p || p.includes("\0") || p.includes("..") || p.includes("\\") || p.includes(":")) return false;
+  if (p.startsWith("/") || p.endsWith("/")) return false;
+  return p.split("/").every((seg) => seg.length > 0 && seg !== "." && seg !== "..");
+}
+
 export const AssetPackManifestSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9._-]{1,63}$/),
   kind: z.enum(["outfit", "animation", "voice"]),
@@ -65,7 +146,7 @@ export const AssetPackManifestSchema = z.object({
     .string()
     .min(1)
     .max(160)
-    .refine((p) => !p.includes("..") && !p.startsWith("/") && !p.includes("\\")),
+    .refine(isSafeRelativePath, "Asset entry must remain inside its pack directory."),
 });
 export type AssetPackManifest = z.infer<typeof AssetPackManifestSchema>;
 
@@ -79,19 +160,21 @@ export interface WorkshopDiscoveredItem {
   verifiedSignature: boolean;
 }
 
-export interface WorkshopSubscription {
-  id: string;
-  kind: CreatorPackKind;
-  name: string;
-  version: string;
-  author: string;
-  source: "steam-workshop" | "signed-catalog";
-  installDir: string;
-  workshopId?: string;
-  sha256?: string;
-  subscribedAt: string;
-  verifiedSignature: boolean;
-}
+export const WorkshopSubscriptionSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9._-]{1,63}$/),
+  kind: z.enum(CREATOR_PACK_KINDS),
+  name: z.string().min(1).max(80),
+  version: z.string().min(1).max(32),
+  author: z.string().min(1).max(80),
+  source: z.enum(["steam-workshop", "signed-catalog"]),
+  installDir: z.string().min(1).max(512),
+  workshopId: z.string().max(64).optional(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
+  subscribedAt: z.string().min(1).max(64),
+  verifiedSignature: z.boolean(),
+  approvedByUser: z.boolean().optional(),
+});
+export type WorkshopSubscription = z.infer<typeof WorkshopSubscriptionSchema>;
 
 /** Parses Steam's `libraryfolders.vdf` to extract configured Steam library directories. */
 export function parseValveKeyValuesLibraries(vdfText: string): string[] {
@@ -135,6 +218,25 @@ async function isSymlink(path: string): Promise<boolean> {
   }
 }
 
+async function resolveInsideRealDir(targetPath: string, realRootDir: string): Promise<string | null> {
+  if (await isSymlink(targetPath)) return null;
+  try {
+    const realTarget = await realpath(targetPath);
+    if (!isInside(realTarget, realRootDir)) return null;
+    return realTarget;
+  } catch {
+    return null;
+  }
+}
+
+async function readFileBounded(path: string, maxBytes: number): Promise<Buffer> {
+  const info = await stat(path);
+  if (!info.isFile() || info.size > maxBytes) {
+    throw new Error(`Refused file exceeding ${maxBytes} bytes: ${basename(path)}`);
+  }
+  return readFile(path);
+}
+
 /**
  * Scans Steam Workshop downloads (`<library>/steamapps/workshop/content/<appId>/<itemId>`)
  * for validated character rigs, signed creator plugin packs, and animation/voice/outfit add-ons.
@@ -154,12 +256,12 @@ export async function scanSteamWorkshopItems(options: {
     libraryDirs.add(resolve(root));
     const vdfPath = join(root, "steamapps", "libraryfolders.vdf");
     try {
-      const vdf = await readFile(vdfPath, "utf8");
+      const vdf = (await readFileBounded(vdfPath, MAX_MANIFEST_BYTES)).toString("utf8");
       for (const lib of parseValveKeyValuesLibraries(vdf)) {
         libraryDirs.add(resolve(lib));
       }
     } catch {
-      // Root does not contain libraryfolders.vdf; continue scanning remaining roots.
+      // Root does not contain readable libraryfolders.vdf; continue scanning remaining roots.
     }
   }
 
@@ -169,37 +271,46 @@ export async function scanSteamWorkshopItems(options: {
 
   for (const lib of libraryDirs) {
     const contentDir = join(lib, "steamapps", "workshop", "content", options.appId);
+    if (await isSymlink(contentDir)) continue;
+    let realContentDir: string;
+    try {
+      realContentDir = await realpath(contentDir);
+    } catch {
+      continue;
+    }
     let entries;
     try {
-      entries = await readdir(contentDir, { withFileTypes: true });
+      entries = await readdir(realContentDir, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink() || !/^\d+$/.test(entry.name)) continue;
-      const itemDir = resolve(contentDir, entry.name);
-      if (seenDirs.has(itemDir) || !isInside(itemDir, contentDir)) continue;
-      seenDirs.add(itemDir);
+      const candidateDir = resolve(realContentDir, entry.name);
+      const realItemDir = await resolveInsideRealDir(candidateDir, realContentDir);
+      if (!realItemDir || seenDirs.has(realItemDir)) continue;
+      seenDirs.add(realItemDir);
 
-      const manifestFile = join(itemDir, "manifest.json");
-      if (await isSymlink(manifestFile)) continue;
+      const realManifestFile = await resolveInsideRealDir(join(realItemDir, "manifest.json"), realItemDir);
+      if (!realManifestFile) continue;
 
       let rawJson: unknown;
       try {
-        rawJson = JSON.parse(await readFile(manifestFile, "utf8")) as unknown;
+        const manifestBytes = await readFileBounded(realManifestFile, MAX_MANIFEST_BYTES);
+        rawJson = JSON.parse(manifestBytes.toString("utf8")) as unknown;
       } catch {
         continue;
       }
 
       // 1. Character bundle (.pmx/.pmd/.vrm + shader/animations/voice overrides)
       if (typeof rawJson === "object" && rawJson !== null && "modelEntry" in rawJson) {
-        const inspected = await inspectCharacterBundle(itemDir, {
+        const inspected = await inspectCharacterBundle(realItemDir, {
           trustedPublicKeysPem: trustedKeys,
         });
         if (inspected.ok && inspected.manifest) {
           discovered.push({
             workshopId: entry.name,
-            itemDir,
+            itemDir: realItemDir,
             kind: "character",
             id: inspected.manifest.id,
             name: inspected.manifest.name,
@@ -214,15 +325,19 @@ export async function scanSteamWorkshopItems(options: {
       if (typeof rawJson === "object" && rawJson !== null && "permissions" in rawJson) {
         const parsed = PluginManifestSchema.safeParse(rawJson);
         if (!parsed.success) continue;
-        const entryPath = resolve(itemDir, parsed.data.entry);
-        if (!isInside(entryPath, itemDir) || (await isSymlink(entryPath))) continue;
+        const entryCandidate = resolve(realItemDir, parsed.data.entry);
+        const realEntryPath = await resolveInsideRealDir(entryCandidate, realItemDir);
+        if (!realEntryPath) continue;
         try {
-          const entryBytes = await readFile(entryPath);
+          const entryBytes = await readFileBounded(realEntryPath, MAX_PLUGIN_ENTRY_BYTES);
           let sig = "";
-          try {
-            sig = (await readFile(join(itemDir, "manifest.sig"), "utf8")).trim();
-          } catch {
-            // Signature optional when scanning unverified local Workshop folders.
+          const sigPath = await resolveInsideRealDir(join(realItemDir, "manifest.sig"), realItemDir);
+          if (sigPath) {
+            try {
+              sig = (await readFileBounded(sigPath, MAX_MANIFEST_BYTES)).toString("utf8").trim();
+            } catch {
+              sig = "";
+            }
           }
           let verifiedSignature = false;
           if (sig && trustedKeys.length > 0) {
@@ -241,7 +356,7 @@ export async function scanSteamWorkshopItems(options: {
           }
           discovered.push({
             workshopId: entry.name,
-            itemDir,
+            itemDir: realItemDir,
             kind: "plugin",
             id: parsed.data.id,
             name: parsed.data.name,
@@ -257,11 +372,12 @@ export async function scanSteamWorkshopItems(options: {
       // 3. Asset add-on pack (outfit, animation, voice profile)
       const assetParsed = AssetPackManifestSchema.safeParse(rawJson);
       if (assetParsed.success) {
-        const entryPath = resolve(itemDir, assetParsed.data.entry);
-        if (isInside(entryPath, itemDir) && !(await isSymlink(entryPath))) {
+        const entryCandidate = resolve(realItemDir, assetParsed.data.entry);
+        const realEntryPath = await resolveInsideRealDir(entryCandidate, realItemDir);
+        if (realEntryPath) {
           discovered.push({
             workshopId: entry.name,
-            itemDir,
+            itemDir: realItemDir,
             kind: "asset_pack",
             id: assetParsed.data.id,
             name: assetParsed.data.name,
@@ -327,29 +443,120 @@ export interface InstallCreatorPackOptions {
   entry: CreatorPackEntry;
   installRoot: string;
   fetchBytes?(url: string): Promise<Buffer>;
+  fetchImpl?: typeof fetch;
   trustedBundleKeysPem?: readonly string[];
   requireSignedBundle?: boolean;
 }
 
+async function writeAtomicExclusive(targetPath: string, bytes: Buffer): Promise<void> {
+  const tmpPath = `${targetPath}.${randomBytes(8).toString("hex")}.tmp`;
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const flags =
+    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollow;
+  const handle = await open(tmpPath, flags, 0o600);
+  try {
+    await handle.writeFile(bytes);
+  } finally {
+    await handle.close();
+  }
+  if (await isSymlink(targetPath)) {
+    throw new Error(`Refused overwriting symlink destination "${basename(targetPath)}".`);
+  }
+  await rename(tmpPath, targetPath);
+}
+
+async function fetchBoundedCreatorPackBytes(
+  startUrl: string,
+  maxBytes: number,
+  fetchFn: typeof fetch,
+): Promise<Buffer> {
+  let currentUrl = startUrl;
+  let res: Response | null = null;
+
+  for (let hop = 0; hop <= MAX_HTTPS_REDIRECTS; hop += 1) {
+    const check = validatePublicHttpsPackUrl(currentUrl);
+    if (!check.ok) throw new Error(check.reason);
+    const attempt = await fetchFn(check.url.toString(), { redirect: "manual" });
+    if (attempt.status >= 300 && attempt.status < 400) {
+      const location = attempt.headers.get("location");
+      await attempt.body?.cancel().catch(() => undefined);
+      if (!location) {
+        throw new Error(`Redirect response (${attempt.status}) missing Location header.`);
+      }
+      if (hop === MAX_HTTPS_REDIRECTS) {
+        throw new Error(`Too many HTTPS redirects (>${MAX_HTTPS_REDIRECTS}) downloading creator pack.`);
+      }
+      currentUrl = new URL(location, check.url).toString();
+      continue;
+    }
+    res = attempt;
+    break;
+  }
+
+  if (!res) throw new Error("Failed to resolve creator pack response.");
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`HTTP ${res.status} downloading creator pack.`);
+  }
+  const declaredLen = res.headers.get("content-length");
+  if (declaredLen) {
+    const n = Number(declaredLen);
+    if (Number.isFinite(n) && n > maxBytes) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`Creator pack Content-Length (${n} bytes) exceeds declared size limit (${maxBytes} bytes).`);
+    }
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) {
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.byteLength > maxBytes) {
+      throw new Error(`Creator pack payload (${buf.byteLength} bytes) exceeds declared size limit (${maxBytes} bytes).`);
+    }
+    return buf;
+  }
+
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => undefined);
+          throw new Error(`Creator pack stream exceeded declared size limit (${maxBytes} bytes).`);
+        }
+        chunks.push(Buffer.from(value));
+      }
+    }
+  } catch (err) {
+    await reader.cancel().catch(() => undefined);
+    throw err;
+  }
+  return Buffer.concat(chunks, total);
+}
+
 /**
- * Downloads (HTTPS only), SHA-256 verifies with `timingSafeEqual`, and installs a Creator Pack
- * cleanly inside `installRoot/<id>` without allowing path traversal or tampered archives.
+ * Downloads (HTTPS public hosts only, redirect-validated, streaming byte-capped),
+ * SHA-256 verifies with `timingSafeEqual`, validates plugin/bundle schemas, and installs
+ * cleanly inside `installRoot/<id>` without allowing symlink or path traversal escapes.
  */
 export async function installCreatorPack(
   options: InstallCreatorPackOptions,
 ): Promise<WorkshopSubscription> {
   const entry = CreatorPackEntrySchema.parse(options.entry);
+  const maxBytes = Math.min(entry.sizeBytes, MAX_CREATOR_PACK_BYTES);
   const fetcher =
     options.fetchBytes ??
-    (async (url: string): Promise<Buffer> => {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status} downloading creator pack.`);
-      return Buffer.from(await res.arrayBuffer());
-    });
+    ((url: string) => fetchBoundedCreatorPackBytes(url, maxBytes, options.fetchImpl ?? fetch));
 
   const payload = await fetcher(entry.url);
-  if (payload.byteLength === 0 || payload.byteLength > entry.sizeBytes * 2) {
-    throw new Error(`Creator pack size mismatch for "${entry.id}" (${payload.byteLength} bytes).`);
+  if (payload.byteLength === 0 || payload.byteLength > maxBytes) {
+    throw new Error(
+      `Creator pack size mismatch for "${entry.id}" (${payload.byteLength} bytes, expected <= ${maxBytes}).`,
+    );
   }
 
   const actualHash = createHash("sha256").update(payload).digest();
@@ -359,17 +566,85 @@ export async function installCreatorPack(
   }
 
   const rootResolved = resolve(options.installRoot);
-  const packDir = resolve(rootResolved, basename(entry.id));
-  if (!isInside(packDir, rootResolved)) {
-    throw new Error(`Refused path traversal in pack id "${entry.id}".`);
+  await mkdir(rootResolved, { recursive: true, mode: 0o700 });
+  if (await isSymlink(rootResolved)) {
+    throw new Error("Refused installing creator pack into a symlinked installRoot.");
+  }
+  const realRoot = await realpath(rootResolved);
+  const packDir = resolve(realRoot, basename(entry.id));
+  if (!isInside(packDir, realRoot) || (await isSymlink(packDir))) {
+    throw new Error(`Refused path traversal or symlink in pack id "${entry.id}".`);
   }
   await mkdir(packDir, { recursive: true, mode: 0o700 });
+  const realPackDir = await realpath(packDir);
+  if (!isInside(realPackDir, realRoot)) {
+    throw new Error(`Pack install directory escaped installRoot: "${entry.id}".`);
+  }
 
   let verifiedSignature = false;
+  if (entry.kind === "plugin") {
+    let rawPluginObj: unknown;
+    try {
+      rawPluginObj = JSON.parse(payload.toString("utf8")) as unknown;
+    } catch {
+      throw new Error(`Plugin creator pack "${entry.id}" is not valid JSON.`);
+    }
+    const objRec =
+      typeof rawPluginObj === "object" && rawPluginObj !== null && !Array.isArray(rawPluginObj)
+        ? (rawPluginObj as Record<string, unknown>)
+        : null;
+    if (!objRec) {
+      throw new Error(`Plugin creator pack "${entry.id}" must be a manifest or bundle object.`);
+    }
+    if ("manifest" in objRec) {
+      const parsedManifest = PluginManifestSchema.parse(objRec["manifest"]);
+      const sig = typeof objRec["signature"] === "string" ? objRec["signature"] : "";
+      const entryB64 = typeof objRec["entryBase64"] === "string" ? objRec["entryBase64"] : "";
+      const entryBytes = Buffer.from(entryB64, "base64");
+      if (options.requireSignedBundle && (!sig || !(options.trustedBundleKeysPem?.length))) {
+        throw new Error(`Plugin "${entry.id}" requires a valid Ed25519 signature.`);
+      }
+      if (sig && options.trustedBundleKeysPem?.length) {
+        const check = await verifyPluginBundle({
+          manifest: parsedManifest,
+          signature: sig,
+          entryBytes,
+          trustedPublicKeysPem: options.trustedBundleKeysPem,
+        });
+        if (!check.ok) throw new Error(check.reason);
+        verifiedSignature = true;
+      } else {
+        const digest = createHash("sha256").update(entryBytes).digest();
+        const expected = Buffer.from(parsedManifest.sha256, "hex");
+        if (digest.length !== expected.length || !timingSafeEqual(digest, expected)) {
+          throw new Error(`Plugin "${entry.id}" entry SHA-256 mismatch.`);
+        }
+      }
+    } else {
+      PluginManifestSchema.parse(objRec);
+      if (options.requireSignedBundle) {
+        throw new Error(`Plugin "${entry.id}" requires a signed bundle envelope.`);
+      }
+    }
+    await writeAtomicExclusive(join(realPackDir, "pack.json"), payload);
+    return {
+      id: entry.id,
+      kind: entry.kind,
+      name: entry.name,
+      version: entry.version,
+      author: entry.author,
+      source: "signed-catalog",
+      installDir: realPackDir,
+      sha256: entry.sha256,
+      subscribedAt: new Date().toISOString(),
+      verifiedSignature,
+      approvedByUser: false,
+    };
+  }
+
   if (entry.kind === "character" && payload.subarray(0, 8).toString("ascii") === "AICHANB1") {
-    const bundleOut = join(packDir, `${entry.id}.bundle`);
-    await writeFile(`${bundleOut}.tmp`, payload, { mode: 0o600 });
-    await rename(`${bundleOut}.tmp`, bundleOut);
+    const bundleOut = join(realPackDir, `${entry.id}.bundle`);
+    await writeAtomicExclusive(bundleOut, payload);
     const opened = await openSignedCharacterBundle(bundleOut, {
       ...(options.trustedBundleKeysPem ? { trustedPublicKeysPem: options.trustedBundleKeysPem } : {}),
       ...(options.requireSignedBundle !== undefined
@@ -378,10 +653,8 @@ export async function installCreatorPack(
     });
     verifiedSignature = opened.verifiedSignature;
   } else {
-    const ext = entry.kind === "plugin" ? "pack.json" : `${entry.id}.pack.bin`;
-    const targetFile = join(packDir, ext);
-    await writeFile(`${targetFile}.tmp`, payload, { mode: 0o600 });
-    await rename(`${targetFile}.tmp`, targetFile);
+    const targetFile = join(realPackDir, `${entry.id}.pack.bin`);
+    await writeAtomicExclusive(targetFile, payload);
   }
 
   return {
@@ -391,7 +664,7 @@ export async function installCreatorPack(
     version: entry.version,
     author: entry.author,
     source: "signed-catalog",
-    installDir: packDir,
+    installDir: realPackDir,
     sha256: entry.sha256,
     subscribedAt: new Date().toISOString(),
     verifiedSignature,
@@ -419,9 +692,9 @@ export class WorkshopSubscriptionStore {
       const parsed = JSON.parse(raw) as unknown;
       if (Array.isArray(parsed)) {
         for (const item of parsed) {
-          if (typeof item === "object" && item !== null && typeof (item as { id?: unknown }).id === "string") {
-            const sub = item as WorkshopSubscription;
-            this.items.set(sub.id, sub);
+          const valid = WorkshopSubscriptionSchema.safeParse(item);
+          if (valid.success) {
+            this.items.set(valid.data.id, valid.data);
           }
         }
       }
@@ -432,9 +705,7 @@ export class WorkshopSubscriptionStore {
 
   async save(): Promise<void> {
     await mkdir(resolve(this.filePath, ".."), { recursive: true, mode: 0o700 });
-    const tmp = `${this.filePath}.tmp`;
-    await writeFile(tmp, JSON.stringify(this.list(), null, 2), { encoding: "utf8", mode: 0o600 });
-    await rename(tmp, this.filePath);
+    await writeAtomicExclusive(this.filePath, Buffer.from(JSON.stringify(this.list(), null, 2), "utf8"));
   }
 
   list(): WorkshopSubscription[] {
@@ -442,7 +713,8 @@ export class WorkshopSubscriptionStore {
   }
 
   async subscribe(sub: WorkshopSubscription): Promise<void> {
-    this.items.set(sub.id, sub);
+    const validated = WorkshopSubscriptionSchema.parse(sub);
+    this.items.set(validated.id, validated);
     await this.save();
   }
 
@@ -461,6 +733,7 @@ export class WorkshopSubscriptionStore {
     for (const item of discovered) {
       const mappedKind: CreatorPackKind =
         item.kind === "character" ? "character" : item.kind === "plugin" ? "plugin" : "outfit";
+      const prev = this.items.get(item.id);
       this.items.set(item.id, {
         id: item.id,
         kind: mappedKind,
@@ -472,6 +745,7 @@ export class WorkshopSubscriptionStore {
         workshopId: item.workshopId,
         subscribedAt: new Date().toISOString(),
         verifiedSignature: item.verifiedSignature,
+        ...(mappedKind === "plugin" ? { approvedByUser: prev?.approvedByUser === true } : {}),
       });
     }
     await this.save();

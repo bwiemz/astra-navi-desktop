@@ -3,6 +3,25 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
+ * Resolves the root directory holding unpacked bundled resources (`assets/`, `hands/`,
+ * `voice-server/`, `browser-bridge/`). In packaged Electron builds (`asar: true`),
+ * `app.getAppPath()` points inside `app.asar`, while `extraResources` live under
+ * `process.resourcesPath`.
+ */
+export function resolveBundledRoot(
+  fallbackRoot: string,
+  resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+): string {
+  if (
+    resourcesPath &&
+    (existsSync(join(resourcesPath, "hands")) || existsSync(join(resourcesPath, "assets")))
+  ) {
+    return resourcesPath;
+  }
+  return fallbackRoot;
+}
+
+/**
  * Where the app keeps everything it writes. Kept outside the project folder so the
  * repository never contains user data or the character model.
  * Uses `astra-navi` for new installs while falling back to an existing `ai-chan`

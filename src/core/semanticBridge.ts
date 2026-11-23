@@ -5,7 +5,7 @@ import { connect, isIP } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { isPrivateIpv4 } from "./permissions.ts";
+import { isPrivateIpv4, type PolicyContext } from "./permissions.ts";
 import type { McpCallResult, McpHub } from "./mcpClient.ts";
 
 const execFileAsync = promisify(execFile);
@@ -491,14 +491,22 @@ export interface McpBridgeRequest {
   args?: Record<string, unknown>;
 }
 
+export interface McpSemanticBridgeOptions {
+  onOutsideText?: () => void;
+  policyContext?: () => PolicyContext;
+  confirm?: (reason: string, sensitive: boolean) => Promise<boolean>;
+}
+
 /** Exposes connected MCP servers as a first-class Semantic Bridge provider. */
 export class McpSemanticBridge implements SemanticBridgeProvider<McpBridgeRequest, McpCallResult> {
   readonly kind: SemanticAppKind = "mcp";
   readonly name = "Native MCP Client Bridge";
   private readonly hub: McpHub;
+  private readonly options?: McpSemanticBridgeOptions;
 
-  constructor(hub: McpHub) {
+  constructor(hub: McpHub, options?: McpSemanticBridgeOptions) {
     this.hub = hub;
+    this.options = options;
   }
 
   supports(target: string): boolean {
@@ -509,7 +517,12 @@ export class McpSemanticBridge implements SemanticBridgeProvider<McpBridgeReques
   async execute(request: McpBridgeRequest): Promise<McpCallResult | null> {
     const clean = request.tool.startsWith("mcp:") ? request.tool : `mcp:${request.tool}`;
     if (!this.supports(clean)) return null;
-    return this.hub.callPrefixedTool(clean, request.args ?? {});
+    const result = await this.hub.callPrefixedTool(clean, request.args ?? {}, {
+      ...(this.options?.policyContext ? { policyContext: this.options.policyContext() } : {}),
+      ...(this.options?.confirm ? { confirm: this.options.confirm } : {}),
+      ...(this.options?.onOutsideText ? { onOutsideText: this.options.onOutsideText } : {}),
+    });
+    return result;
   }
 
   snapshot(): {

@@ -1419,6 +1419,18 @@ public final class MainActivity extends Activity {
         sheet.addView(browser);
     }
 
+    private static String sanitizeNsdLabel(String raw) {
+        if (raw == null) return "Astra Navi";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < raw.length(); i++) {
+            char ch = raw.charAt(i);
+            if (ch >= 0x20 && ch != 0x7f) sb.append(ch);
+            if (sb.length() >= 40) break;
+        }
+        String clean = sb.toString().trim();
+        return clean.isEmpty() ? "Astra Navi" : clean;
+    }
+
     @SuppressWarnings("deprecation")
     private void startNsdDiscovery(
             final TextView header,
@@ -1426,6 +1438,8 @@ public final class MainActivity extends Activity {
             final EditText addressInput,
             final Runnable connectAction) {
         stopNsdDiscovery();
+        // Never allow passive LAN mDNS discovery to override or prompt when already pinned.
+        if (prefs.getString(KEY_FINGERPRINT, null) != null) return;
         final NsdManager mgr = getSystemService(NsdManager.class);
         if (mgr == null) return;
         nsdManager = mgr;
@@ -1454,13 +1468,25 @@ public final class MainActivity extends Activity {
                                     @Override
                                     public void onServiceResolved(final NsdServiceInfo resolved) {
                                         if (resolved.getHost() == null) return;
+                                        java.util.Map<String, byte[]> attrs = resolved.getAttributes();
+                                        if (attrs != null) {
+                                            byte[] proto = attrs.get("proto");
+                                            if (proto != null) {
+                                                String protoVal = new String(proto, StandardCharsets.UTF_8);
+                                                if (!"https".equalsIgnoreCase(protoVal)) return;
+                                            }
+                                        }
                                         final String host = resolved.getHost().getHostAddress();
                                         final String candidate = host + ":" + resolved.getPort();
                                         if (!isHomeAddress(candidate)) return;
-                                        final String label = resolved.getServiceName() + " (" + candidate + ")";
+                                        final String label =
+                                                sanitizeNsdLabel(resolved.getServiceName())
+                                                        + " ("
+                                                        + candidate
+                                                        + ")";
                                         root.post(
                                                 () -> {
-                                                    if (!alive()) return;
+                                                    if (!alive() || container.getChildCount() >= 12) return;
                                                     for (int i = 0; i < container.getChildCount(); i++) {
                                                         View child = container.getChildAt(i);
                                                         if (candidate.equals(child.getTag())) return;

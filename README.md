@@ -1,25 +1,36 @@
 # Astra Navi Desktop
 
-A local-first desktop companion who stands in the corner of your screen and acts as your PC's own AI navigator. She talks with you by text or voice, remembers and learns, looks things up, sees your screen when you ask, works your desktop (windows, music, volume, clipboard), manages reminders/missions/agendas, runs research in the background while you carry on, and keeps an inspectable record of everything she does.
+A local-first desktop companion who lives on your screen and acts as your PC's own AI navigator. She talks with you by text or voice, remembers and learns, looks things up, sees your screen or desk when asked, works your desktop (windows, music, volume, clipboard), manages reminders/missions/agendas, runs research in the background while you carry on, connects safely to local MCP tools, and keeps an inspectable record of everything she does.
 
-Everything runs on your own computer. There is no account to create, no subscription, and no required cloud API key. The language model, speech recognition, embeddings, and local voices run directly on your hardware.
+Everything runs on your own computer. There is no account to create, no subscription, and no required cloud API key. The language model, speech recognition, neural TTS (`Kokoro-82M` ONNX), embeddings, and local voices run directly on your hardware.
 
 - **Codebase & Evaluation Suite:** Open-source under the **[MIT License](LICENSE)** ([`bwiemz/astra-navi-desktop`](https://github.com/bwiemz/astra-navi-desktop))
-- **Security Architecture & Audits:** Documented in **[SECURITY.md](SECURITY.md)** (`npm run eval -- --fuzz` & `npm run eval -- --audit`)
-- **Benchmarks & GPU Verification:** Live RTX PRO 4500 Blackwell 4B/9B/27B evals, prompt budgets, routing coverage, and empirical LoRA distillation results in **[evals/results/BENCHMARKS.md](evals/results/BENCHMARKS.md)**
-- **Default 3D Character & BYO-MMD:** Ships with **Astra Navi** (`assets/models/ai-navigator/`, CC-BY-4.0 / MIT) plus full Bring-Your-Own MMD (`.pmx` / `.astranavi` encrypted bundle) support — see **[NOTICE.md](NOTICE.md)**
-- **Cross-Platform Contributions:** Built behind a strict `PlatformAdapter` boundary (`src/core/platform/adapter.ts`) with Linux (KDE Plasma Wayland) primary support and Windows `WinHands` NativeAOT + PowerShell backends — see **[CONTRIBUTING.md](CONTRIBUTING.md)**
+- **Security Architecture & Audits:** Documented in **[SECURITY.md](SECURITY.md)** (`npm run eval -- --fuzz`, `npm run eval -- --audit`, and `tests/securityBoundariesAudit.test.ts`)
+- **Benchmarks & GPU Verification:** Live RTX PRO 4500 Blackwell 4B/9B/27B evals, grammar-guarded `Qwen3.5-9B` run (`85%` overall), prompt budgets, routing coverage, rolling catalog matrix, and empirical LoRA distillation results in **[evals/results/BENCHMARKS.md](evals/results/BENCHMARKS.md)**
+- **Default 3D Character & BYO VRM / MMD:** Ships with **Astra Navi** (`assets/models/ai-navigator/`, CC-BY-4.0 / MIT) plus three palette variants (`assets/models/variants/`), native **VRM 1.0** (`VRMC_springBone` + blendshapes), and encrypted **MMD `.pmx`** bundle support — see **[NOTICE.md](NOTICE.md)**
+- **Cross-Platform Architecture:** Built behind a strict `PlatformAdapter` boundary (`src/core/platform/adapter.ts`) with verified Linux (KDE Plasma Wayland + Rust `linux-hands`) support, Windows `WinHands` NativeAOT backends, and experimental macOS/iOS preview stubs — see **[CONTRIBUTING.md](CONTRIBUTING.md)**
+
+---
+
+## Platform Support & Honest Verification Status
+
+| Platform / Feature | Status | Notes |
+| --- | --- | --- |
+| **Linux x86_64** (KDE Plasma Wayland; GNOME/Hyprland/X11 fallback) | **Supported & Verified Live** | Primary dev/GPU workstation target, native Rust `linux-hands` binary (`hands/linux-hands-native/`), unpacked `AppImage`/`.deb`/Flatpak resource layout verified |
+| **Windows 11 64-bit** | **CI Built (Clean VM Recommended Pre-Launch)** | `.NET 9` NativeAOT `win-hands.exe` compiles and smoke-tests in Windows CI; clean blank Windows 11 VM & physical DX/Vulkan VRAM-yield check (`scripts/verify-clean-windows.ps1`) remains in launch checklist |
+| **Android Station Companion** (`phone-app/`) | **Compiled & Hardened (LAN Handset Test Pending)** | `app.astranavi.station` APK compiles/signs locally and in CI with QR + NSD mDNS discovery and full 64-hex HTTPS cert pinning |
+| **macOS / Apple Silicon MLX & iOS App** (`macos.ts`, `mlxEngine.ts`, `ios-app/`) | **Preview / Post-Launch** | Adapter architecture and Swift sources exist in-tree; **not yet compiled or run on physical Apple hardware** |
+| **Steam Workshop Live Sync** (`src/core/workshop.ts`) | **Preview / Post-Launch** | Local Workshop VDF scanner and Ed25519 HTTPS catalogs are tested offline; **live Steamworks AppID integration awaits Store AppID** |
 
 ---
 
 ## What You Need
 
-- **Linux with KDE Plasma on Wayland** is the primary tested desktop target (other Linux desktops run it as an ordinary window without Wayland layer-surface placement).
-- **Windows** backend lives in `src/core/platform/windows.ts` paired with a persistent `.NET 9` NativeAOT helper (`hands/win-hands-native/`, built into `win-hands.exe` on Windows CI) and a persistent `hands/win_hands.ps1 -Serve` fallback; macOS contributors are welcome via `PlatformAdapter`.
+- **Linux with KDE Plasma on Wayland** (other Linux desktops run as an ordinary window with fallback positioning) or **Windows 11 64-bit**.
 - **Node.js 24 or newer.**
-- **A graphics card helps a lot.** With ~7 GB of VRAM, the 9B Standard brain answers in a couple seconds; on 24–32 GB cards, the 27B Large brain fits cleanly. Without a discrete GPU, Astra still runs on CPU in Small mode (more slowly).
-- **Disk space:** 2.8 to 17 GB for the language brain you choose, plus ~0.5 GB for speech recognition and embeddings. Optional designed Qwen3-TTS voices add ~8.5 GB.
-- **3D Character (`Astra Navi` included, or BYO-MMD):** An original futuristic chibi navigator (**Astra Navi**, built procedurally in Blender with 95 bones, Foot/Toe IK, twist bones, 30 articulated finger bones, hair/skirt physics, and 25 morphs) is bundled out of the box. You can also import your own `.pmx` model folder at any time — subject to that model's license terms.
+- **A graphics card helps a lot.** With ~7 GB of VRAM, the 9B Standard brain answers in `< 2 s`; on 24–32 GB cards, the 27B Large brain fits cleanly. Without a discrete GPU, Astra still runs on CPU in Small mode (more slowly).
+- **Disk space:** 2.8 to 17 GB for the language brain you choose, plus ~0.5 GB for speech recognition (`Moonshine`/`Whisper`), `Kokoro-82M` ONNX TTS, and embeddings. Optional designed Python `Qwen3-TTS` voices add ~8.5 GB.
+- **3D Character (`Astra Navi` included, or BYO VRM 1.0 / MMD):** An original chibi navigator built procedurally in Blender (`95` bones, Foot/Toe IK, twist bones, `30` articulated finger bones, hair/skirt physics, `25` morphs) is bundled out of the box alongside three theme variants (`astral-midnight`, `sakura-nebula`, `solar-dawn`). You can import custom `.vrm` or `.pmx` models locally at any time — subject to each model's license terms.
 
 ## Set Up & 60-Second Onboarding
 
@@ -32,143 +43,79 @@ npm start
 
 On first launch, Astra opens the **60-Second Setup Wizard** (`src/renderer/settings.html`):
 
-1. **Hardware & Brain Tier:** Probes GPU VRAM, memory bandwidth, and system RAM (`modelBundle.ts` / `hardwareTuner.ts`) and recommends Small (`4B`), Standard (`9B`), Large (`27B`), or Workstation tiers.
-2. **Character & Voice:** Choose language (`en`, `ja`, `zh`), audition built-in Light (Kokoro) or Designed voices, and optionally import a custom `.pmx` avatar later from the tray.
-3. **Wake Word & Cross-Platform Local Setup:** Toggle hands-free wake word (`"Astra"` / `"Astra Navi"`), and click **Setup** inside the wizard for optional local helpers (Fast ONNX OCR, Desktop App Menu Shortcut, Browser DOM Native Host `app.astranavi.dom_bridge`, and Full Qwen3-TTS Python environment) without needing a terminal.
+1. **Hardware & Brain Tier:** Probes GPU VRAM, memory bandwidth, and system RAM (`modelBundle.ts` / `hardwareTuner.ts` / `models.ts`) and recommends Small (`4B`), Standard (`9B`), Large (`27B`), or Workstation tiers.
+2. **Character, Stage & Voice:** Choose language (`en`, `ja`, `zh`), audition zero-Python built-in **ONNX (`Kokoro-82M`)** or optional Designed voices, dock the spatial stage across monitors, or import `.vrm` / `.pmx` avatars from the tray.
+3. **Wake Word & Local Setup Helpers:** Toggle hands-free wake word (`"Astra"` / `"Astra Navi"`), and configure optional local helpers (Fast ONNX OCR, Desktop App Launcher, Browser DOM Native Host `app.astranavi.dom_bridge`, and optional Python `Qwen3-TTS`) without needing a terminal.
 4. **Safety & Ready Check:** Runs an instant policy audit (`auditSecurityRules`) confirming default-safe permissions and experimental Tier 10 switches remain off.
 
-Settings also include a **Simple / Advanced** header toggle (`advancedSettings`, off by default) so everyday users see voice, eyes/hands, agenda, devices, and memory without clutter, while power users can toggle **Advanced** to reveal remote SSH machines, custom search keys/instances, and Tier 10 switches.
-
-### Cross-Platform CLI Setup Helpers
-
-The same setup tasks available in the wizard can also be run from any OS terminal via `scripts/bootstrap.ts` (`src/core/bootstrap.ts`):
+### Cross-Platform CLI Setup & Backup Helpers
 
 ```sh
-npm run setup -- --status          # JSON check of voice, ocr, launcher, and browser-bridge readiness
-npm run setup -- all               # Configure all optional local helpers
+npm run setup -- --status          # JSON check of voice, onnx-voice, native hands, ocr, launcher, and browser-bridge
+npm run setup -- all               # Configure optional local helpers
 npm run setup-ocr                  # Download ONNX detection/recognition OCR weights
 npm run setup-browser-bridge       # Register app.astranavi.dom_bridge native host for Chromium/Chrome/Edge/Brave/Firefox
-npm run setup-voice                # Create isolated Qwen3-TTS Python voice environment (via uv)
+npm run setup-voice                # Optional Qwen3-TTS Python voice environment (via uv; not needed for Kokoro ONNX voice)
 npm run install-launcher           # Register desktop app launcher shortcut
 ```
 
-For existing installs upgrading from an earlier build: user data paths automatically fall back from `~/.local/share/astra-navi/` (and `~/Documents/Astra-Navi/`) to existing `~/.local/share/ai-chan/` (and `~/Documents/AI-chan/`) and `model.aichan` bundles (`src/core/paths.ts`), so models, memory, and conversations continue working seamlessly. Both `astranavi://` and legacy `aichan://` deep-link protocols work, and default wake words are `"Astra"` / `"Astra Navi"` (custom nicknames can be added in Settings).
+Data and bundles migrate seamlessly from legacy `~/.local/share/ai-chan/` (`aichan://`) to `~/.local/share/astra-navi/` (`astranavi://`). Complete companion profiles (config, memory, standing orders, agendas, reminders, missions, play logs, and SQLite DB) can be exported and atomically restored via SHA-256 verified `*.anprof` backups (`src/core/profileBackup.ts`).
 
 ---
 
-## Using It
+## Key Capabilities
 
-- **Click her** to open the message box. Press Enter to send, Escape to stop a reply or close the box. You can queue the next message while she is answering.
-- **Click the microphone** beside her feet to talk. She listens until you click it again, answers aloud, and supports barge-in interruption.
-- **Or say her name.** Enable **Listen for her name (microphone always on)** in Settings or the tray menu: say `"Hey Astra"` (or `"Astra Navi"`, Japanese `"アストラ"`, Chinese `"阿斯特拉"`, or configured `voice.otherNames`) to wake her hands-free. Speech not addressed to her is transcribed locally and discarded.
-- **Drag the stand under her feet** to reposition her.
-- **Tray icon:** Talk, Settings, Show/Hide, Brain size, Language, Voice preset, Do Not Disturb, Morning Briefing, Always-Listen wake word, Start at Login, Conversation history, Import/Switch Character Model, and Quit.
-
-Ask in plain language: `"find me a good free DAW"`, `"open Dolphin"`, `"write these notes as a markdown file"`, `"trim the first ten seconds off this clip"`. State-changing actions show the exact command or target and require explicit approval before executing.
-
-### Core Capabilities
-
-- **System Telemetry & Game Awareness:** `"How's the ship?"` inspects CPU, RAM, disks, GPU VRAM/utilization, and thermals. When a game holds the GPU (`quietInGames` / `yieldToGames`), Astra holds unprompted briefings until the game exits and releases VRAM after replies (or automatically steps `auto` down to Small if downloaded). A local `play-log.json` tracks 60 days of play sessions.
-- **Reminders, Agenda & Standing Orders:** Reminders and timers survive restarts; `.ics` / local agenda feeds are parsed read-only (`core/agenda.ts`) with conflict/repeat checks; read-only **standing orders** poll paths, allow-listed status commands, or URL reachability after explicit approval.
-- **Checkpointed Multi-Step Missions:** Missions break multi-step goals (up to 12 steps) into checkpointed state (`planned`, `awaiting_approval`, `running`, `blocked`, `completed`) with retry budgets, crash-safe pause on restart, and step-by-step approval of exact commands/hosts at the PC (or remotely for non-sensitive steps on signed-in station devices).
-- **Follow-Through & Claim Verification (`core/claims.ts`):** When a reply claims an action or lookup without having executed a tool, Astra is automatically sent back once to verify or run the tool cleanly, or a plain honesty notice is appended.
-- **Deck Log & Background Research:** Completed milestones log to `~/Documents/Astra-Navi/deck-log.md`. Background research spawns an isolated read-only pass that verifies sources and saves reports under `~/Documents/Astra-Navi/reports/`.
-- **Optional Desktop Controls, Screen Sight & Audio Buffer (`src/core/platform/`):** Window management, media controls (`wpctl` / MPRIS on Linux, Win32/WASAPI on Windows), clipboard, accessibility control clicking/typing (`AT-SPI` / `uinput` on Linux; `WinHands` UIA + `SendInput` on Windows), optional screen OCR + vision description, optional 90-second PC audio loopback transcript, and memory-only desktop notification summaries (all gated with sensitive-app exclusion rules).
-- **Memory & Dynamic Tool Routing (`core/embedder.ts`, `core/toolRouter.ts`):** Facts, conversation summaries, and learned task playbooks are indexed locally using `multilingual-e5-small`. With `fittingTools` enabled, per-turn hybrid semantic/lexical routing shrinks initial context prompts from ~8,797 tokens (35 tools) to ~4,552 tokens (`97.2%` expected-tool coverage in offline benchmarks).
-
-### Companion Extensions & Devices
-
-- **Browser DOM Bridge (`browser-bridge/`):** WebExtension (`manifest.json`, `background.js`, `content.js`) + cross-platform Node native messaging host (`native-host.mjs`, ID `app.astranavi.dom_bridge`) + `NativeBrowserDomClient` (`src/core/semanticBridge.ts`), strictly enforcing an explicit origin allowlist (`isBrowserOriginAllowed`) for read-only article/media state extraction.
-- **Home Network Station & Android App (`phone-app/`):** Serve an authenticated LAN web station (`devices.station`, self-signed TLS with displayed fingerprint, password + biometric keystore-backed Android companion APK `app.astranavi.station` using deep link `astranavi://station`). Build the APK locally with:
-
-```sh
-scripts/setup-android.sh   # one-time: OpenJDK + Google Android build tools (~620 MB)
-scripts/build-android.sh   # builds & locally signs phone-app/build/astra-navi.apk
-```
-
-- **SSH Fleet (`core/fleet.ts`):** Enroll remote Linux servers/NAS hosts by pinned SSH host key fingerprint and dedicated per-host ED25519 keys. Mutating writes snapshot the previous remote file to `~/.ai-chan-backups` atomically before replacing. Interactive enrollment uses `SSH_ASKPASS` (never stored passwords).
+- **Spatial Stage & Opt-In Presence (`src/shared/spatialStage.ts`, `src/renderer/src/stage.ts`):** Dock across multi-monitor display edges, pick optional procedural 3D desk/room scenes (`cozy-desk`, `command-bridge`, `minimal-studio`), match lighting to time-of-day or desktop ambient screen color, and optionally enable local webcam presence/glance tracking (strictly opt-in, off by default, never leaves RAM).
+- **Zero-Python Neural Voice & Duplex Streaming (`src/core/voice/onnxVoice.ts`, `src/core/multimodal.ts`):** Built-in CPU `Kokoro-82M` (`kokoro-js`) synthesis with multi-language presets alongside `DuplexSpeechToSpeechPipeline` (pre-roll, VAD endpointing, instant barge-in abort) and `ContinuousVisionStreamer` (block-delta throttling + live visual coaching cues).
+- **Grammar-Constrained Tool Decoding & Loop Guards (`src/core/grammarGuard.ts`, `src/core/toolRouter.ts`):** Recursive JSON schema hardening (`additionalProperties: false`), `llama.cpp` GBNF compilation, streaming JSON degeneration aborts, and per-turn deterministic loop breaking (`exact_repeat`, `ABAB` oscillation, consecutive errors, schema spam, and turn caps).
+- **Native MCP Interoperability & Optional Creator Plugins (`src/core/mcpClient.ts`, `src/core/pluginSdk.ts`, `plugins/`):** Connect external Model Context Protocol (MCP) servers over stdio or Streamable HTTP/SSE (`mcp:<server>.<tool>`) inside strict `permissions.ts` + outside-text isolation gates. Includes optional signed **Coding Companion Mode** and **OBS & Twitch Co-Host** plugins (`defaultEnabled: false`, requiring explicit user approval before activation).
+- **System Telemetry & Game Awareness (`src/core/gameWatch.ts`, `src/core/cardWatch.ts`):** Releases VRAM when a fullscreen game starts (`quietInGames` / `yieldToGames`), tracks 60 days of local play sessions, and manages startup crash recovery via `StartupGuard` Safe Mode (`src/core/safeMode.ts`).
+- **Companion Devices & SSH Fleet (`src/core/station.ts`, `src/core/qrCode.ts`, `src/core/mdns.ts`, `src/core/fleet.ts`):** Pair Android over local Wi-Fi via ISO 18004 QR URIs + mDNS (`_astranavi._tcp.local`) pinned to full 64-hex TLS certificate fingerprints, or manage enrolled Linux servers over SSH with per-host ED25519 keys and rollback snapshots.
 
 ---
 
-## Brain Tiers & Verified Performance
+## Brain Tiers & Verified GPU Performance
 
 Measured on an **NVIDIA RTX PRO 4500 Blackwell (32 GB VRAM)** across all **163 evaluation cases** (`--fitting-tools`):
 
-| Tier | Model | Download | Peak Own VRAM | Overall Score | Nothing Leaked | Median TTFT | Throughput |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `small` | `Qwen3.5-4B-Q4_K_M.gguf` | ~2.7 GB | 4,000 MiB | **82%** (`81.7%`) | **100%** | 1.15 s | 170.8 tok/s |
-| `standard` | `Qwen3.5-9B-Q4_K_M.gguf` | ~5.7 GB | 6,270 MiB | **83%** (`83.3%`) | **100%** | 2.02 s | 113.6 tok/s |
-| `large` | `Qwen3.8-27B-UD-Q4_K_M.gguf` | ~16.6 GB | 16,802 MiB | **91%** (`90.6%`) | **100%** | 4.30 s | 38.9 tok/s |
-| `xl` | `Qwen3.5-72B` / `120B MoE` | Workstation | 48–66 GB | Workstation catalog (`models.ts`) | — | — | — |
+| Tier | Model | Download | Peak Own VRAM | Overall Score | Safe / Injected Text | Nothing Leaked | Median TTFT | Throughput |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `small` | `Qwen3.5-4B-Q4_K_M.gguf` | ~2.7 GB | `4,000 MiB` | **81.7% (`82%`)** | 86.7% | **100%** | `1.15 s` | `170.8 tok/s` |
+| `standard` | `Qwen3.5-9B-Q4_K_M.gguf` *(baseline)* | ~5.7 GB | `6,270 MiB` | **83.3% (`83%`)** | 86.7% | **100%** | `2.02 s` | `113.6 tok/s` |
+| `standard` | `Qwen3.5-9B-Q4_K_M.gguf` *(with `grammarGuard`)* | ~5.7 GB | `6,270 MiB` | **85% (`85.1%`)** | **100.0%** | **100%** | `1.85 s` | `116.0 tok/s` |
+| `large` | `Qwen3.8-27B-UD-Q4_K_M.gguf` | ~16.6 GB | `16,802 MiB` | **90.6% (`91%`)** | **100.0%** | **100%** | `4.30 s` | `38.9 tok/s` |
+| `xl` / `moe` | `Qwen3-30B-A3B` / `72B` / `120B-A16B` | Workstation | 20–66 GB | `pending_gpu` (`models.ts`) | — | — | — | — |
 
-Full numbers (including `npm run prompt-size`, `npm run route-check`, `500/500` deterministic injection/taint fuzz gate, static policy audit, and our honest empirical finding from running GPU LoRA distillation where `npm run eval -- --compare` caught a ChatML/thinking format regression) are published in **[evals/results/BENCHMARKS.md](evals/results/BENCHMARKS.md)**.
-
----
-
-## Open-Core Split, Packaging & CI
-
-`src/shared/edition.ts` defines the **Community** (`community`, default MIT open-source build) vs **Supporter** (`supporter`, optional pre-packaged storefront distributions) boundary. **All core runtime features, permission/security gating, the default Astra Navi 3D model, encrypted BYO-MMD imports, the offline eval suite, local LoRA trainer, and mobile station remain 100% free and open.**
-
-- **Desktop Packaging (`electron-builder.yml`):** Generates Linux `AppImage` / `.deb`, Windows `NSIS` installer, Flatpak manifest ([`build/flatpak/app.astranavi.Desktop.yml`](build/flatpak/app.astranavi.Desktop.yml)), SteamPipe VDFs (`build/steam/`), and Authenticode signing (`scripts/sign-windows.ps1`). Dry-run with `npm run package:dry` and `npm run publish:dry`.
-- **Cross-Platform CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):** Runs `npm ci`, `npm run check`, `npm run build`, `npm run eval -- --fuzz`, `npm run eval -- --audit`, `npm run prompt-size -- --ci`, and `npm run route-check -- --words-only` on `[ubuntu-latest, windows-latest]` under Node 24, plus a dedicated `.NET 9.0.x` `windows-latest` job publishing and smoke-testing `win-hands.exe` (`NativeAOT`, `win-x64`).
-
----
-
-## Key Configuration (`config.json`)
-
-Settings take effect live from **Settings…** (`~/.local/share/astra-navi/config.json`, or legacy `~/.local/share/ai-chan/config.json`):
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `brain` | `"auto"` | `"auto"`, `"small"`, `"standard"`, `"large"`, `"xl"`, or custom GGUF path |
-| `contextSize` | `16384` | Conversation context window in tokens |
-| `thinkingTokens` | `256` | Internal reasoning budget before replying (`0` answers immediately) |
-| `idleUnloadMinutes` | `10` | Minutes of idle time before releasing model VRAM (`0` disables unload) |
-| `yieldToGames` | `true` | Unload VRAM shortly after replies when a game is active; step `auto` down if needed |
-| `quietInGames` | `true` | Defer unprompted notices until games exit |
-| `leanMemory` | `false` | Q8_0 quantized KV-cache + FlashAttention compaction on built-in brains |
-| `fittingTools` | `false` | Per-turn two-stage semantic/lexical tool routing (`core/toolRouter.ts`) |
-| `keepTraces` | `false` | Append anonymized-secret turn traces to `traces.jsonl` for `npm run export-pairs` |
-| `language` | `"en"` | `"en"`, `"ja"`, or `"zh"` |
-| `voice.engine` | `"auto"` | `"auto"`, `"full"` (Qwen3-TTS designed voices), or `"light"` (Kokoro) |
-| `voice.design` / `voice.name` | `"perky"` / `"af_heart"` | Active designed voice preset or light voice name |
-| `voice.alwaysListening` | `false` | Continuous local wake-word listener |
-| `voice.otherNames` | `[]` | Extra wake names (e.g. `["Computer"]`) |
-| `sight.withoutAsking` / `sight.watch` | `false` / `false` | Screen capture permissions (always off unless enabled) |
-| `hands.inPrograms` | `false` | Desktop accessibility & virtual input automation (off by default) |
-| `notices.read` | `false` | In-memory desktop notification reading (never written to disk) |
-| `devices.station` | `false` | LAN station HTTPS server for paired phones/browsers |
-| `onboardingComplete` | `false` | Set true after completing or dismissing the 60s Setup Wizard |
-| `advancedSettings` | `false` | Reveals Machines, Search, and Tier 10 switches in Settings UI |
+Full numbers, prompt budgets, semantic tool routing, security audit gates, rolling model catalog (`npm run benchmark:catalog`), and live dogfooding details are in **[evals/results/BENCHMARKS.md](evals/results/BENCHMARKS.md)**.
 
 ---
 
 ## Development & Repository Map
 
 ```sh
-npm run check                  # TypeScript (node + web), ESLint, and Vitest unit/integration suite
+npm run check                  # TypeScript (node + web), ESLint, and Vitest suite
 npm run build                  # Electron main + preload + renderer bundle
+npm run benchmark:catalog      # Verify rolling model catalog, fuzz gate, and grammar/loop stress checks
 npm run eval -- --fuzz         # 500-case deterministic security/taint fuzz gate (no GPU needed)
 npm run eval -- --audit        # Static policy & rule-conflict audit
 npm run prompt-size -- --ci    # Prompt & tool budget verifier
 npm run route-check            # Dynamic tool-router coverage & semantic benchmark
 npm run package:dry            # Verify release packaging manifest
 npm run publish:dry            # Verify store upload plan (GitHub / Steam / itch.io)
-AI_CHAN_DEBUG=1 npm start      # Print MMD morph names and runtime debug diagnostics
 ```
 
 | Path | Contents |
 | --- | --- |
-| `src/core/` | Core assistant: persona, permissions, claims verification, tool router, agenda, missions, memory, SQLite/FTS5 store, fleet SSH, bootstrap |
-| `src/core/platform/` | `PlatformAdapter` contract & OS implementations (`linux.ts`, `windows.ts`, `winSandbox.ts`, `safety.ts`) |
-| `src/core/voice/` | VAD, Moonshine/Whisper STT, wake-word matcher, echo cancellation helpers |
-| `src/main/` & `src/preload/` | Electron main process, custom `astranavi://` model loader, tray, IPC bridges |
-| `src/renderer/` | 3D BabylonJS + `babylon-mmd` stage, speech overlay, Settings & 60s Onboarding Wizard UI |
-| `src/shared/` | Cross-process types & edition feature flags (`edition.ts`, `settings.ts`, `ipc.ts`) |
-| `assets/models/ai-navigator/` | Original bundled **Astra Navi** `.pmx` asset (`CC-BY-4.0 / MIT`), generated via `scripts/blender/build_navigator_mmd.py` |
-| `hands/` | Linux AT-SPI/`uinput` helper & Windows persistent `win_hands.ps1` + `.NET 9` NativeAOT `win-hands-native/` |
+| `src/core/` | Assistant runtime: permissions, claims, tool router, grammar/loop guards, Native MCP client, signed plugin SDK, workshop/creator packs, ONNX/S2S voice, vision, backups, safe mode, SSH fleet, update checks, and packaged `resolveBundledRoot` resolution |
+| `src/core/platform/` | `PlatformAdapter` contract & OS implementations (`linux.ts`, `windows.ts`, `winSandbox.ts`, `macos.ts` preview) |
+| `src/core/voice/` | Zero-Python `OnnxVoice` (`kokoro-js`), optional Python `FullVoice`, Moonshine/Whisper STT, VAD, AEC & wake-word matchers |
+| `src/main/` & `src/preload/` | Electron main process, encrypted `astranavi://` model loader, tray, IPC bridges, multi-monitor docking |
+| `src/renderer/` | 3D BabylonJS VRM 1.0 + MMD stage, spatial rooms/lighting/presence UI, Settings & 60s Onboarding Wizard |
+| `src/shared/` | Cross-process types, VRM 1.0 GLB/spring-bone solver (`vrm.ts`), spatial stage math (`spatialStage.ts`), gestures, and edition flags |
+| `assets/models/` | Original bundled **Astra Navi** asset (`ai-navigator/`) plus three variants (`variants/astral-midnight`, `sakura-nebula`, `solar-dawn`) |
+| `plugins/` | Optional signed Creator Plugin Packs (`coding-companion`, `obs-cohost`; disabled by default) |
+| `hands/` | Native Rust `linux-hands-native/` helper, Linux `hands.py`, and `.NET 9` NativeAOT `win-hands-native/` helper |
 | `browser-bridge/` | Read-only WebExtension + Native Messaging host (`app.astranavi.dom_bridge`) + cross-platform installer |
-| `phone-app/` | Android companion APK (`app.astranavi.station`, built by `scripts/build-android.sh`) |
-| `voice-server/` | Local Qwen3-TTS designed-voice inference server |
-| `train/` & `evals/` | Local LoRA SFT/embedder trainer (`train/lora.py`), 163-case live eval suite, 500-case fuzz gate, and benchmarks |
-| `tests/` | Vitest suite across core, security, UI, packaging, and platform boundaries |
+| `phone-app/` & `ios-app/` | Android companion APK (`app.astranavi.station`, built by `scripts/build-android.sh`) + iOS preview Swift sources |
+| `train/` & `evals/` | Local LoRA SFT/embedder trainer (`train/lora.py`), 163-case live eval suite, 500-case fuzz gate, and `BENCHMARKS.md` |
+| `tests/` | Vitest suite including `securityBoundariesAudit.test.ts` across all core, 3D VRM, MCP, packaging, and platform boundaries |

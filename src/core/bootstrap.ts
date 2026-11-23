@@ -4,7 +4,7 @@ import { copyFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { dataDir, modelsDir, voiceEnvPython } from "./paths.ts";
+import { dataDir, modelsDir, resolveBundledRoot, voiceEnvPython } from "./paths.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -114,7 +114,7 @@ function resolveEnv(deps: BootstrapDeps) {
           platform === "win32" ? "python.exe" : "python",
         )
       : voiceEnvPython());
-  const appRoot = deps.appRoot ?? resolve(import.meta.dirname, "..", "..");
+  const appRoot = deps.appRoot ?? resolveBundledRoot(resolve(import.meta.dirname, "..", ".."));
   return {
     platform,
     home,

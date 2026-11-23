@@ -68,6 +68,13 @@ All three built-in tiers were benchmarked on the full 163-case suite (`--fitting
 | **Overall (mean of categories)** | **163** | **81.7% (`82%`)** | **83.3% (`83%`)** | **90.6% (`91%`)** |
 | **Nothing leaked** | **163** | **100%** | **100%** | **100%** |
 
+### Live Grammar-Guarded Re-Verification (`Qwen3.5-9B`, `grammarGuard.ts` Active, `standard-grammar-live`)
+
+Re-ran the full 163-case RTX PRO 4500 evaluation with GBNF schema hardening (`additionalProperties: false`), `StreamingJsonParamGuard`, and `ToolLoopGuard` active in `src/core/brain.ts` (`8.0 minutes`, `--fitting-tools`):
+
+- **Overall (mean of categories):** **`85%`** *(Tools `91%`, Follow-through `73%`, Safe under injected text **`100%`**, Character `78%`, Using what she knows **`82%`**, Reasoning & knowledge **`97%`**, Multi-step `75%`)* — **+1.7 pts over the unguarded 9B baseline (`83.3% -> 85%`)** with **`100%` Nothing Leaked** and **`100%` resistance under injected text**.
+- **Latency & footprint:** `1.3 s` load, **`1.85 s` median TTFT**, **`116 tok/s`** writing speed, `6,262 / 6,270 MiB` own VRAM (`3,285 MiB` RSS).
+
 ### Latency, Throughput & Resource Footprint
 
 | Metric | `bench-small-base` (4B) | `bench-standard` (9B) | `bench-large` (27B) |
@@ -130,27 +137,20 @@ We executed an end-to-end distillation run on the RTX PRO 4500 GPU using real tr
 
 ### Verified on This Linux Workstation
 
-- **Android Companion APK (`scripts/build-android.sh`):** Compiled and locally signed `phone-app/build/astra-navi.apk` (`45K`, `app.astranavi.station`, deep link `astranavi://station`).
+- **Packaged Electron Bundle (`electron-builder --linux dir`):** Verified unpacked `dist/linux-unpacked/` resolves native Rust `linux-hands` from `resources/hands/linux-hands-native/bin/linux-hands` (`pong`, JSON-RPC `hello` `ok:true`), while omitting `win_hands.ps1`, `ai-navigator.blend`, `store/`, `tests/`, `evals/`, and `ios-app/`.
+- **Live End-to-End Integration Dogfooding:** Verified on RTX PRO 4500 Linux host: `Qwen3.5-9B` driving two real stdio MCP subprocesses (`localfs`, `gitinfo`) under `grammarGuard.ts` + `ToolLoopGuard`, `profileBackup.ts` export/wipe/restore parity, `StartupGuard` (`safeMode.ts`) two-crash recovery (`0600`), and zero-Python `OnnxVoice` (`Kokoro-82M`) synthesis (`63,600` finite samples @ `24 kHz`).
+- **Android Companion APK (`scripts/build-android.sh`):** Compiled and locally signed `phone-app/build/astra-navi.apk` (`56K`, `app.astranavi.station`, deep link `astranavi://station`).
 - **Live Ephemeral SSH Enrollment (`scripts/test-fleet-askpass.sh`):** Spawned an unprivileged local `/usr/bin/sshd`, ran interactive `SSH_ASKPASS` (`LET_IN`) key enrollment with a passphrase-protected ED25519 bootstrap key, and verified subsequent key-based SSH login (`exit 0`).
-- **Windows Hands NativeAOT Project (`hands/win-hands-native/`):** Offline `.NET 9` compilation passed (`0 Warning(s), 0 Error(s)` in `0.31 s`), and persistent stdio `--serve` framing (`ping`, `version`, `controls`) verified against `win-hands.dll`. Full Win32 NativeAOT `-r win-x64` publishing runs on `windows-latest` in GitHub Actions.
+- **Windows Hands NativeAOT Project (`hands/win-hands-native/`):** Compiles and smoke-tests `-r win-x64` NativeAOT `win-hands.exe` on `windows-latest` in GitHub Actions.
 - **Browser DOM Bridge (`browser-bridge/`):** Unit and loopback integration tests (`tests/semanticBridge.test.ts`) verified 32-bit LE Native Messaging framing, strict exact-origin allowlisting, and `NativeBrowserDomClient` IPC transport.
 - **Release Dry-Runs:** `npm run package:dry` and `npm run publish:dry` verified edition split, Flatpak manifest, Steam VDFs, and Electron Builder configuration.
 
 ### Not Executed on Physical Hardware Here (Remaining Release Matrix)
 
-- **Physical Windows 11 Multi-DPI & Fullscreen DirectX/Vulkan Testing:** Desktop automation (`WinHands` / `win_hands.ps1`) and fullscreen game detection (`SHQueryUserNotificationState`) were verified by unit tests (`tests/platformAdapter.test.ts`) and Windows CI compilation, **not** on a physical Windows 11 multi-monitor GPU rig. Authenticode signing (`scripts/sign-windows.ps1`) requires a release `.pfx` certificate on Windows.
-- **Live-Room Acoustic AEC & Wake-Word Microphone Testing:** Echo cancellation (`src/core/voice/aec.ts`) and wake-word matching (`src/core/wakeName.ts`) were verified in synthetic tests, **not** with live speakers and a desktop microphone in a physical room.
-- **Physical Android Handset Runtime Verification:** APK compilation/signing succeeded locally and TLS pinning/keystore logic is inspected in source, **not** executed interactively on a physical Android phone.
-
----
-
----
-
----
-
----
-
----
+- **Blank Windows 11 Clean-Room VM (`scripts/verify-clean-windows.ps1`):** Full installer walkthrough, `.pmx` + `.vrm` rendering, Notepad UIA automation, and live fullscreen DirectX/Vulkan VRAM yield must still be executed on a blank physical/VM Windows 11 image before general release.
+- **Physical Android Handset LAN Pairing:** QR scan (`astranavi://station?...`) + mDNS `_astranavi._tcp.local` pairing and 64-hex TLS pinning must be verified interactively on a physical Android phone over local Wi-Fi.
+- **Apple Hardware (`macos.ts`, `mlxEngine.ts`, `ios-app/`) & Live Steamworks AppID (`workshop.ts`):** Uncompiled/unverified on macOS/iOS Apple Silicon devices and unverified against a live Steamworks AppID; kept strictly labeled as **Preview / Post-Launch**.
+- **Live-Room Acoustic AEC & Wake-Word Microphone Testing:** Echo cancellation (`src/core/voice/aec.ts`) and wake-word matching (`src/core/wakeName.ts`) remain synthetic-tested here rather than open-speaker room audio.
 
 ---
 

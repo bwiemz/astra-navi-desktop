@@ -380,11 +380,74 @@ export function encodeQrMatrix(text: string): QrMatrix {
   return { version: spec.version, size, modules: bestModules };
 }
 
+export function isPrivateStationIpPort(rawAddress: string): string | null {
+  const trimmed = rawAddress.trim();
+  if (!trimmed || /^http:\/\//i.test(trimmed)) return null;
+  const normalized = trimmed.replace(/^https:\/\//i, "").replace(/\/+$/, "");
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(normalized);
+  if (!match) return null;
+  const octets = [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4])];
+  const port = Number(match[5]);
+  if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const [a = -1, b = -1] = octets;
+  const isPrivateOrLoopback =
+    a === 127 ||
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b >= 64 && b <= 127);
+  return isPrivateOrLoopback ? `${octets[0]}.${octets[1]}.${octets[2]}.${octets[3]}:${port}` : null;
+}
+
 export function buildPairingUri(options: {
   address: string;
   fingerprint: string;
   code: string;
 }): string {
-  const cleanFp = options.fingerprint.replaceAll(":", "").toUpperCase();
-  return `astranavi://station?at=${encodeURIComponent(options.address)}&fp=${encodeURIComponent(cleanFp)}&code=${encodeURIComponent(options.code)}`;
+  const bareAddr = isPrivateStationIpPort(options.address);
+  if (!bareAddr) {
+    throw new Error(
+      `Invalid or insecure station pairing address "${options.address}" (expected https:// or private LAN ipv4:port).`,
+    );
+  }
+  const cleanFp = options.fingerprint.replaceAll(":", "").trim().toUpperCase();
+  if (!/^[0-9A-F]{64}$/.test(cleanFp)) {
+    throw new Error("Station pairing requires a full 64-hex SHA-256 certificate fingerprint.");
+  }
+  const cleanCode = options.code.trim();
+  if (!/^[A-Za-z0-9_-]{6,64}$/.test(cleanCode)) {
+    throw new Error("Station pairing code must be 6-64 URL-safe characters.");
+  }
+  return `astranavi://station?at=${encodeURIComponent(bareAddr)}&fp=${encodeURIComponent(cleanFp)}&code=${encodeURIComponent(cleanCode)}`;
+}
+
+export function parsePairingUri(uri: string): { at: string; fp: string; code: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    throw new Error("Invalid pairing URI.");
+  }
+  if (parsed.protocol !== "astranavi:" || parsed.hostname !== "station") {
+    throw new Error(`Unsupported pairing URI scheme/host "${parsed.protocol}//${parsed.hostname}".`);
+  }
+  const rawAt = parsed.searchParams.get("at") ?? "";
+  if (/^https?:\/\//i.test(rawAt)) {
+    throw new Error("Pairing URI address must be bare ip:port without scheme.");
+  }
+  const bareAddr = isPrivateStationIpPort(rawAt);
+  if (!bareAddr) {
+    throw new Error(`Refused unsafe pairing address "${rawAt}".`);
+  }
+  const fp = (parsed.searchParams.get("fp") ?? "").replaceAll(":", "").trim().toUpperCase();
+  if (!/^[0-9A-F]{64}$/.test(fp)) {
+    throw new Error("Pairing URI fingerprint must be a 64-hex SHA-256 digest.");
+  }
+  const code = (parsed.searchParams.get("code") ?? "").trim();
+  if (!/^[A-Za-z0-9_-]{6,64}$/.test(code)) {
+    throw new Error("Pairing URI contains an invalid pairing code.");
+  }
+  return { at: bareAddr, fp, code };
 }

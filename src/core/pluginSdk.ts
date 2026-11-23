@@ -10,8 +10,8 @@ import { isPrivateLanHost } from "./workerMesh.ts";
  * Community capability packs declare bridge kinds (`obs`, `blender`, `home_assistant`,
  * `game_telemetry`, `mcp`, `lsp`, `custom`), explicit tool contracts, permission scopes,
  * optional MCP server bindings, SHA-256 entry digests, and bundled security eval cases
- * verified before activation. Every runtime call remains gated by both declared plugin
- * scopes and `core/permissions.ts`.
+ * verified before activation. Every runtime call requires explicit user plugin approval
+ * AND remains gated by declared plugin scopes + `core/permissions.ts`.
  */
 
 export const PLUGIN_PERMISSION_SCOPES = [
@@ -37,6 +37,23 @@ export const PLUGIN_BRIDGE_KINDS = [
 ] as const;
 export type PluginBridgeKind = (typeof PLUGIN_BRIDGE_KINDS)[number];
 
+function hasControlOrShellChars(cmd: string): boolean {
+  for (let i = 0; i < cmd.length; i += 1) {
+    const code = cmd.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return /[;&|`$<>()]/.test(cmd);
+}
+
+function isSafeRelativeEntryPath(entry: string): boolean {
+  if (!entry || entry.includes("\0") || entry.includes("..") || entry.includes("\\") || entry.includes(":")) {
+    return false;
+  }
+  if (entry.startsWith("/") || entry.endsWith("/")) return false;
+  const parts = entry.split("/");
+  return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
 export const PluginMcpServerSchema = z
   .object({
     transport: z.enum(["stdio", "http"]),
@@ -46,10 +63,10 @@ export const PluginMcpServerSchema = z
     readOnlyAutoAllow: z.boolean().default(false),
   })
   .superRefine((srv, ctx) => {
-    if (srv.transport === "stdio" && (!srv.command || /[;&|`$<>]/.test(srv.command))) {
+    if (srv.transport === "stdio" && (!srv.command || hasControlOrShellChars(srv.command))) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Stdio plugin MCP server requires a safe `command` string without shell metacharacters.",
+        message: "Stdio plugin MCP server requires a safe `command` string without control or shell metacharacters.",
       });
     }
     if (srv.transport === "http") {
@@ -61,7 +78,7 @@ export const PluginMcpServerSchema = z
   });
 
 export const PluginToolSpecSchema = z.object({
-  name: z.string().regex(/^[a-z0-9][a-z0-9:._-]{1,63}$/),
+  name: z.string().regex(/^plugin:[a-z0-9][a-z0-9:._-]{1,56}$/),
   description: z.string().min(1).max(240),
   requiredScope: z.enum(PLUGIN_PERMISSION_SCOPES),
   readOnly: z.boolean().default(false),
@@ -79,27 +96,45 @@ export const PluginEvalCaseSchema = z.object({
 });
 export type PluginEvalCase = z.infer<typeof PluginEvalCaseSchema>;
 
-export const PluginManifestSchema = z.object({
-  id: z.string().regex(/^[a-z0-9][a-z0-9._-]{1,63}$/),
-  name: z.string().min(1).max(80),
-  version: z.string().min(1).max(32),
-  author: z.string().min(1).max(80),
-  description: z.string().min(1).max(400),
-  defaultEnabled: z.boolean().optional(),
-  bridgeKind: z.enum(PLUGIN_BRIDGE_KINDS).optional(),
-  bridges: z.array(z.enum(PLUGIN_BRIDGE_KINDS)).max(8).optional(),
-  mcpServer: PluginMcpServerSchema.optional(),
-  entry: z
-    .string()
-    .min(1)
-    .max(160)
-    .refine((p) => !p.includes("..") && !p.startsWith("/")),
-  permissions: z.array(z.enum(PLUGIN_PERMISSION_SCOPES)).max(16),
-  tools: z.array(PluginToolSpecSchema).max(32).optional(),
-  evalCases: z.array(PluginEvalCaseSchema).max(64).optional(),
-  sha256: z.string().regex(/^[0-9a-f]{64}$/i),
-  evalCasesCount: z.number().int().min(0).optional(),
-});
+export const PluginManifestSchema = z
+  .object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9._-]{1,63}$/),
+    name: z.string().min(1).max(80),
+    version: z.string().min(1).max(32),
+    author: z.string().min(1).max(80),
+    description: z.string().min(1).max(400),
+    defaultEnabled: z.literal(false).optional(),
+    bridgeKind: z.enum(PLUGIN_BRIDGE_KINDS).optional(),
+    bridges: z.array(z.enum(PLUGIN_BRIDGE_KINDS)).max(8).optional(),
+    mcpServer: PluginMcpServerSchema.optional(),
+    entry: z
+      .string()
+      .min(1)
+      .max(160)
+      .refine(isSafeRelativeEntryPath, "Plugin entry must be a safe relative path within its bundle directory."),
+    permissions: z.array(z.enum(PLUGIN_PERMISSION_SCOPES)).max(16),
+    tools: z.array(PluginToolSpecSchema).max(32).optional(),
+    evalCases: z.array(PluginEvalCaseSchema).max(64).optional(),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/i),
+    evalCasesCount: z.number().int().min(0).optional(),
+  })
+  .superRefine((manifest, ctx) => {
+    const declared = new Set<PluginPermissionScope>(manifest.permissions);
+    for (const tool of manifest.tools ?? []) {
+      if (!declared.has(tool.requiredScope)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Plugin tool "${tool.name}" requires scope "${tool.requiredScope}" not declared in permissions.`,
+        });
+      }
+    }
+    if (manifest.mcpServer && !declared.has("connect_mcp")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Plugin declaring mcpServer must request the \"connect_mcp\" permission scope.",
+      });
+    }
+  });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
 
 function sortJsonValue(value: unknown): unknown {
@@ -279,6 +314,7 @@ export class PluginRegistry {
   enabled: boolean;
   private readonly trustedKeys: string[];
   private readonly plugins = new Map<string, PluginManifest>();
+  private readonly approved = new Set<string>();
 
   constructor(options: { enabled?: boolean; trustedPublicKeysPem?: readonly string[] } = {}) {
     this.enabled = options.enabled ?? false;
@@ -287,6 +323,18 @@ export class PluginRegistry {
 
   list(): readonly PluginManifest[] {
     return [...this.plugins.values()];
+  }
+
+  approvePlugin(pluginId: string): void {
+    if (this.plugins.has(pluginId)) this.approved.add(pluginId);
+  }
+
+  revokePlugin(pluginId: string): void {
+    this.approved.delete(pluginId);
+  }
+
+  isPluginApproved(pluginId: string): boolean {
+    return this.approved.has(pluginId);
   }
 
   listDeclaredTools(): { pluginId: string; spec: PluginToolSpec }[] {
@@ -299,11 +347,23 @@ export class PluginRegistry {
     return out;
   }
 
+  listApprovedDeclaredTools(): { pluginId: string; spec: PluginToolSpec }[] {
+    const out: { pluginId: string; spec: PluginToolSpec }[] = [];
+    for (const plugin of this.plugins.values()) {
+      if (!this.approved.has(plugin.id)) continue;
+      for (const spec of plugin.tools ?? []) {
+        out.push({ pluginId: plugin.id, spec });
+      }
+    }
+    return out;
+  }
+
   async register(options: {
     manifest: unknown;
     signature: string;
     entryBytes: Uint8Array;
     evalContext?: PolicyContext;
+    approvedByUser?: boolean;
     runBundledEval?: () => Promise<{ ok: boolean; reason?: string }>;
   }): Promise<PluginVerifyResult> {
     if (!this.enabled) {
@@ -315,6 +375,11 @@ export class PluginRegistry {
     });
     if (!verified.ok) return verified;
     this.plugins.set(verified.manifest.id, verified.manifest);
+    if (options.approvedByUser === true) {
+      this.approved.add(verified.manifest.id);
+    } else {
+      this.approved.delete(verified.manifest.id);
+    }
     return verified;
   }
 
@@ -323,7 +388,7 @@ export class PluginRegistry {
     return plugin ? plugin.permissions.includes(scope) : false;
   }
 
-  /** Checks both plugin scope declaration and core `permissions.ts` `toolVerdict`. */
+  /** Checks explicit user approval, plugin scope declaration, and core `permissions.ts` `toolVerdict`. */
   async authorizeToolCall(
     pluginId: string,
     requiredScope: PluginPermissionScope,
@@ -334,6 +399,46 @@ export class PluginRegistry {
     if (!this.enabled) {
       return { allowed: false, verdict: null, reason: "Signed plugins are disabled." };
     }
+    if (!this.isPluginApproved(pluginId)) {
+      return {
+        allowed: false,
+        verdict: null,
+        reason: `Plugin "${pluginId}" has not been explicitly approved by the user.`,
+      };
+    }
+    if (context.handsOff === true) {
+      return {
+        allowed: false,
+        verdict: null,
+        reason: `Hands-off mode blocks plugin execution ("${pluginId}").`,
+      };
+    }
+    const plugin = this.plugins.get(pluginId);
+    const declaredTools = plugin?.tools ?? [];
+    const toolSpec = declaredTools.find((t) => t.name === toolName);
+    if (declaredTools.length > 0) {
+      if (!toolSpec) {
+        return {
+          allowed: false,
+          verdict: null,
+          reason: `Tool "${toolName}" is not declared in plugin "${pluginId}".`,
+        };
+      }
+      if (toolSpec.requiredScope !== requiredScope) {
+        return {
+          allowed: false,
+          verdict: null,
+          reason: `Tool "${toolName}" requires scope "${toolSpec.requiredScope}", not "${requiredScope}".`,
+        };
+      }
+      if (!this.hasPermission(pluginId, toolSpec.requiredScope)) {
+        return {
+          allowed: false,
+          verdict: null,
+          reason: `Plugin "${pluginId}" lacks declared scope "${toolSpec.requiredScope}".`,
+        };
+      }
+    }
     if (!this.hasPermission(pluginId, requiredScope)) {
       return {
         allowed: false,
@@ -341,8 +446,6 @@ export class PluginRegistry {
         reason: `Plugin "${pluginId}" lacks declared permission scope "${requiredScope}".`,
       };
     }
-    const plugin = this.plugins.get(pluginId);
-    const toolSpec = plugin?.tools?.find((t) => t.name === toolName);
     const mergedContext: PolicyContext = {
       ...context,
       ...(context.pluginPolicy

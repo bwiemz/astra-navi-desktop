@@ -280,10 +280,11 @@ describe("pre-launch release hardening, mobile QR/mDNS, profile backup, variants
   it("generates valid ISO 18004 QR matrices and mDNS _astranavi._tcp.local DNS-SD packets", () => {
     const uri = buildPairingUri({
       address: "https://192.168.1.42:47821",
-      fingerprint: "AA:BB:CC:DD:11:22:33:44",
+      fingerprint: "AA:BB:CC:DD:11:22:33:44:55:66:77:88:99:00:AA:BB:CC:DD:EE:FF:01:23:45:67:89:AB:CD:EF:00:11:22:33",
       code: "654321",
     });
     expect(uri).toContain("astranavi://station?");
+    expect(uri).toContain("at=192.168.1.42%3A47821");
     expect(uri).toContain("code=654321");
 
     const qr = encodeQrMatrix(uri);

@@ -704,10 +704,13 @@ export function createPluginTools(
 ): ChatSessionModelFunctions {
   if (!registry.enabled) return {};
   const entries: [string, ChatSessionModelFunctions[string]][] = [];
-  for (const { pluginId, spec } of registry.listDeclaredTools()) {
+  const seenKeys = new Set<string>();
+  for (const { pluginId, spec } of registry.listApprovedDeclaredTools()) {
     const toolKey = spec.name.startsWith("plugin:") ? spec.name : `plugin:${pluginId}:${spec.name}`;
+    if (!toolKey.startsWith("plugin:") || seenKeys.has(toolKey)) continue;
     const execute = executors.get(spec.name) ?? executors.get(toolKey);
     if (!execute) continue;
+    seenKeys.add(toolKey);
     const fn = defineChatSessionFunction({
       description: spec.description,
       params: { type: "object", properties: {} },
@@ -716,12 +719,17 @@ export function createPluginTools(
         toolKey,
         () => `Running ${spec.name}`,
         async (input) => {
+          if (!registry.isPluginApproved(pluginId)) {
+            throw new Error(`Plugin "${pluginId}" has not been explicitly approved by the user.`);
+          }
           if (!registry.hasPermission(pluginId, spec.requiredScope)) {
             throw new Error(
               `Plugin "${pluginId}" lacks required permission scope "${spec.requiredScope}".`,
             );
           }
-          return execute(spec.name, input);
+          const result = await execute(spec.name, input);
+          host.noteOutsideText();
+          return result;
         },
       ),
     });

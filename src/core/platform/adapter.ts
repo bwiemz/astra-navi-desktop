@@ -1,6 +1,8 @@
+import { join } from "node:path";
 import type { DesktopLayout, MediaAction, NowPlaying, WindowAction, WindowDetail } from "../desktop.ts";
 import type { ControlList, Hands } from "../hands.ts";
 import type { MonitorChild } from "../notices.ts";
+import { resolveBundledRoot } from "../paths.ts";
 import type { EarsProcess } from "../shipEars.ts";
 import { LinuxPlatformAdapter } from "./linux.ts";
 import { MacOsPlatformAdapter } from "./macos.ts";
@@ -107,7 +109,8 @@ export function createPlatformAdapter(options: PlatformAdapterOptions): Platform
   const target = options.platform ?? process.platform;
   if (target === "win32") {
     return new WindowsPlatformAdapter({
-      scriptPath: options.winScriptPath ?? "hands/win_hands.ps1",
+      scriptPath:
+        options.winScriptPath ?? join(resolveBundledRoot(process.cwd()), "hands", "win_hands.ps1"),
     });
   }
   if (target === "darwin") {

@@ -4,6 +4,12 @@ import { hostname } from "node:os";
 const MDNS_ADDR = "224.0.0.251";
 const MDNS_PORT = 5353;
 const SERVICE_TYPE = "_astranavi._tcp.local";
+const MAX_MDNS_PACKET_BYTES = 1500;
+const MAX_DNS_LABELS = 128;
+const MAX_DNS_NAME_BYTES = 255;
+const MULTICAST_MIN_INTERVAL_MS = 500;
+const UNICAST_WINDOW_MS = 5_000;
+const UNICAST_MAX_PER_WINDOW = 4;
 
 export interface MdnsQueryQuestion {
   name: string;
@@ -20,6 +26,19 @@ export interface MdnsAdvertiserOptions {
 
 export interface MdnsAdvertiserHandle {
   close(): Promise<void>;
+}
+
+function sanitizeInstanceName(raw: string): string {
+  let clean = "";
+  for (let i = 0; i < raw.length; i += 1) {
+    const code = raw.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) continue;
+    clean += raw[i] ?? "";
+  }
+  const noDots = clean.replaceAll(".", " ").trim() || "Astra Navi Desktop";
+  const encoded = Buffer.from(noDots, "utf8");
+  if (encoded.length <= 48) return noDots;
+  return encoded.subarray(0, 48).toString("utf8").replace(/\uFFFD+$/g, "").trim() || "Astra Navi";
 }
 
 function encodeDnsName(name: string): Buffer {
@@ -41,9 +60,11 @@ function decodeDnsName(packet: Buffer, startOffset: number): { name: string; nex
   const labels: string[] = [];
   let offset = startOffset;
   let nextOffset = -1;
+  let totalNameBytes = 0;
   const visited = new Set<number>();
 
   while (offset < packet.length) {
+    if (labels.length > MAX_DNS_LABELS) return null;
     if (visited.has(offset)) return null;
     visited.add(offset);
     const len = packet[offset] ?? 0;
@@ -54,12 +75,16 @@ function decodeDnsName(packet: Buffer, startOffset: number): { name: string; nex
     if ((len & 0xc0) === 0xc0) {
       if (offset + 1 >= packet.length) return null;
       const ptr = ((len & 0x3f) << 8) | (packet[offset + 1] ?? 0);
+      if (ptr >= packet.length || ptr < 12) return null;
       if (nextOffset === -1) nextOffset = offset + 2;
       offset = ptr;
       continue;
     }
+    if (len > 63) return null;
     offset += 1;
     if (offset + len > packet.length) return null;
+    totalNameBytes += len + 1;
+    if (totalNameBytes > MAX_DNS_NAME_BYTES) return null;
     labels.push(packet.subarray(offset, offset + len).toString("utf8"));
     offset += len;
   }
@@ -68,7 +93,7 @@ function decodeDnsName(packet: Buffer, startOffset: number): { name: string; nex
 
 /** Parses DNS query question records from a raw UDP packet. */
 export function parseMdnsQuery(packet: Buffer): MdnsQueryQuestion[] {
-  if (packet.length < 12) return [];
+  if (packet.length < 12 || packet.length > MAX_MDNS_PACKET_BYTES) return [];
   const flags = packet.readUInt16BE(2);
   // Ignore responses (QR bit set)
   if ((flags & 0x8000) !== 0) return [];
@@ -106,6 +131,23 @@ function ipv4Bytes(ip: string): Buffer | null {
   return Buffer.from(nums);
 }
 
+/** True strictly for private LAN / loopback / link-local / CGNAT IPv4 addresses. */
+export function isPrivateLanIpv4(ip: string): boolean {
+  const clean = ip.replace(/^::ffff:/i, "").trim();
+  const bytes = ipv4Bytes(clean);
+  if (!bytes) return false;
+  const a = bytes[0] ?? -1;
+  const b = bytes[1] ?? -1;
+  return (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    a === 127
+  );
+}
+
 /** Builds a valid mDNS DNS-SD response packet advertising `_astranavi._tcp.local`. */
 export function encodeMdnsResponse(options: {
   instanceName: string;
@@ -115,10 +157,14 @@ export function encodeMdnsResponse(options: {
   fingerprintTail?: string;
   ttlSeconds?: number;
 }): Buffer {
+  if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535) {
+    throw new RangeError(`Invalid mDNS service port: ${options.port}`);
+  }
+  const cleanAddresses = options.addresses.filter((addr) => isPrivateLanIpv4(addr));
   const ttl = options.ttlSeconds ?? 120;
   const cleanHost = options.hostName.replace(/\.local$/i, "").replace(/[^a-zA-Z0-9-]/g, "-") || "astranavi";
-  const hostFqdn = `${cleanHost}.local`;
-  const cleanInstance = options.instanceName.replace(/\./g, " ").trim() || "Astra Navi Desktop";
+  const hostFqdn = `${cleanHost.slice(0, 48)}.local`;
+  const cleanInstance = sanitizeInstanceName(options.instanceName);
   const instanceFqdn = `${cleanInstance}.${SERVICE_TYPE}`;
 
   const records: Buffer[] = [];
@@ -135,9 +181,11 @@ export function encodeMdnsResponse(options: {
     encodeRecord(instanceFqdn, 33, ttl, Buffer.concat([srvHead, encodeDnsName(hostFqdn)])),
   );
 
-  // TXT record: txtvers=1 + short fingerprint tail for user sanity
+  // TXT record: txtvers=1 + proto=https + optional validated short fingerprint tail
   const txtStrings = ["txtvers=1", "proto=https"];
-  if (options.fingerprintTail) txtStrings.push(`fp=${options.fingerprintTail}`);
+  if (options.fingerprintTail && /^[0-9A-Fa-f]{8,16}$/.test(options.fingerprintTail)) {
+    txtStrings.push(`fp=${options.fingerprintTail.toUpperCase()}`);
+  }
   const txtBuf = Buffer.concat(
     txtStrings.map((s) => {
       const b = Buffer.from(s, "utf8");
@@ -146,9 +194,9 @@ export function encodeMdnsResponse(options: {
   );
   records.push(encodeRecord(instanceFqdn, 16, ttl, txtBuf));
 
-  // A records for LAN IPv4 addresses
-  for (const addr of options.addresses) {
-    const bytes = ipv4Bytes(addr);
+  // A records strictly for private LAN IPv4 addresses
+  for (const addr of cleanAddresses) {
+    const bytes = ipv4Bytes(addr.replace(/^::ffff:/i, "").trim());
     if (bytes) records.push(encodeRecord(hostFqdn, 1, ttl, bytes));
   }
 
@@ -164,13 +212,14 @@ export function encodeMdnsResponse(options: {
 
 /**
  * Starts a non-fatal local IPv4 mDNS responder advertising `_astranavi._tcp.local` so phones
- * can discover the desktop station without typing IPs manually. Never throws if UDP 5353
- * is blocked by sandbox or firewall rules.
+ * can discover the desktop station without typing IPs manually. Filters non-LAN senders,
+ * drops oversized datagrams, and rate-limits replies against amplification floods.
  */
 export async function startMdnsAdvertiser(
   options: MdnsAdvertiserOptions,
 ): Promise<MdnsAdvertiserHandle> {
-  if (options.addresses.length === 0) {
+  const lanAddresses = options.addresses.filter((addr) => isPrivateLanIpv4(addr));
+  if (lanAddresses.length === 0) {
     return { close: async () => undefined };
   }
   const hostName = hostname().split(".")[0] || "astranavi";
@@ -178,12 +227,14 @@ export async function startMdnsAdvertiser(
     instanceName: options.instanceName,
     hostName,
     port: options.port,
-    addresses: options.addresses,
+    addresses: lanAddresses,
     fingerprintTail: options.fingerprintTail,
   });
 
   const socket = createSocket({ type: "udp4", reuseAddr: true });
   let closed = false;
+  let lastMulticastAt = 0;
+  const unicastHits = new Map<string, number[]>();
 
   const ready = new Promise<boolean>((resolve) => {
     const onError = () => {
@@ -196,7 +247,7 @@ export async function startMdnsAdvertiser(
         try {
           socket.setMulticastTTL(255);
           socket.setMulticastLoopback(true);
-          for (const addr of options.addresses) {
+          for (const addr of lanAddresses) {
             try {
               socket.addMembership(MDNS_ADDR, addr);
             } catch {
@@ -215,6 +266,8 @@ export async function startMdnsAdvertiser(
 
   socket.on("error", () => undefined);
   socket.on("message", (msg, rinfo) => {
+    if (msg.length > MAX_MDNS_PACKET_BYTES) return;
+    if (!rinfo.address || !isPrivateLanIpv4(rinfo.address)) return;
     const questions = parseMdnsQuery(msg);
     const wantsUs = questions.some(
       (q) =>
@@ -223,14 +276,31 @@ export async function startMdnsAdvertiser(
         q.name === `${hostName.toLowerCase()}.local`,
     );
     if (!wantsUs) return;
-    socket.send(packet, MDNS_PORT, MDNS_ADDR, () => undefined);
-    if (rinfo.address && rinfo.port) {
-      socket.send(packet, rinfo.port, rinfo.address, () => undefined);
+
+    const now = Date.now();
+    if (now - lastMulticastAt >= MULTICAST_MIN_INTERVAL_MS) {
+      lastMulticastAt = now;
+      socket.send(packet, MDNS_PORT, MDNS_ADDR, () => undefined);
+    }
+
+    if (rinfo.port >= 1 && rinfo.port <= 65535) {
+      const prior = (unicastHits.get(rinfo.address) ?? []).filter(
+        (ts) => now - ts < UNICAST_WINDOW_MS,
+      );
+      if (prior.length < UNICAST_MAX_PER_WINDOW) {
+        prior.push(now);
+        unicastHits.set(rinfo.address, prior);
+        socket.send(packet, rinfo.port, rinfo.address, () => undefined);
+      }
+      if (unicastHits.size > 128) {
+        unicastHits.clear();
+      }
     }
   });
 
   const bound = await ready;
   if (bound) {
+    lastMulticastAt = Date.now();
     socket.send(packet, MDNS_PORT, MDNS_ADDR, () => undefined);
   } else {
     try {

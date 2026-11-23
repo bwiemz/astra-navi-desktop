@@ -24,6 +24,7 @@ jobs:
 
       - name: Build & smoke-test native Rust Linux Hands binary
         run: |
+          cargo test --offline --manifest-path hands/linux-hands-native/Cargo.toml
           cargo build --release --offline --manifest-path hands/linux-hands-native/Cargo.toml
           ./hands/linux-hands-native/target/release/linux-hands ping
           ./hands/linux-hands-native/target/release/linux-hands version
@@ -80,6 +81,7 @@ jobs:
           tests/spatialStagePresence.test.ts
           tests/multimodalStreaming.test.ts
           tests/grammarLoopAndCatalog.test.ts
+          tests/securityBoundariesAudit.test.ts
 
   win-hands-native:
     runs-on: windows-latest

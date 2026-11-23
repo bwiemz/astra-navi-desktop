@@ -20,7 +20,7 @@ import { BRAIN_MODELS } from "../core/models.ts";
 import type { MemoryStore } from "../core/memory.ts";
 import type { MissionBoard } from "../core/missionPlan.ts";
 import type { NoticeWatch } from "../core/notices.ts";
-import { dataDir, ordersFile, stationDir } from "../core/paths.ts";
+import { dataDir, ordersFile, resolveBundledRoot, stationDir } from "../core/paths.ts";
 import {
   exportProfileBackup,
   importProfileBackup,
@@ -745,7 +745,9 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
         if (typeof name !== "string" || !/^[a-z0-9_-]{1,40}$/.test(name)) return null;
         try {
-          const wav = await readFile(join(app.getAppPath(), "assets", "voice", `${name}.wav`));
+          const wav = await readFile(
+            join(resolveBundledRoot(app.getAppPath()), "assets", "voice", `${name}.wav`),
+          );
           return `data:audio/wav;base64,${wav.toString("base64")}`;
         } catch {
           return null;

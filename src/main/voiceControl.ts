@@ -4,7 +4,7 @@ import { app, type BrowserWindow } from "electron";
 import type { Brain } from "../core/brain.ts";
 import type { ConfigStore } from "../core/config.ts";
 import { LANGUAGES, type LanguageCode } from "../core/languages.ts";
-import { modelsDir, voiceEnvPython } from "../core/paths.ts";
+import { modelsDir, resolveBundledRoot, voiceEnvPython } from "../core/paths.ts";
 import type { VoiceBackend } from "../core/voice/backend.ts";
 import { FullVoice } from "../core/voice/fullVoice.ts";
 import { Listener } from "../core/voice/listener.ts";
@@ -164,8 +164,9 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
 
   async function buildVoice(): Promise<void> {
     const { voice, language } = deps.config.value;
+    const bundledRoot = resolveBundledRoot(app.getAppPath());
     const cacheDir = join(modelsDir(), "speech");
-    const voiceDir = join(app.getAppPath(), "assets", "voice");
+    const voiceDir = join(bundledRoot, "assets", "voice");
     try {
       designedVoices = (await readdir(voiceDir))
         .filter((name) => name.endsWith(".wav"))
@@ -178,7 +179,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     const full = design
       ? {
           python: voiceEnvPython(),
-          serverScript: join(app.getAppPath(), "voice-server", "server.py"),
+          serverScript: join(bundledRoot, "voice-server", "server.py"),
           referenceAudio: join(voiceDir, `${design}.wav`),
           referenceText: join(voiceDir, `${design}.txt`),
           modelCache: join(modelsDir(), "voice-hf"),

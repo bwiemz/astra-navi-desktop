@@ -103,7 +103,7 @@ describe("Signed Plugin SDK & Character .bundle Packs", () => {
     expect(disabledReg.ok).toBe(false);
 
     registry.enabled = true;
-    expect((await registry.register({ manifest, signature, entryBytes })).ok).toBe(true);
+    expect((await registry.register({ manifest, signature, entryBytes, approvedByUser: true })).ok).toBe(true);
     expect(registry.hasPermission(manifest.id, "read_workspace")).toBe(true);
     expect(registry.hasPermission(manifest.id, "write_workspace")).toBe(false);
 
@@ -267,6 +267,7 @@ describe("Signed Plugin SDK & Character .bundle Packs", () => {
       manifest,
       signature: sig,
       entryBytes,
+      approvedByUser: true,
       evalContext: { workspace: dir, home: dir },
     });
     expect(regRes.ok).toBe(true);

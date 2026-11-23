@@ -8,17 +8,141 @@ import { isPrivateLanHost } from "./workerMesh.ts";
  *
  * Speaks JSON-RPC 2.0 (`2025-03-26` / `2024-11-05`) over both local stdio
  * subprocesses and Streamable HTTP / SSE servers, wrapping every tool call
- * inside `core/permissions.ts` approval gates and outside-text tagging.
+ * inside `core/permissions.ts` approval gates, strict name/schema validation,
+ * buffer bounds, redirect blocking, and outside-text tagging.
  */
 
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MAX_OUTPUT_CHARS = 32_768;
+const MAX_STDIO_BUFFER_BYTES = 2 * 1024 * 1024;
+const MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_TOOLS_PER_SERVER = 128;
+const MAX_TOOL_DESCRIPTION_CHARS = 320;
+const MAX_INPUT_SCHEMA_BYTES = 16_384;
+const MAX_INPUT_SCHEMA_DEPTH = 8;
+const MAX_CALL_CONTENT_ITEMS = 64;
 const DEFAULT_TIMEOUT_MS = 15_000;
-const BLOCKED_METADATA_HOSTS = new Set(["169.254.169.254", "metadata.google.internal", "100.100.100.200"]);
+
+const BLOCKED_METADATA_HOSTS = new Set([
+  "169.254.169.254",
+  "metadata.google.internal",
+  "100.100.100.200",
+  "0.0.0.0",
+  "::",
+  "::ffff:0.0.0.0",
+]);
+
+const SAFE_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "LC_ALL",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "SystemRoot",
+  "COMSPEC",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PATHEXT",
+] as const;
+
+const FORBIDDEN_ENV_KEYS = new Set([
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "NODE_OPTIONS",
+  "PYTHONSTARTUP",
+  "PYTHONPATH",
+  "BASH_ENV",
+  "ENV",
+]);
+
+const SAFE_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Strips control characters, bidi overrides, and companion `[[...]]` mood markers. */
+function sanitizeUntrustedText(raw: string, collapseWhitespace: boolean): string {
+  let cleaned = "";
+  for (let i = 0; i < raw.length; i += 1) {
+    const code = raw.charCodeAt(i);
+    if (
+      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
+      code === 0x7f ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069)
+    ) {
+      continue;
+    }
+    if (collapseWhitespace && (code === 0x09 || code === 0x0a || code === 0x0d)) {
+      cleaned += " ";
+    } else {
+      cleaned += raw[i] ?? "";
+    }
+  }
+  const withoutMood = cleaned.replaceAll("[[", "[").replaceAll("]]", "]");
+  return collapseWhitespace ? withoutMood.replace(/\s+/g, " ").trim() : withoutMood;
+}
+
+function assertSafeEnvOverrides(env: Record<string, string> | undefined): Record<string, string> {
+  const base: Record<string, string> = {};
+  for (const key of SAFE_ENV_KEYS) {
+    const val = process.env[key];
+    if (typeof val === "string") base[key] = val;
+  }
+  if (!env) return base;
+  for (const [k, v] of Object.entries(env)) {
+    const upper = k.toUpperCase();
+    if (FORBIDDEN_ENV_KEYS.has(upper) || k.includes("\0") || v.includes("\0")) {
+      throw new Error(`Refused unsafe MCP environment override "${k}".`);
+    }
+    base[k] = v;
+  }
+  return base;
+}
+
+function hasUnsafeCommandChars(cmd: string): boolean {
+  for (let i = 0; i < cmd.length; i += 1) {
+    const code = cmd.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return /[;&|`$<>]/.test(cmd);
+}
+
+function jsonDepthWithinLimit(value: unknown, maxDepth: number, depth = 0): boolean {
+  if (depth > maxDepth) return false;
+  if (value === null || typeof value !== "object") return true;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (!jsonDepthWithinLimit(item, maxDepth, depth + 1)) return false;
+    }
+    return true;
+  }
+  for (const v of Object.values(value as Record<string, unknown>)) {
+    if (!jsonDepthWithinLimit(v, maxDepth, depth + 1)) return false;
+  }
+  return true;
+}
+
+function sanitizeInputSchema(raw: unknown): Record<string, unknown> | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  if (!jsonDepthWithinLimit(raw, MAX_INPUT_SCHEMA_DEPTH)) return undefined;
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(raw);
+  } catch {
+    return undefined;
+  }
+  if (!serialized || serialized.length > MAX_INPUT_SCHEMA_BYTES) return undefined;
+  return raw as Record<string, unknown>;
+}
 
 export const McpServerConfigSchema = z
   .object({
-    id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
+    id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
     name: z.string().min(1).max(80).optional(),
     transport: z.enum(["stdio", "http"]),
     command: z.string().min(1).max(260).optional(),
@@ -32,11 +156,28 @@ export const McpServerConfigSchema = z
     timeoutMs: z.number().int().min(500).max(120_000).optional(),
   })
   .superRefine((cfg, ctx) => {
-    if (cfg.transport === "stdio" && !cfg.command) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Stdio MCP server requires a `command` executable.",
-      });
+    if (cfg.transport === "stdio") {
+      if (!cfg.command) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Stdio MCP server requires a `command` executable.",
+        });
+      } else if (hasUnsafeCommandChars(cfg.command)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Stdio MCP `command` contains forbidden control or shell characters.",
+        });
+      }
+      if (cfg.env) {
+        for (const [k, v] of Object.entries(cfg.env)) {
+          if (FORBIDDEN_ENV_KEYS.has(k.toUpperCase()) || k.includes("\0") || v.includes("\0")) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `MCP stdio env override "${k}" is blocked for security.`,
+            });
+          }
+        }
+      }
     }
     if (cfg.transport === "http") {
       if (!cfg.url) {
@@ -100,6 +241,16 @@ export interface McpTransport {
   close(): Promise<void>;
 }
 
+function normalizeMappedIpv4(host: string): string {
+  if (!host.startsWith("::ffff:")) return host;
+  const rest = host.slice("::ffff:".length);
+  const hexPair = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+  if (!hexPair) return rest;
+  const hi = Number.parseInt(hexPair[1] ?? "0", 16);
+  const lo = Number.parseInt(hexPair[2] ?? "0", 16);
+  return `${(hi >>> 8) & 0xff}.${hi & 0xff}.${(lo >>> 8) & 0xff}.${lo & 0xff}`;
+}
+
 /** Validates HTTP/SSE MCP endpoint URLs against SSRF / metadata / unencrypted non-LAN targets. */
 export function validateMcpHttpUrl(rawUrl: string): { ok: true; url: URL } | { ok: false; reason: string } {
   let parsed: URL;
@@ -114,12 +265,22 @@ export function validateMcpHttpUrl(rawUrl: string): { ok: true; url: URL } | { o
   if (parsed.username || parsed.password) {
     return { ok: false, reason: "MCP URLs must not embed credentials." };
   }
-  const host = parsed.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
-  if (!host || BLOCKED_METADATA_HOSTS.has(host) || host.startsWith("169.254.")) {
-    return { ok: false, reason: `Blocked cloud metadata or link-local MCP host "${host}".` };
+  const rawHost = parsed.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+  const host = (rawHost.split("%")[0] ?? rawHost).replace(/\.+$/, "");
+  const mappedV4 = normalizeMappedIpv4(host);
+  if (
+    !host ||
+    BLOCKED_METADATA_HOSTS.has(host) ||
+    BLOCKED_METADATA_HOSTS.has(mappedV4) ||
+    mappedV4.startsWith("169.254.") ||
+    mappedV4.startsWith("0.") ||
+    host.startsWith("fe80:")
+  ) {
+    return { ok: false, reason: `Blocked cloud metadata, unspecified, or link-local MCP host "${host}".` };
   }
-  const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
-  const isLan = isLoopback || isPrivateLanHost(host) || isPrivateIpv4(host);
+  const isLoopback =
+    mappedV4 === "localhost" || mappedV4 === "127.0.0.1" || host === "::1";
+  const isLan = isLoopback || isPrivateLanHost(mappedV4) || isPrivateIpv4(mappedV4);
   if (parsed.protocol === "http:" && !isLan) {
     return {
       ok: false,
@@ -151,14 +312,15 @@ export class StdioMcpTransport implements McpTransport {
   async connect(): Promise<void> {
     if (this.child) return;
     const command = this.cfg.command ?? "";
-    if (!command || /[;&|`$<>]/.test(command)) {
+    if (!command || hasUnsafeCommandChars(command)) {
       throw new Error(`Unsafe or missing MCP stdio command "${command}".`);
     }
+    const cleanEnv = assertSafeEnvOverrides(this.cfg.env);
     const child = spawn(command, [...(this.cfg.args ?? [])], {
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
       ...(this.cfg.cwd ? { cwd: this.cfg.cwd } : {}),
-      ...(this.cfg.env ? { env: { ...process.env, ...this.cfg.env } } : {}),
+      env: cleanEnv,
       windowsHide: true,
     });
     this.child = child;
@@ -189,7 +351,39 @@ export class StdioMcpTransport implements McpTransport {
     }
   }
 
+  private killChildQuietly(): void {
+    const child = this.child;
+    this.child = null;
+    if (!child) return;
+    try {
+      child.stdin?.end();
+    } catch {
+      // Ignore broken pipe during teardown.
+    }
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      return;
+    }
+    const forceTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Process already exited.
+        }
+      }
+    }, 1500);
+    forceTimer.unref?.();
+  }
+
   private handleChunk(chunk: string): void {
+    if (Buffer.byteLength(this.stdoutBuf, "utf8") + Buffer.byteLength(chunk, "utf8") > MAX_STDIO_BUFFER_BYTES) {
+      this.stdoutBuf = "";
+      this.rejectAll(new Error("MCP stdio stdout buffer exceeded 2 MiB limit."));
+      this.killChildQuietly();
+      return;
+    }
     this.stdoutBuf += chunk;
     let nl = this.stdoutBuf.indexOf("\n");
     while (nl >= 0) {
@@ -204,7 +398,7 @@ export class StdioMcpTransport implements McpTransport {
     let msg: Record<string, unknown>;
     try {
       const parsed = JSON.parse(line) as unknown;
-      if (typeof parsed !== "object" || parsed === null) return;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
       msg = parsed as Record<string, unknown>;
     } catch {
       return;
@@ -247,7 +441,20 @@ export class StdioMcpTransport implements McpTransport {
         reject,
         timer,
       });
-      this.child?.stdin?.write(`${payload}\n`);
+      try {
+        this.child?.stdin?.write(`${payload}\n`, "utf8", (writeErr) => {
+          if (!writeErr) return;
+          const pendingEntry = this.pending.get(id);
+          if (!pendingEntry) return;
+          this.pending.delete(id);
+          clearTimeout(pendingEntry.timer);
+          pendingEntry.reject(writeErr);
+        });
+      } catch (err) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 
@@ -262,18 +469,51 @@ export class StdioMcpTransport implements McpTransport {
   }
 
   async close(): Promise<void> {
-    const child = this.child;
-    this.child = null;
     this.rejectAll(new Error("MCP stdio transport closed."));
-    if (child) {
-      try {
-        child.stdin?.end();
-      } catch {
-        // Ignore broken pipe during close.
-      }
-      child.kill("SIGTERM");
+    this.killChildQuietly();
+  }
+}
+
+async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+  const lenHeader = response.headers.get("content-length");
+  if (lenHeader) {
+    const declared = Number(lenHeader);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`MCP HTTP response declared ${declared} bytes (exceeds ${maxBytes} byte limit).`);
     }
   }
+  const reader = response.body?.getReader();
+  if (reader) {
+    const decoder = new TextDecoder("utf-8");
+    const chunks: string[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        const val = next.value;
+        if (val) {
+          total += val.byteLength;
+          if (total > maxBytes) {
+            await reader.cancel().catch(() => undefined);
+            throw new Error(`MCP HTTP response exceeded ${maxBytes} byte limit.`);
+          }
+          chunks.push(decoder.decode(val, { stream: true }));
+        }
+      }
+      chunks.push(decoder.decode());
+      return chunks.join("");
+    } catch (err) {
+      await reader.cancel().catch(() => undefined);
+      throw err;
+    }
+  }
+  const text = await response.text();
+  if (Buffer.byteLength(text, "utf8") > maxBytes) {
+    throw new Error(`MCP HTTP response exceeded ${maxBytes} byte limit.`);
+  }
+  return text;
 }
 
 /** Streamable HTTP + SSE MCP transport (`application/json` and `text/event-stream`). */
@@ -320,7 +560,9 @@ export class HttpMcpTransport implements McpTransport {
         const raw = dataLines.join("\n");
         let parsed: Record<string, unknown>;
         try {
-          parsed = JSON.parse(raw) as Record<string, unknown>;
+          const obj = JSON.parse(raw) as unknown;
+          if (typeof obj !== "object" || obj === null || Array.isArray(obj)) continue;
+          parsed = obj as Record<string, unknown>;
         } catch {
           continue;
         }
@@ -335,7 +577,14 @@ export class HttpMcpTransport implements McpTransport {
       throw new Error("MCP SSE stream ended without a matching JSON-RPC result.");
     }
 
-    const parsed = JSON.parse(bodyText) as Record<string, unknown>;
+    const rawParsed = JSON.parse(bodyText) as unknown;
+    if (typeof rawParsed !== "object" || rawParsed === null || Array.isArray(rawParsed)) {
+      throw new Error("MCP HTTP payload must be a JSON object.");
+    }
+    const parsed = rawParsed as Record<string, unknown>;
+    if (expectedId !== undefined && parsed["id"] !== expectedId) {
+      throw new Error(`MCP JSON-RPC id mismatch: expected ${expectedId}, got ${String(parsed["id"])}.`);
+    }
     if (parsed["error"] && typeof parsed["error"] === "object") {
       throw new Error(String((parsed["error"] as Record<string, unknown>)["message"] ?? "MCP HTTP error"));
     }
@@ -351,6 +600,7 @@ export class HttpMcpTransport implements McpTransport {
     try {
       const response = await this.fetchImpl(this.endpointUrl.toString(), {
         method: "POST",
+        redirect: "error",
         headers: this.buildHeaders(),
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -366,7 +616,7 @@ export class HttpMcpTransport implements McpTransport {
         throw new Error(`MCP HTTP ${response.status} from ${this.endpointUrl.origin}`);
       }
       const ctype = (response.headers.get("content-type") ?? "application/json").toLowerCase();
-      const text = await response.text();
+      const text = await readBoundedResponseText(response, MAX_HTTP_RESPONSE_BYTES);
       return this.parseSseOrJson(ctype, text, id) as T;
     } finally {
       clearTimeout(timer);
@@ -379,6 +629,7 @@ export class HttpMcpTransport implements McpTransport {
     try {
       await this.fetchImpl(this.endpointUrl.toString(), {
         method: "POST",
+        redirect: "error",
         headers: this.buildHeaders(),
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -442,20 +693,80 @@ export class McpClient {
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {
-    const res = await this.transport.request<{ tools?: McpToolDescriptor[] }>("tools/list", {});
-    this.cachedTools = Array.isArray(res?.tools) ? res.tools : [];
+    const res = await this.transport.request<{ tools?: unknown[] }>("tools/list", {});
+    const rawList = Array.isArray(res?.tools) ? res.tools : [];
+    const seen = new Set<string>();
+    const clean: McpToolDescriptor[] = [];
+    for (const item of rawList) {
+      if (clean.length >= MAX_TOOLS_PER_SERVER) break;
+      if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+      const obj = item as Record<string, unknown>;
+      const rawName = typeof obj["name"] === "string" ? obj["name"] : "";
+      if (!SAFE_TOOL_NAME_RE.test(rawName) || seen.has(rawName)) continue;
+      seen.add(rawName);
+      const rawDesc = typeof obj["description"] === "string" ? obj["description"] : undefined;
+      const description =
+        rawDesc !== undefined
+          ? sanitizeUntrustedText(rawDesc, true).slice(0, MAX_TOOL_DESCRIPTION_CHARS)
+          : undefined;
+      const inputSchema = sanitizeInputSchema(obj["inputSchema"]);
+      const rawAnn = obj["annotations"];
+      const annotations: McpToolAnnotations | undefined =
+        typeof rawAnn === "object" && rawAnn !== null && !Array.isArray(rawAnn)
+          ? {
+              ...(typeof (rawAnn as Record<string, unknown>)["readOnlyHint"] === "boolean"
+                ? { readOnlyHint: (rawAnn as Record<string, unknown>)["readOnlyHint"] as boolean }
+                : {}),
+              ...(typeof (rawAnn as Record<string, unknown>)["destructiveHint"] === "boolean"
+                ? { destructiveHint: (rawAnn as Record<string, unknown>)["destructiveHint"] as boolean }
+                : {}),
+              ...(typeof (rawAnn as Record<string, unknown>)["idempotentHint"] === "boolean"
+                ? { idempotentHint: (rawAnn as Record<string, unknown>)["idempotentHint"] as boolean }
+                : {}),
+              ...(typeof (rawAnn as Record<string, unknown>)["openWorldHint"] === "boolean"
+                ? { openWorldHint: (rawAnn as Record<string, unknown>)["openWorldHint"] as boolean }
+                : {}),
+            }
+          : undefined;
+      clean.push({
+        name: rawName,
+        ...(description !== undefined ? { description } : {}),
+        ...(inputSchema !== undefined ? { inputSchema } : {}),
+        ...(annotations !== undefined ? { annotations } : {}),
+      });
+    }
+    this.cachedTools = clean;
     return this.cachedTools;
   }
 
   async callTool(name: string, args: Record<string, unknown> = {}): Promise<McpCallResult> {
+    if (!SAFE_TOOL_NAME_RE.test(name)) {
+      throw new Error(`Invalid MCP tool name "${name}".`);
+    }
     const raw = await this.transport.request<{
       content?: { type: string; text?: string; [key: string]: unknown }[];
       isError?: boolean;
     }>("tools/call", { name, arguments: args });
-    const items = Array.isArray(raw?.content) ? raw.content : [];
-    const joined = items
-      .map((item) => (typeof item.text === "string" ? item.text : JSON.stringify(item)))
-      .join("\n");
+    const items = Array.isArray(raw?.content) ? raw.content.slice(0, MAX_CALL_CONTENT_ITEMS) : [];
+    const parts: string[] = [];
+    let runningLen = 0;
+    for (const item of items) {
+      let piece: string;
+      if (item && typeof item === "object" && typeof item.text === "string") {
+        piece = item.text.slice(0, MAX_OUTPUT_CHARS);
+      } else {
+        try {
+          piece = (JSON.stringify(item) ?? "").slice(0, MAX_OUTPUT_CHARS);
+        } catch {
+          piece = "[unserializable MCP content item]";
+        }
+      }
+      const sanitized = sanitizeUntrustedText(piece, false);
+      parts.push(sanitized);
+      runningLen += sanitized.length;
+      if (runningLen >= MAX_OUTPUT_CHARS) break;
+    }
+    const joined = parts.join("\n");
     const bounded =
       joined.length > MAX_OUTPUT_CHARS
         ? `${joined.slice(0, MAX_OUTPUT_CHARS)}\n[truncated ${joined.length - MAX_OUTPUT_CHARS} chars]`
@@ -483,7 +794,7 @@ export class McpClient {
     const first = Array.isArray(res?.contents) ? res.contents[0] : undefined;
     const rawText = typeof first?.text === "string" ? first.text : "";
     return {
-      text: rawText.slice(0, MAX_OUTPUT_CHARS),
+      text: sanitizeUntrustedText(rawText.slice(0, MAX_OUTPUT_CHARS), false),
       ...(first?.mimeType ? { mimeType: first.mimeType } : {}),
       outsideText: true,
     };
@@ -538,6 +849,12 @@ export function evaluateMcpToolVerdict(
   return { decision: "allow" };
 }
 
+export interface McpCallGuard {
+  policyContext?: PolicyContext;
+  onOutsideText?: () => void;
+  confirm?: (reason: string, sensitive: boolean) => Promise<boolean>;
+}
+
 /** Multi-server MCP coordinator integrated with `permissions.ts` and `semanticBridge.ts`. */
 export class McpHub {
   private readonly clients = new Map<string, McpClient>();
@@ -554,6 +871,28 @@ export class McpHub {
 
   listServers(): readonly McpServerConfig[] {
     return [...this.clients.values()].map((c) => c.config);
+  }
+
+  private parsePrefixedToolName(
+    fullToolName: string,
+  ): { serverId: string; toolName: string; client?: McpClient } | null {
+    if (!fullToolName.startsWith("mcp:")) return null;
+    const rest = fullToolName.slice("mcp:".length);
+    // Longest-prefix match over registered IDs (defense in depth alongside dot-free IDs).
+    const registeredIds = [...this.clients.keys()].sort((a, b) => b.length - a.length);
+    for (const id of registeredIds) {
+      const prefix = `${id}.`;
+      if (rest.startsWith(prefix)) {
+        const toolName = rest.slice(prefix.length);
+        if (!SAFE_TOOL_NAME_RE.test(toolName)) return null;
+        return { serverId: id, toolName, client: this.clients.get(id) };
+      }
+    }
+    const match = /^([a-z0-9][a-z0-9_-]{0,63})\.([A-Za-z0-9_-]{1,64})$/.exec(rest);
+    if (!match) return null;
+    const serverId = match[1] ?? "";
+    const toolName = match[2] ?? "";
+    return { serverId, toolName, client: this.clients.get(serverId) };
   }
 
   async connectAll(): Promise<{ connected: string[]; errors: Record<string, string> }> {
@@ -583,35 +922,58 @@ export class McpHub {
 
   /** Evaluates `permissions.ts` policy for any prefixed `mcp:<server>.<tool>` call. */
   verdictForTool(fullToolName: string, context: PolicyContext): Verdict {
-    const match = /^mcp:([^.]+)\.(.+)$/.exec(fullToolName);
-    if (!match) {
+    const parsed = this.parsePrefixedToolName(fullToolName);
+    if (!parsed) {
       return {
         decision: "ask",
         sensitive: false,
         reason: `Unrecognized MCP tool identifier "${fullToolName}".`,
       };
     }
-    const serverId = match[1] ?? "";
-    const toolName = match[2] ?? "";
-    const client = this.clients.get(serverId);
-    const tool = client?.tools.find((t) => t.name === toolName);
+    const client = parsed.client;
+    const tool = client?.tools.find((t) => t.name === parsed.toolName);
     return evaluateMcpToolVerdict(
-      serverId,
+      parsed.serverId,
       tool,
       client?.config.readOnlyAutoAllow === true,
       context,
     );
   }
 
-  async callPrefixedTool(fullToolName: string, args: Record<string, unknown> = {}): Promise<McpCallResult> {
-    const match = /^mcp:([^.]+)\.(.+)$/.exec(fullToolName);
-    if (!match) throw new Error(`Invalid MCP tool name "${fullToolName}".`);
-    const serverId = match[1] ?? "";
-    const toolName = match[2] ?? "";
-    const client = this.clients.get(serverId);
+  async callPrefixedTool(
+    fullToolName: string,
+    args: Record<string, unknown> = {},
+    guard?: McpCallGuard,
+  ): Promise<McpCallResult> {
+    const parsed = this.parsePrefixedToolName(fullToolName);
+    if (!parsed) throw new Error(`Invalid MCP tool name "${fullToolName}".`);
+    const { serverId, toolName, client } = parsed;
     if (!client) throw new Error(`Unknown MCP server "${serverId}".`);
     if (!client.isConnected) await client.initialize();
-    return client.callTool(toolName, args);
+    if (client.tools.length === 0) {
+      await client.listTools();
+    }
+    const registeredTool = client.tools.find((t) => t.name === toolName);
+    if (!registeredTool) {
+      throw new Error(`Refused unknown or undeclared MCP tool "${fullToolName}".`);
+    }
+    if (guard?.policyContext || guard?.confirm) {
+      const verdict = evaluateMcpToolVerdict(
+        serverId,
+        registeredTool,
+        client.config.readOnlyAutoAllow,
+        guard.policyContext ?? {},
+      );
+      if (verdict.decision === "ask") {
+        const ok = guard.confirm ? await guard.confirm(verdict.reason, verdict.sensitive) : false;
+        if (!ok) {
+          throw new Error(`Permission denied for MCP tool "${fullToolName}": ${verdict.reason}`);
+        }
+      }
+    }
+    const result = await client.callTool(toolName, args);
+    guard?.onOutsideText?.();
+    return result;
   }
 
   async closeAll(): Promise<void> {

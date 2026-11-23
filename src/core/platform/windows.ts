@@ -381,6 +381,7 @@ export function resolveNativeWinHandsBinary(
   scriptPath: string,
   explicitPath?: string,
   checkExists: (path: string) => boolean = existsSync,
+  resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
 ): string | null {
   const candidates = [
     explicitPath,
@@ -388,6 +389,23 @@ export function resolveNativeWinHandsBinary(
     join(dirname(scriptPath), "win-hands-native", "win-hands.exe"),
     join(dirname(scriptPath), "win-hands-native", "bin", "win-hands.exe"),
     join(dirname(scriptPath), "win-hands-native", "bin", "Release", "net9.0", "win-x64", "publish", "win-hands.exe"),
+    ...(resourcesPath
+      ? [
+          join(resourcesPath, "hands", "win-hands-native", "win-hands.exe"),
+          join(resourcesPath, "hands", "win-hands-native", "bin", "win-hands.exe"),
+          join(
+            resourcesPath,
+            "hands",
+            "win-hands-native",
+            "bin",
+            "Release",
+            "net9.0",
+            "win-x64",
+            "publish",
+            "win-hands.exe",
+          ),
+        ]
+      : []),
   ].filter((p): p is string => typeof p === "string" && p.length > 0);
   return candidates.find((candidate) => checkExists(candidate)) ?? null;
 }
