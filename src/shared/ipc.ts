@@ -98,6 +98,12 @@ export interface AppState {
    * and the conversation log opens over the balloon's place, not beside her.
    */
   fixedSize: boolean;
+  /** Desktop window mode (`floating` overlay or `solid-docked` window). */
+  windowMode: "floating" | "solid-docked";
+  /** Battery-conscious 3D stage mode (reduced FPS and scaled pixel density). */
+  lowPowerStage: boolean;
+  /** Whether mouse clicks currently pass through the overlay window. */
+  clickThrough: boolean;
 }
 
 /** What she is taking in or held back from right now. Each is shown as a small badge when true. */

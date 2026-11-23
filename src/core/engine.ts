@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { mkdir, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import {
-  createModelDownloader,
   getLlama,
   LlamaChatSession,
   QwenChatWrapper,
@@ -19,6 +18,7 @@ import {
   recommendHardwareTier,
   type HardwareProfile,
 } from "./hardwareTuner.ts";
+import { downloadModelResumable } from "./modelBundle.ts";
 import {
   BRAIN_MODELS,
   isDownloaded,
@@ -843,22 +843,23 @@ export class LocalEngine {
       await mkdir(options.modelsDir, { recursive: true });
       const total = chosen.download.sizeBytes;
       options.onStatus({ stage: "downloading", label: chosen.label, received: 0, total });
-      const downloader = await createModelDownloader({
-        modelUri: chosen.download.url,
-        dirPath: options.modelsDir,
-        fileName: chosen.download.fileName,
-        onProgress: (progress) => {
-          options.onStatus({
-            stage: "downloading",
-            label: chosen.label,
-            received: progress.downloadedSize,
-            total: progress.totalSize || total,
-          });
-        },
-      });
       this.download = new AbortController();
       try {
-        await downloader.download({ signal: this.download.signal });
+        await downloadModelResumable({
+          url: chosen.download.url,
+          destPath: chosen.path,
+          expectedSizeBytes: total,
+          expectedSha256: chosen.download.sha256,
+          signal: this.download.signal,
+          onProgress: (progress) => {
+            options.onStatus({
+              stage: "downloading",
+              label: chosen.label,
+              received: progress.received,
+              total: progress.total || total,
+            });
+          },
+        });
       } finally {
         this.download = null;
       }

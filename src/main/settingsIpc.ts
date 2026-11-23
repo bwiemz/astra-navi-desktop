@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { describeSource } from "../core/agenda.ts";
 import {
   checkBootstrapStatus,
@@ -21,6 +21,12 @@ import type { MemoryStore } from "../core/memory.ts";
 import type { MissionBoard } from "../core/missionPlan.ts";
 import type { NoticeWatch } from "../core/notices.ts";
 import { dataDir, ordersFile, stationDir } from "../core/paths.ts";
+import {
+  exportProfileBackup,
+  importProfileBackup,
+  inspectProfileBackup,
+} from "../core/profileBackup.ts";
+import { buildPairingUri, encodeQrMatrix, type QrMatrix } from "../core/qrCode.ts";
 import type { Reach } from "../core/reach.ts";
 import { auditSecurityRules } from "../core/ruleAudit.ts";
 import type { SearchBudget } from "../core/searchBudget.ts";
@@ -29,12 +35,19 @@ import { excerpt, type StandingOrder } from "../core/standingOrders.ts";
 import { StationAccount, whyNotThese } from "../core/stationAccount.ts";
 import { buildRedactedSupportBundle, formatSupportBundleJson } from "../core/supportBundle.ts";
 import { forShow, type ShownTrace, type TraceKeeper } from "../core/trace.ts";
+import { checkGithubReleaseUpdate, type UpdateCheckResult } from "../core/updateCheck.ts";
 import type { ConversationArchive } from "../core/archive.ts";
-import { resolveEdition } from "../shared/edition.ts";
+import {
+  detectDistributionChannel,
+  resolveEdition,
+  shouldCheckGithubUpdates,
+} from "../shared/edition.ts";
 import type {
   BootstrapStatusView,
   HardwareRecommendationView,
   PolicyAuditSummaryView,
+  ProfileBackupActionResult,
+  ProfileRestoreActionResult,
   SettingsPatch,
   SettingsView,
   SupportBundleResultView,
@@ -77,6 +90,12 @@ export interface SettingsIpcDeps {
   runSelfCheck?(): Promise<SelfCheckResult>;
   desktopSessionNotice?(): string | null;
   recentErrors?(): readonly string[];
+  safeModeStatus?(): { active: boolean; consecutiveCrashes: number; reason: string | null };
+  clearSafeMode?(): Promise<void>;
+  applyHotkeys?(): { failed: string[] };
+  applyStageOptions?(): void;
+  beforeProfileRestore?(): Promise<void>;
+  relaunchAfterRestore?(): void;
   sendToWindow(channel: string, payload?: unknown): void;
   rebuildTrayMenu(): void;
 }
@@ -275,6 +294,18 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       canAskPassword,
       onboardingComplete: config.value.onboardingComplete,
       advancedSettings: config.value.advancedSettings,
+      windowMode: config.value.windowMode,
+      lowPowerStage: config.value.lowPowerStage,
+      hotkeys: { ...config.value.hotkeys },
+      safeModeNotice: deps.safeModeStatus?.() ?? {
+        active: false,
+        consecutiveCrashes: 0,
+        reason: null,
+      },
+      updatePolicy: {
+        standaloneChecksEnabled: shouldCheckGithubUpdates(),
+        channel: detectDistributionChannel(),
+      },
       desktopSessionNotice: deps.desktopSessionNotice?.() ?? null,
       ...(lastBootstrapStatus ? { bootstrapStatus: lastBootstrapStatus } : {}),
       tier10: { ...config.value.tier10 },
@@ -429,6 +460,17 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       ...(patch.advancedSettings !== undefined
         ? { advancedSettings: patch.advancedSettings }
         : {}),
+      ...(patch.windowMode !== undefined ? { windowMode: patch.windowMode } : {}),
+      ...(patch.lowPowerStage !== undefined ? { lowPowerStage: patch.lowPowerStage } : {}),
+      ...(patch.hotkeys !== undefined
+        ? {
+            hotkeys: {
+              pushToTalk: (patch.hotkeys.pushToTalk ?? config.value.hotkeys.pushToTalk).trim().slice(0, 40),
+              summonHide: (patch.hotkeys.summonHide ?? config.value.hotkeys.summonHide).trim().slice(0, 40),
+              clickThrough: (patch.hotkeys.clickThrough ?? config.value.hotkeys.clickThrough).trim().slice(0, 40),
+            },
+          }
+        : {}),
       ...(patch.tier10 !== undefined
         ? { tier10: { ...config.value.tier10, ...patch.tier10 } }
         : {}),
@@ -496,6 +538,17 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     }
     if (patch.brain !== undefined && patch.brain !== config.value.brain) {
       deps.chooseBrain(patch.brain);
+    }
+    if (patch.windowMode !== undefined || patch.lowPowerStage !== undefined) {
+      deps.applyStageOptions?.();
+    }
+    if (patch.hotkeys !== undefined) {
+      const hotkeyResult = deps.applyHotkeys?.();
+      if (hotkeyResult && hotkeyResult.failed.length > 0) {
+        failure ??= new Error(
+          `Could not register shortcut: ${hotkeyResult.failed.join(", ")}. Another app may already be using it.`,
+        );
+      }
     }
     if (patch.language !== undefined && patch.language !== config.value.language) {
       deps.chooseLanguage(patch.language);
@@ -582,12 +635,30 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
       return forShow(deps.traces.list());
     });
-    ipcMain.handle("settings:pair-device", (event): { code: string; expiresAt: number } => {
-      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
-      const station = deps.reach()?.station;
-      if (!station?.running) throw new Error("Switch the station on first.");
-      return station.beginPairing();
-    });
+    ipcMain.handle(
+      "settings:pair-device",
+      (
+        event,
+      ): { code: string; expiresAt: number; pairingUri: string; qrMatrix: QrMatrix } => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const station = deps.reach()?.station;
+        if (!station?.running) throw new Error("Switch the station on first.");
+        const pairing = station.beginPairing();
+        const address =
+          station.addresses()[0] ?? `https://127.0.0.1:${config.value.devices.stationPort}`;
+        const fingerprint = station.fingerprint() ?? "";
+        const pairingUri = buildPairingUri({
+          address,
+          fingerprint,
+          code: pairing.code,
+        });
+        return {
+          ...pairing,
+          pairingUri,
+          qrMatrix: encodeQrMatrix(pairingUri),
+        };
+      },
+    );
     ipcMain.handle(
       "settings:pin-mission",
       async (event, id: unknown): Promise<SettingsView> => {
@@ -802,6 +873,86 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         };
       },
     );
+    ipcMain.handle("settings:check-updates", async (event): Promise<UpdateCheckResult> => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      return checkGithubReleaseUpdate({ currentVersion: app.getVersion() });
+    });
+    ipcMain.handle("settings:clear-safe-mode", async (event): Promise<SettingsView> => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      await deps.clearSafeMode?.();
+      return settingsView();
+    });
+    ipcMain.handle("settings:export-profile", async (event): Promise<ProfileBackupActionResult> => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      const owner = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : undefined;
+      const stamp = new Date().toISOString().slice(0, 10);
+      const saveOptions: Electron.SaveDialogOptions = {
+        title: "Export Astra Navi Profile Backup",
+        defaultPath: `astra-navi-profile-${stamp}.anprof`,
+        filters: [{ name: "Astra Navi Profile Backup", extensions: ["anprof"] }],
+      };
+      const picked = owner
+        ? await dialog.showSaveDialog(owner, saveOptions)
+        : await dialog.showSaveDialog(saveOptions);
+      if (picked.canceled || !picked.filePath) {
+        return { ok: false, canceled: true };
+      }
+      try {
+        const summary = await exportProfileBackup(dataDir(), picked.filePath);
+        return { ok: true, canceled: false, path: picked.filePath, summary };
+      } catch (error) {
+        return {
+          ok: false,
+          canceled: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    });
+    ipcMain.handle("settings:import-profile", async (event): Promise<ProfileRestoreActionResult> => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      const owner = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : undefined;
+      const openOptions: Electron.OpenDialogOptions = {
+        title: "Restore Astra Navi Profile Backup",
+        properties: ["openFile"],
+        filters: [{ name: "Astra Navi Profile Backup", extensions: ["anprof"] }],
+      };
+      const picked = owner
+        ? await dialog.showOpenDialog(owner, openOptions)
+        : await dialog.showOpenDialog(openOptions);
+      if (picked.canceled || picked.filePaths.length === 0) {
+        return { ok: false, canceled: true };
+      }
+      const filePath = picked.filePaths[0];
+      if (!filePath) return { ok: false, canceled: true };
+      try {
+        const inspected = await inspectProfileBackup(filePath);
+        const confirmOptions: Electron.MessageBoxOptions = {
+          type: "question",
+          buttons: ["Restore & Restart", "Cancel"],
+          defaultId: 0,
+          cancelId: 1,
+          title: "Restore profile backup?",
+          message: `Restore ${inspected.files.length} files from backup dated ${inspected.exportedAt}?`,
+          detail:
+            "Your current state will first be backed up into pre-restore-backups/, then replaced and Astra Navi Desktop will restart to reload your profile cleanly.",
+          noLink: true,
+        };
+        const { response } = owner
+          ? await dialog.showMessageBox(owner, confirmOptions)
+          : await dialog.showMessageBox(confirmOptions);
+        if (response !== 0) return { ok: false, canceled: true };
+        await deps.beforeProfileRestore?.();
+        const result = await importProfileBackup(filePath, dataDir());
+        setTimeout(() => deps.relaunchAfterRestore?.(), 250);
+        return { ok: true, canceled: false, path: filePath, result };
+      } catch (error) {
+        return {
+          ok: false,
+          canceled: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    });
   }
 
   return {

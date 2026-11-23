@@ -774,7 +774,13 @@ askInput.addEventListener("keydown", (event) => {
 
 /** A suggestion that is sent as it stands, or (ending in a space) put in the box to be finished. */
 function renderChips(): void {
-  const offered = ["How's the ship?", "What's on my screen?", "Remind me in 20 minutes to "];
+  const offered = [
+    "How's the ship?",
+    "What's on my screen?",
+    "Summarize my clipboard",
+    "Check my schedule today",
+    "Remind me in 20 minutes to ",
+  ];
   const machine = senses?.machines[0];
   if (machine) offered.push(`How is ${machine} doing?`);
   chips.replaceChildren(
@@ -1152,12 +1158,18 @@ element("import-model").addEventListener("click", () => bridge.importModel());
 
 // ---------- start-up ----------
 
+let loadedModelUrl: string | null = null;
+
 async function applyState(state: AppState): Promise<void> {
   notice = state.modelCredit
     ? `${state.notice}\n\nCharacter model in use: **${state.modelCredit.name}**. Its own notes and terms:\n\n${state.modelCredit.terms}`
     : state.notice;
   fixedSize = state.fixedSize;
   document.body.dataset["fixed"] = String(fixedSize);
+  document.body.dataset["windowMode"] = state.windowMode;
+  document.body.dataset["clickThrough"] = state.clickThrough ? "true" : "false";
+  stage?.setLowPowerMode(state.lowPowerStage);
+  stage?.setSolidBackdrop(state.windowMode === "solid-docked");
   // The invitation to import a model is only for when there is none, not for one still loading.
   firstRun.hidden = state.modelUrl !== null;
   if (!stage) {
@@ -1165,17 +1177,21 @@ async function applyState(state: AppState): Promise<void> {
     return;
   }
   if (state.modelUrl === null) {
+    loadedModelUrl = null;
     stage.clearModel();
     standIn.hidden = false;
     return;
   }
+  if (state.modelUrl === loadedModelUrl) return;
   try {
     // A load that was overtaken by a newer one (or by "Remove") must not touch the stand-in.
     if (await stage.loadModel(state.modelUrl)) {
+      loadedModelUrl = state.modelUrl;
       standIn.hidden = true;
       stage.play("wave"); // hello
     }
   } catch (error) {
+    loadedModelUrl = null;
     const message = error instanceof Error ? error.message : String(error);
     console.error(error);
     bridge.reportModelError(message);

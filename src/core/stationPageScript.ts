@@ -1614,12 +1614,13 @@ export const STATION_SCRIPT = String.raw`
     window.visualViewport.addEventListener("resize", function () { if (stick) toEnd(); });
   }
 
-  // Opened by the app with a pairing carried over from the browser: the code in the
-  // address is traded for a token of the app's own, and is not left in the address.
-  var carried = /^#pair=([A-Za-z0-9_-]{20,64})$/.exec(location.hash);
+  // Opened by the app from a handover link or QR pairing code: the code in the
+  // address is traded for a token of the device's own, and is not left in the address.
+  var carried = /^#pair=([A-Za-z0-9_-]{6,64})$/.exec(location.hash);
   if (carried) {
     try { history.replaceState(null, "", "/"); } catch (e) { location.hash = ""; }
-    post("/pair", { code: carried[1] }, false)
+    var deviceHint = /Android/i.test(navigator.userAgent || "") ? "Android Phone" : "Phone";
+    post("/pair", { code: carried[1], name: deviceHint }, false)
       .then(function (result) {
         if (result.status === 200 && result.data.token) {
           token = String(result.data.token);

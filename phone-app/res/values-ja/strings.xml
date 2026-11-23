@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Astra Navi</string>
+    <string name="notice">Astra Navi Desktop はオープンソース・ローカルファーストの AI デスクトップ相棒です。ファイル・記憶・画面内容はあなたの端末外に送信されません。</string>
+    <string name="setup_title">ネットワーク上の PC を探す</string>
+    <string name="fan_line">ローカルファースト AI ナビゲーター</string>
+    <string name="setup_step_1">PC で「設定」を開き、「他のデバイス」を表示してください。</string>
+    <string name="setup_step_2">表示されたアドレスを入力するか、QR コードをスキャンしてください。</string>
+    <string name="setup_label">PC のアドレス</string>
+    <string name="setup_network">このスマートフォンは PC と同じローカルネットワークに接続されている必要があります。</string>
+    <string name="setup_browser">この端末のブラウザですでに開いている場合は、メニューから「アプリでペア設定して開く」を選ぶと自動で設定されます。</string>
+    <string name="setup_hint">192.168.1.20:47821</string>
+    <string name="setup_connect">接続</string>
+    <string name="setup_discovered">同じネットワーク上で見つかった PC</string>
+    <string name="setup_scanning">ローカルネットワークを検索中…</string>
+    <string name="setup_bad_address">正しいローカルアドレスの形式ではありません。192.168.1.20:47821 のように、ピリオド区切りの 4 つの数字とコロン、ポート番号を入力してください。</string>
+    <string name="trust_title">この PC で間違いありませんか？</string>
+    <string name="trust_before">%1$s の PC から次の証明書フィンガープリント（末尾）が返されました</string>
+    <string name="trust_after">PC の設定画面に表示されている末尾と一致することを確認し、一致した場合のみ続行してください。</string>
+    <string name="link_before">%1$s の PC へのリンクが開かれました。証明書フィンガープリント（末尾）:</string>
+    <string name="link_after">ご自身でペア設定を開いた場合で、PC の設定画面の末尾と一致するときのみ続行してください。</string>
+    <string name="trust_yes">一致する</string>
+    <string name="trust_no">キャンセル</string>
+    <string name="mismatch_title">ペア設定した PC ではありません</string>
+    <string name="mismatch_words">%1$s から応答がありましたが、証明書が一致しません。データは一切送信されませんでした。PC 側を作り直した場合は最初から接続し直してください。</string>
+    <string name="unreachable_title">PC に接続できません</string>
+    <string name="unreachable_words">%1$s から応答がありません。PC の電源が入り、「他のデバイスとの通信を許可」がオンになっていて、同じネットワークに接続しているか確認してください。</string>
+    <string name="try_again">再試行</string>
+    <string name="check_title">Astra Navi を開く</string>
+    <string name="check_keep_title">この端末での認証を有効にする</string>
+    <string name="check_sub">ローカルファースト AI ナビゲーター</string>
+    <string name="check_cancel">パスワードを使う</string>
+    <string name="start_over">最初から接続する</string>
+    <string name="outbox_hint">圏外の間にメッセージを下書き送信予約…</string>
+    <string name="outbox_queue">再接続時に送信予約</string>
+    <string name="outbox_count_one">1 件のメッセージを送信待機中</string>
+    <string name="outbox_count_many">%1$d 件のメッセージを送信待機中</string>
+    <string name="alerts_channel_name">定例監視アラート</string>
+    <string name="alerts_channel_desc">PC で設定した監視条件が満たされたときの通知。</string>
+    <string name="alerts_fallback_title">監視アラート</string>
+</resources>

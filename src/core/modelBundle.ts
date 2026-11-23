@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes, scryptSync } from "node:crypto";
-import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import {
   recommendHardwareTier,
@@ -9,6 +9,7 @@ import {
 import {
   MOE_WORKSTATION_MODELS,
   resolveBrain,
+  verifyModelSha256,
   type BrainChoice,
   type BrainModel,
   type ResolvedModel,
@@ -417,4 +418,184 @@ export function selectModelForHardware(
     model: resolveBrain(recommendation.tier, modelsDir, profile.totalVramBytes),
     recommendation,
   };
+}
+
+export interface ResumableDownloadOptions {
+  url: string;
+  destPath: string;
+  expectedSizeBytes?: number;
+  expectedSha256?: string;
+  signal?: AbortSignal;
+  /** Whether aborting deletes `.part` (default: false so intermittent dropouts can resume). */
+  cleanupPartialOnAbort?: boolean;
+  skipDiskCheck?: boolean;
+  headroomRatio?: number;
+  fetchImpl?: typeof fetch;
+  onProgress?: (progress: { received: number; total: number }) => void;
+}
+
+/**
+ * Verifies free disk space in `dir` (or its nearest existing ancestor) before starting a
+ * multi-gigabyte model download. Throws with a clear GB shortfall when insufficient.
+ */
+export async function checkFreeDiskSpace(
+  dir: string,
+  requiredBytes: number,
+  headroomRatio = 1.1,
+): Promise<{ availableBytes: number; requiredBytes: number }> {
+  const neededBytes = Math.max(0, Math.ceil(requiredBytes * headroomRatio));
+  let probeDir = resolve(dir);
+  while (true) {
+    try {
+      const info = await statfs(probeDir);
+      const availableBytes = Number(info.bavail) * Number(info.bsize);
+      if (neededBytes > 0 && availableBytes < neededBytes) {
+        const gib = 1024 ** 3;
+        throw new Error(
+          `Insufficient disk space in ${probeDir}: ${(availableBytes / gib).toFixed(2)} GB free, need ${(neededBytes / gib).toFixed(2)} GB (including headroom).`,
+        );
+      }
+      return { availableBytes, requiredBytes: neededBytes };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        const parent = dirname(probeDir);
+        if (parent === probeDir) break;
+        probeDir = parent;
+        continue;
+      }
+      throw error;
+    }
+  }
+  return { availableBytes: 0, requiredBytes: neededBytes };
+}
+
+function parseContentRangeTotal(header: string | null): number {
+  if (!header) return 0;
+  const slash = header.lastIndexOf("/");
+  if (slash === -1) return 0;
+  const parsed = Number(header.slice(slash + 1));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+/**
+ * Downloads large GGUF model files into `<destPath>.part` with HTTP `Range` resume,
+ * free-space pre-checks, `AbortSignal` support, SHA-256 verification, and corrupt-file cleanup.
+ */
+export async function downloadModelResumable(
+  options: ResumableDownloadOptions,
+): Promise<{ path: string; bytes: number; resumed: boolean }> {
+  const destDir = dirname(options.destPath);
+  await mkdir(destDir, { recursive: true });
+  const partPath = `${options.destPath}.part`;
+  const fetchFn = options.fetchImpl ?? fetch;
+
+  let existingBytes = 0;
+  try {
+    const info = await stat(partPath);
+    if (info.isFile()) existingBytes = info.size;
+  } catch {
+    existingBytes = 0;
+  }
+
+  if (!options.skipDiskCheck && options.expectedSizeBytes && options.expectedSizeBytes > existingBytes) {
+    await checkFreeDiskSpace(
+      destDir,
+      options.expectedSizeBytes - existingBytes,
+      options.headroomRatio ?? 1.1,
+    );
+  }
+
+  const issueRequest = (offset: number): Promise<Response> =>
+    fetchFn(options.url, {
+      headers: offset > 0 ? { Range: `bytes=${offset}-` } : undefined,
+      signal: options.signal,
+    });
+
+  let response = await issueRequest(existingBytes);
+  if (response.status === 416 && existingBytes > 0) {
+    if (options.expectedSizeBytes && existingBytes >= options.expectedSizeBytes * 0.98) {
+      if (options.expectedSha256) {
+        const check = await verifyModelSha256(partPath, options.expectedSha256);
+        if (check.ok) {
+          await rename(partPath, options.destPath);
+          return { path: options.destPath, bytes: existingBytes, resumed: true };
+        }
+      } else {
+        await rename(partPath, options.destPath);
+        return { path: options.destPath, bytes: existingBytes, resumed: true };
+      }
+    }
+    await rm(partPath, { force: true });
+    existingBytes = 0;
+    response = await issueRequest(0);
+  }
+
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 410) {
+      await rm(partPath, { force: true });
+    }
+    throw new Error(`Model download failed with HTTP ${response.status} (${options.url}).`);
+  }
+
+  const append = existingBytes > 0 && response.status === 206;
+  if (!append) existingBytes = 0;
+
+  const contentLength = Number(response.headers.get("content-length") ?? "0") || 0;
+  const totalBytes =
+    parseContentRangeTotal(response.headers.get("content-range")) ||
+    (contentLength > 0 ? existingBytes + contentLength : options.expectedSizeBytes ?? 0);
+
+  let received = existingBytes;
+  options.onProgress?.({ received, total: totalBytes });
+
+  const handle = await open(partPath, append ? "a" : "w", 0o600);
+  try {
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          await handle.write(value);
+          received += value.byteLength;
+          options.onProgress?.({ received, total: totalBytes });
+        }
+      }
+    } else {
+      const buf = Buffer.from(await response.arrayBuffer());
+      if (buf.byteLength > 0) {
+        await handle.write(buf);
+        received += buf.byteLength;
+        options.onProgress?.({ received, total: totalBytes });
+      }
+    }
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    const shouldClean = !options.signal?.aborted || options.cleanupPartialOnAbort === true;
+    if (shouldClean) {
+      await rm(partPath, { force: true }).catch(() => undefined);
+    }
+    throw error;
+  }
+  await handle.close();
+
+  if (options.expectedSizeBytes && received < options.expectedSizeBytes * 0.98) {
+    await rm(partPath, { force: true }).catch(() => undefined);
+    throw new Error(
+      `Downloaded model file appears incomplete (${received} bytes < expected ${options.expectedSizeBytes} bytes); partial file removed.`,
+    );
+  }
+
+  if (options.expectedSha256) {
+    const check = await verifyModelSha256(partPath, options.expectedSha256);
+    if (!check.ok) {
+      await rm(partPath, { force: true }).catch(() => undefined);
+      throw new Error(
+        `Model SHA-256 verification failed (expected ${options.expectedSha256}, got ${check.actual}); partial file removed.`,
+      );
+    }
+  }
+
+  await rename(partPath, options.destPath);
+  return { path: options.destPath, bytes: received, resumed: append };
 }

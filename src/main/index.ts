@@ -111,8 +111,10 @@ import {
 } from "./kwin.ts";
 import { startsAtLogin } from "./loginStart.ts";
 import { createModelFiles } from "./modelFiles.ts";
+import { globalShortcut } from "electron";
 import { createReports } from "./reports.ts";
 import { createSettingsController } from "./settingsIpc.ts";
+import { StartupGuard, type BootStartStatus } from "../core/safeMode.ts";
 import { programShown } from "./shown.ts";
 import { createTrayMenu } from "./tray.ts";
 import { createVoiceController } from "./voiceControl.ts";
@@ -206,6 +208,12 @@ let traceForTurn: TurnTrace | null = null;
 let learnerRef: Learner | null = null;
 let removeKwinHelper: (() => Promise<void>) | null = null;
 let quitting = false;
+let recreatingWindow = false;
+let windowSolidDocked = false;
+let clickThrough = false;
+let startupGuard: StartupGuard | null = null;
+let safeModeBoot: BootStartStatus = { safeMode: false, consecutiveCrashes: 0, reason: null };
+let healthyTimer: NodeJS.Timeout | null = null;
 let initiative: Initiative | null = null;
 let reminders: ReminderStore | null = null;
 let missions: MissionControl | null = null;
@@ -251,7 +259,10 @@ function appState(showNotice: boolean): AppState {
     notice: UNOFFICIAL_NOTICE,
     showNotice,
     autoListen: config.value.voice.alwaysListening,
-    fixedSize: !canResize,
+    fixedSize: !canResize && config.value.windowMode !== "solid-docked",
+    windowMode: config.value.windowMode,
+    lowPowerStage: config.value.lowPowerStage,
+    clickThrough,
   };
 }
 
@@ -311,22 +322,25 @@ function resizeWindow(layout: WindowLayout): void {
   }
 }
 
-function createWindow(): void {
-  const size = canResize
-    ? WINDOW_COMPACT
-    : fitWindow(WINDOW_EXPANDED, screen.getPrimaryDisplay().workAreaSize);
+function createWindow(): BrowserWindow {
+  const solidDocked = config.value.windowMode === "solid-docked";
+  windowSolidDocked = solidDocked;
+  const size =
+    canResize && !solidDocked
+      ? WINDOW_COMPACT
+      : fitWindow(WINDOW_EXPANDED, screen.getPrimaryDisplay().workAreaSize);
   const window = new BrowserWindow({
     ...size,
     ...defaultPosition(size),
-    frame: false,
-    transparent: true,
-    backgroundColor: "#00000000",
-    hasShadow: false,
-    resizable: false,
+    frame: solidDocked,
+    transparent: !solidDocked,
+    backgroundColor: solidDocked ? "#141824" : "#00000000",
+    hasShadow: solidDocked,
+    resizable: solidDocked,
     maximizable: false,
     fullscreenable: false,
-    skipTaskbar: true,
-    alwaysOnTop: true,
+    skipTaskbar: !solidDocked,
+    alwaysOnTop: !solidDocked,
     show: false,
     title: WINDOW_TITLE,
     webPreferences: {
@@ -342,13 +356,18 @@ function createWindow(): void {
     },
   });
   mainWindow = window;
-  window.setAlwaysOnTop(true, "floating");
-  window.setVisibleOnAllWorkspaces(true);
+  if (!solidDocked) {
+    window.setAlwaysOnTop(true, "floating");
+    window.setVisibleOnAllWorkspaces(true);
+  }
+  if (clickThrough) {
+    window.setIgnoreMouseEvents(true, { forward: true });
+  }
   window.once("ready-to-show", () => window.show());
   // Closing only hides her: a reply or an approval question may be in progress, and the
   // tray's Quit is the way to end the app.
   window.on("close", (event) => {
-    if (quitting) return;
+    if (quitting || recreatingWindow) return;
     event.preventDefault();
     window.hide();
   });
@@ -369,6 +388,7 @@ function createWindow(): void {
     if (!url.startsWith(`${APP_ORIGIN}/`)) event.preventDefault();
   });
   void window.loadURL(`${APP_ORIGIN}/index.html`);
+  return window;
 }
 
 /** The microphone is the only device permission the window is ever given. */
@@ -390,6 +410,74 @@ function showWindow(focusInput: boolean): void {
     mainWindow?.focus();
     sendToWindow("ui:focus-input");
   }
+}
+
+function setClickThrough(on: boolean): void {
+  clickThrough = on;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setIgnoreMouseEvents(on, { forward: true });
+  }
+  sendToWindow("app:state", appState(false));
+}
+
+function applyStageOptions(): void {
+  const wantSolidDocked = config.value.windowMode === "solid-docked";
+  if (mainWindow && !mainWindow.isDestroyed() && windowSolidDocked !== wantSolidDocked) {
+    const wasVisible = mainWindow.isVisible();
+    recreatingWindow = true;
+    try {
+      mainWindow.destroy();
+    } finally {
+      recreatingWindow = false;
+    }
+    mainWindow = null;
+    const created = createWindow();
+    if (wasVisible) created.showInactive();
+    sendPresence();
+    return;
+  }
+  sendToWindow("app:state", appState(false));
+}
+
+function applyHotkeys(): { failed: string[] } {
+  globalShortcut.unregisterAll();
+  const failed: string[] = [];
+  const bindings: [string, () => void][] = [
+    [
+      config.value.hotkeys.pushToTalk.trim(),
+      () => {
+        const next = !voice.listening();
+        if (mainWindow && !mainWindow.isVisible()) mainWindow.showInactive();
+        sendToWindow("ui:listen", next);
+      },
+    ],
+    [
+      config.value.hotkeys.summonHide.trim(),
+      () => {
+        if (mainWindow && mainWindow.isVisible() && mainWindow.isFocused()) {
+          mainWindow.hide();
+        } else {
+          showWindow(true);
+        }
+      },
+    ],
+    [
+      config.value.hotkeys.clickThrough.trim(),
+      () => {
+        setClickThrough(!clickThrough);
+      },
+    ],
+  ];
+  for (const [accel, handler] of bindings) {
+    if (!accel) continue;
+    try {
+      const ok = globalShortcut.register(accel, handler);
+      if (!ok) failed.push(accel);
+    } catch {
+      failed.push(accel);
+    }
+  }
+  return { failed };
 }
 
 // ---------- the tray, reports, voice & settings controllers ----------
@@ -488,6 +576,32 @@ const settings = createSettingsController({
   runSelfCheck,
   desktopSessionNotice: () => linuxDesktopEnv?.notice ?? null,
   recentErrors: () => [...recentErrors],
+  safeModeStatus: () => ({
+    active: safeModeBoot.safeMode,
+    consecutiveCrashes: safeModeBoot.consecutiveCrashes,
+    reason: safeModeBoot.reason,
+  }),
+  clearSafeMode: async () => {
+    await startupGuard?.exitSafeMode();
+    safeModeBoot = { safeMode: false, consecutiveCrashes: 0, reason: null };
+    if (config.value.notices.read) noticeWatch?.start();
+    await reach?.start();
+    const abilities = await reach?.hands.abilities().catch(() => null);
+    if (abilities) settings.setHandsAbilities(abilities);
+    rebuildTrayMenu();
+  },
+  applyHotkeys,
+  applyStageOptions,
+  beforeProfileRestore: async () => {
+    await actions?.flush().catch(() => undefined);
+    store?.close();
+    store = null;
+  },
+  relaunchAfterRestore: () => {
+    quitting = true;
+    app.relaunch();
+    app.exit(0);
+  },
   sendToWindow,
   rebuildTrayMenu: () => rebuildTrayMenu(),
 });
@@ -1029,6 +1143,12 @@ async function noticeRoutines(routines: RoutineWatch, learned: Learned): Promise
 async function shutDown(): Promise<void> {
   // Speech first: nothing may ask the voice for another sentence while it is being closed.
   voice.beginShutdown();
+  if (healthyTimer) {
+    clearTimeout(healthyTimer);
+    healthyTimer = null;
+  }
+  globalShortcut.unregisterAll();
+  await startupGuard?.markBootHealthy().catch(() => undefined);
   if (watchTimer) clearInterval(watchTimer);
   reminders?.stop();
   orders?.dispose();
@@ -1094,6 +1214,12 @@ async function main(): Promise<void> {
 
   await app.whenReady();
   await config.load();
+  startupGuard = new StartupGuard(dataDir(), 2);
+  safeModeBoot = await startupGuard.recordBootStart();
+  if (safeModeBoot.safeMode && safeModeBoot.reason) {
+    console.warn(`[startup] ${safeModeBoot.reason}`);
+    recordRecentError("safeMode", safeModeBoot.reason);
+  }
   // Her badges follow the settings, whoever changed them: the tray, the panel, or she herself.
   config.onChange = () => queueMicrotask(sendPresence);
   if (!config.value.firstMetAt) await config.update({ firstMetAt: new Date().toISOString() });
@@ -1162,7 +1288,9 @@ async function main(): Promise<void> {
     // Her own notifications (a reminder shown while her window is hidden) are not news to her.
     ownNames: [app.getName(), "Astra Navi", "astra-navi", "ai-chan"],
   });
-  if (config.value.notices.read) noticeWatch.start();
+  if (!safeModeBoot.safeMode) {
+    if (config.value.notices.read) noticeWatch.start();
+  }
   // Before the station opens (it reads the same file), so Settings can show whether a
   // name and password are set even while the station is switched off.
   await settings.rereadStationAccount();
@@ -1392,25 +1520,38 @@ async function main(): Promise<void> {
   }
   settings.noteStartAtLogin(await startsAtLogin());
   createWindow();
+  const hotkeyStatus = applyHotkeys();
+  if (hotkeyStatus.failed.length > 0) {
+    console.warn(`[hotkeys] Failed to register: ${hotkeyStatus.failed.join(", ")}`);
+  }
   createTray();
   if (
-    !config.value.onboardingComplete &&
+    (!config.value.onboardingComplete || safeModeBoot.safeMode) &&
     !process.env["AI_CHAN_DEBUG_CAPTURE"] &&
     !process.env["AI_CHAN_DEBUG_SETTINGS"]
   ) {
     settings.openSettings();
   }
   // Her watch, her memory of the PC's sound and the station, as the settings have them.
-  void reach.start().then(() => {
+  if (!safeModeBoot.safeMode) {
+    void reach.start().then(() => {
+      rebuildTrayMenu();
+      sendPresence();
+    });
+    void reach.hands
+      .abilities()
+      .then((abilities) => {
+        settings.setHandsAbilities(abilities);
+      })
+      .catch(() => undefined);
+  } else {
     rebuildTrayMenu();
     sendPresence();
-  });
-  void reach.hands
-    .abilities()
-    .then((abilities) => {
-      settings.setHandsAbilities(abilities);
-    })
-    .catch(() => undefined);
+  }
+  healthyTimer = setTimeout(() => {
+    void startupGuard?.markBootHealthy().catch(() => undefined);
+  }, 15_000);
+  healthyTimer.unref();
   scheduleDebugAids({
     config,
     mainWindow: () => mainWindow,

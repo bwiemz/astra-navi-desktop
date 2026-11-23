@@ -61,6 +61,16 @@ export const SettingsPatchSchema = z
     pingPhone: z.boolean(),
     onboardingComplete: z.boolean(),
     advancedSettings: z.boolean(),
+    windowMode: z.enum(["floating", "solid-docked"]),
+    lowPowerStage: z.boolean(),
+    hotkeys: z
+      .object({
+        pushToTalk: z.string().max(40),
+        summonHide: z.string().max(40),
+        clickThrough: z.string().max(40),
+      })
+      .partial()
+      .strict(),
     tier10: z
       .object({
         workerMesh: z.boolean(),

@@ -20,7 +20,11 @@ extraResources:
     to: hands
     filter:
       - "**/*"
+      - "!win_hands.ps1"
       - "!win-hands-native/obj/**"
+      - "!win-hands-native/**/*.cs"
+      - "!win-hands-native/**/*.csproj"
+      - "!win-hands-native/bin/**/!(win-hands.exe)"
   - from: voice-server
     to: voice-server
   - from: browser-bridge

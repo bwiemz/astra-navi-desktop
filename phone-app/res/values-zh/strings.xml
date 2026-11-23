@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Astra Navi</string>
+    <string name="notice">Astra Navi Desktop 是一款开源、本地优先的 AI 桌面伙伴，你的文件、记忆和屏幕内容始终保留在本地设备上。</string>
+    <string name="setup_title">在局域网中查找你的电脑</string>
+    <string name="fan_line">本地优先 AI 领航员</string>
+    <string name="setup_step_1">在电脑端打开「设置」中的“其他设备”。</string>
+    <string name="setup_step_2">输入页面上显示的地址，或扫描二维码快速配对。</string>
+    <string name="setup_label">电脑地址</string>
+    <string name="setup_network">手机必须与电脑处于同一局域网下。</string>
+    <string name="setup_browser">如果已在手机浏览器中打开她的页面，可在菜单中选择“在已配对的应用中打开”自动完成连接。</string>
+    <string name="setup_hint">192.168.1.20:47821</string>
+    <string name="setup_connect">连接</string>
+    <string name="setup_discovered">局域网中发现的电脑</string>
+    <string name="setup_scanning">正在扫描局域网…</string>
+    <string name="setup_bad_address">地址格式不正确。请输入局域网地址（例如 192.168.1.20:47821）。</string>
+    <string name="trust_title">确认是你的电脑吗？</string>
+    <string name="trust_before">位于 %1$s 的电脑返回了证书指纹（末尾）：</string>
+    <string name="trust_after">请核对电脑「设置」中显示的指纹末尾，仅在完全一致时继续。</string>
+    <string name="link_before">链接请求连接到 %1$s，其证书指纹（末尾）为：</string>
+    <string name="link_after">仅当你刚在电脑端发起配对且指纹末尾一致时才可继续。</string>
+    <string name="trust_yes">确认一致</string>
+    <string name="trust_no">取消</string>
+    <string name="mismatch_title">这不是你配对过的电脑</string>
+    <string name="mismatch_words">%1$s 响应了连接，但证书不匹配，已拦截任何数据发送。如果你在电脑端重置了配对，请重新开始连接。</string>
+    <string name="unreachable_title">无法连接到电脑</string>
+    <string name="unreachable_words">%1$s 没有响应。请确认电脑已开机、应用正在运行、“允许其他设备对话”已开启，且处于同一网络。</string>
+    <string name="try_again">重试</string>
+    <string name="check_title">解锁 Astra Navi</string>
+    <string name="check_keep_title">允许此手机免密解锁 Astra Navi</string>
+    <string name="check_sub">本地优先 AI 领航员</string>
+    <string name="check_cancel">改用密码</string>
+    <string name="start_over">重新配对</string>
+    <string name="outbox_hint">离线时先暂存一条消息…</string>
+    <string name="outbox_queue">加入待发送队列</string>
+    <string name="outbox_count_one">已有 1 条消息等待发送</string>
+    <string name="outbox_count_many">已有 %1$d 条消息等待发送</string>
+    <string name="alerts_channel_name">常驻监控提醒</string>
+    <string name="alerts_channel_desc">当电脑端的常驻监控条件触发时推送通知。</string>
+    <string name="alerts_fallback_title">监控提醒</string>
+</resources>

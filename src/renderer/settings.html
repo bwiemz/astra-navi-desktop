@@ -25,12 +25,22 @@
       </div>
     </header>
 
+    <div id="safe-mode-banner" class="banner" role="alert" hidden>
+      <p id="safe-mode-reason"></p>
+      <button id="clear-safe-mode" type="button">Clear Safe Mode &amp; Resume Hooks</button>
+    </div>
+
     <section id="onboarding-wizard" class="wizard-overlay" hidden aria-label="60-second setup wizard">
       <div class="wizard-card">
         <header class="wizard-head">
           <h2>Astra Navi 60-Second Setup</h2>
           <p id="wiz-step-indicator" class="why">Step 1 of 4</p>
         </header>
+
+    <div id="safe-mode-banner" class="banner" role="alert" hidden>
+      <p id="safe-mode-reason"></p>
+      <button id="clear-safe-mode" type="button">Clear Safe Mode &amp; Resume Hooks</button>
+    </div>
 
         <div id="wiz-step-1" class="wiz-step">
           <h3>1. Hardware &amp; Brain</h3>
@@ -307,6 +317,10 @@
           <span class="what">Add a device</span>
           <button id="pair" type="button">Show a pairing code</button>
           <span id="pair-code" class="why" role="status" aria-live="polite"></span>
+          <div id="pair-qr" class="pair-qr" hidden>
+            <div id="pair-qr-svg" class="pair-qr-svg" aria-label="QR pairing code"></div>
+            <span id="pair-qr-caption" class="why">Scan with Astra Station on Android</span>
+          </div>
         </div>
         <div class="row" id="station-devices" hidden>
           <span class="what">Paired devices</span>
@@ -533,6 +547,80 @@
             waking her.</span
           >
         </label>
+        <label class="row">
+          <span class="what">Window style</span>
+          <select id="windowMode">
+            <option value="floating">Floating overlay (transparent, always on top)</option>
+            <option value="solid-docked">Solid docked window (opaque frame, resizable)</option>
+          </select>
+          <span class="why"
+            >Solid docked mode helps on compositors or capture setups without transparent overlay
+            windows.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="lowPowerStage" type="checkbox" />
+          <span class="what">Low-power 3D stage (battery saver)</span>
+          <span class="why"
+            >Caps 3D rendering to 30/15/4 FPS and scales pixel density for cooler laptops and
+            handhelds.</span
+          >
+        </label>
+        <div class="row">
+          <span class="what">Global hotkeys</span>
+          <div class="hotkeys-grid">
+            <label class="hotkey-field">
+              <span class="why">Push-to-talk toggle</span>
+              <input
+                id="hotkey-ptt"
+                type="text"
+                maxlength="40"
+                placeholder="e.g. CommandOrControl+Shift+Space"
+                autocomplete="off"
+              />
+            </label>
+            <label class="hotkey-field">
+              <span class="why">Summon / Hide window</span>
+              <input
+                id="hotkey-summon"
+                type="text"
+                maxlength="40"
+                placeholder="e.g. Alt+Shift+A"
+                autocomplete="off"
+              />
+            </label>
+            <label class="hotkey-field">
+              <span class="why">Click-through toggle</span>
+              <input
+                id="hotkey-click"
+                type="text"
+                maxlength="40"
+                placeholder="e.g. Alt+Shift+T"
+                autocomplete="off"
+              />
+            </label>
+            <div class="hotkey-actions">
+              <button id="hotkey-save" type="button">Apply shortcuts</button>
+              <span id="hotkey-status" class="why" role="status" aria-live="polite"></span>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <span class="what">Updates</span>
+          <button id="check-updates" type="button">Check for Updates</button>
+          <span id="update-status" class="why" role="status" aria-live="polite"></span>
+        </div>
+        <div class="row">
+          <span class="what">Profile backup</span>
+          <div class="backup-actions">
+            <button id="export-profile" type="button">Export Profile Backup…</button>
+            <button id="import-profile" type="button" class="quiet">Restore Profile Backup…</button>
+          </div>
+          <span id="profile-status" class="why" role="status" aria-live="polite"
+            >SHA-256 verified archive of your settings, memory, standing orders, agenda, missions,
+            and SQLite store.</span
+          >
+        </div>
         <div class="row">
           <span class="what">Support diagnostics</span>
           <button id="export-support-bundle" type="button">Export Support Bundle (Redacted)</button>

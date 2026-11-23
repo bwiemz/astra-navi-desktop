@@ -15,6 +15,7 @@ import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
@@ -24,6 +25,8 @@ import android.graphics.drawable.StateListDrawable;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
 import android.net.Uri;
+import android.net.nsd.NsdManager;
+import android.net.nsd.NsdServiceInfo;
 import android.net.http.SslCertificate;
 import android.net.http.SslError;
 import android.os.Build;
@@ -39,6 +42,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
@@ -145,6 +149,8 @@ public final class MainActivity extends Activity {
     private volatile boolean voiceActive;
     private ByteArrayOutputStream voicePcm;
     private WebView voiceTargetPage;
+    private NsdManager nsdManager;
+    private NsdManager.DiscoveryListener nsdDiscovery;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -156,9 +162,23 @@ public final class MainActivity extends Activity {
                 WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
         night = getResources().getBoolean(R.bool.night);
         root = new FrameLayout(this);
-        root.setFitsSystemWindows(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            root.setFitsSystemWindows(false);
+            root.setOnApplyWindowInsetsListener((View v, WindowInsets windowInsets) -> {
+                Insets bars = windowInsets.getInsets(
+                        WindowInsets.Type.systemBars()
+                                | WindowInsets.Type.displayCutout()
+                                | WindowInsets.Type.ime());
+                v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                return WindowInsets.CONSUMED;
+            });
+        } else {
+            root.setFitsSystemWindows(true);
+        }
         root.setBackgroundColor(getColor(R.color.page));
         setContentView(root);
+        paintBars();
         if (!takeLink(getIntent())) render();
     }
 
@@ -218,6 +238,7 @@ public final class MainActivity extends Activity {
      */
     @Override
     protected void onStop() {
+        stopNsdDiscovery();
         cancelVoiceNow();
         endCheck();
         wasAway = true;
@@ -238,6 +259,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        stopNsdDiscovery();
         cancelVoiceNow();
         endCheck();
         if (asking != null) asking.dismiss();
@@ -436,6 +458,7 @@ public final class MainActivity extends Activity {
             showSetup();
             return;
         }
+        stopNsdDiscovery();
         dropWeb();
         screen = null;
         final String origin = "https://" + at;
@@ -1370,6 +1393,17 @@ public final class MainActivity extends Activity {
         Button go = button(R.string.setup_connect, true);
         go.setOnClickListener((View view) -> connect.run());
         sheet.addView(go);
+
+        final TextView discoveredHeader = words(getString(R.string.setup_discovered), 15f, true);
+        discoveredHeader.setPadding(0, dp(10), 0, dp(4));
+        discoveredHeader.setVisibility(View.GONE);
+        sheet.addView(discoveredHeader);
+
+        final LinearLayout discoveredList = new LinearLayout(this);
+        discoveredList.setOrientation(LinearLayout.VERTICAL);
+        sheet.addView(discoveredList);
+        startNsdDiscovery(discoveredHeader, discoveredList, where, connect);
+
         TextView network = words(getString(R.string.setup_network), 14f, false);
         network.setTextColor(getColor(R.color.soft));
         network.setPadding(0, dp(10), 0, dp(8));
@@ -1378,6 +1412,90 @@ public final class MainActivity extends Activity {
         browser.setTextColor(getColor(R.color.soft));
         browser.setPadding(0, 0, 0, dp(8));
         sheet.addView(browser);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void startNsdDiscovery(
+            final TextView header,
+            final LinearLayout container,
+            final EditText addressInput,
+            final Runnable connectAction) {
+        stopNsdDiscovery();
+        final NsdManager mgr = getSystemService(NsdManager.class);
+        if (mgr == null) return;
+        nsdManager = mgr;
+        nsdDiscovery =
+                new NsdManager.DiscoveryListener() {
+                    @Override
+                    public void onStartDiscoveryFailed(String serviceType, int errorCode) {}
+
+                    @Override
+                    public void onStopDiscoveryFailed(String serviceType, int errorCode) {}
+
+                    @Override
+                    public void onDiscoveryStarted(String serviceType) {}
+
+                    @Override
+                    public void onDiscoveryStopped(String serviceType) {}
+
+                    @Override
+                    public void onServiceFound(NsdServiceInfo serviceInfo) {
+                        mgr.resolveService(
+                                serviceInfo,
+                                new NsdManager.ResolveListener() {
+                                    @Override
+                                    public void onResolveFailed(NsdServiceInfo si, int errorCode) {}
+
+                                    @Override
+                                    public void onServiceResolved(final NsdServiceInfo resolved) {
+                                        if (resolved.getHost() == null) return;
+                                        final String host = resolved.getHost().getHostAddress();
+                                        final String candidate = host + ":" + resolved.getPort();
+                                        if (!isHomeAddress(candidate)) return;
+                                        final String label = resolved.getServiceName() + " (" + candidate + ")";
+                                        root.post(
+                                                () -> {
+                                                    if (!alive()) return;
+                                                    for (int i = 0; i < container.getChildCount(); i++) {
+                                                        View child = container.getChildAt(i);
+                                                        if (candidate.equals(child.getTag())) return;
+                                                    }
+                                                    header.setVisibility(View.VISIBLE);
+                                                    Button pick = button(R.string.setup_connect, false);
+                                                    pick.setText(label);
+                                                    pick.setTag(candidate);
+                                                    pick.setOnClickListener(
+                                                            (View v) -> {
+                                                                addressInput.setText(candidate);
+                                                                connectAction.run();
+                                                            });
+                                                    container.addView(pick);
+                                                });
+                                    }
+                                });
+                    }
+
+                    @Override
+                    public void onServiceLost(NsdServiceInfo serviceInfo) {}
+                };
+        try {
+            mgr.discoverServices("_astranavi._tcp.", NsdManager.PROTOCOL_DNS_SD, nsdDiscovery);
+        } catch (Exception ignored) {
+            nsdDiscovery = null;
+        }
+    }
+
+    private void stopNsdDiscovery() {
+        NsdManager mgr = nsdManager;
+        NsdManager.DiscoveryListener listener = nsdDiscovery;
+        nsdDiscovery = null;
+        if (mgr != null && listener != null) {
+            try {
+                mgr.stopServiceDiscovery(listener);
+            } catch (Exception ignored) {
+                // ignore if already stopped or torn down
+            }
+        }
     }
 
     private void showProblem(int title, int explanation, String at, boolean mayRetry) {

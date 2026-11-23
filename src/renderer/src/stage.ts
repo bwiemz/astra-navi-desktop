@@ -83,6 +83,7 @@ const SURPRISE_MORPHS = ["びっくり", "びっくり1"] as const;
  * and every frame she takes is one the graphics card is not giving to a game.
  */
 const FRAMES_PER_SECOND = { lively: 60, idle: 20, asleep: 6 } as const;
+const LOW_POWER_FPS = { lively: 30, idle: 15, asleep: 4 } as const;
 /** After something happens she stays at the lively rate this long, so easing finishes smoothly. */
 const LIVELY_FOR_MS = 2500;
 
@@ -170,6 +171,8 @@ export class Stage {
   private frameRequest = 0;
   private framesDrawn = 0;
   private countedSince = 0;
+  private lowPower = false;
+  private solidBackdrop = false;
 
   /** Sets up the scene. Hair and cloth physics are loaded first; the character still works without them. */
   static async create(canvas: HTMLCanvasElement): Promise<Stage> {
@@ -246,7 +249,8 @@ export class Stage {
     const pace =
       this.asleep && now > this.livelyUntil ? "asleep" : now < this.livelyUntil ? "lively" : "idle";
     // A little slack, or a frame that arrives a hair early would be skipped and the rate halved.
-    if (now - this.lastFrameAt < 1000 / FRAMES_PER_SECOND[pace] - 2) return;
+    const fpsTable = this.lowPower ? LOW_POWER_FPS : FRAMES_PER_SECOND;
+    if (now - this.lastFrameAt < 1000 / fpsTable[pace] - 2) return;
     this.lastFrameAt = now;
     this.engine.beginFrame();
     this.scene.render();
@@ -275,6 +279,24 @@ export class Stage {
       this.stir();
       this.frameRequest = requestAnimationFrame(this.tick);
     }
+  }
+
+  /** Caps stage FPS (30/15/4) and lowers render resolution scaling for battery-conscious laptops. */
+  setLowPowerMode(on: boolean): void {
+    if (on === this.lowPower) return;
+    this.lowPower = on;
+    this.engine.setHardwareScalingLevel(on ? 1.5 : 1);
+    this.stir();
+  }
+
+  /** Uses an opaque navy backdrop in Solid-Docked window mode instead of transparent overlay compositing. */
+  setSolidBackdrop(on: boolean): void {
+    if (on === this.solidBackdrop) return;
+    this.solidBackdrop = on;
+    this.scene.clearColor = on
+      ? new Color4(0x14 / 255, 0x18 / 255, 0x24 / 255, 1)
+      : new Color4(0, 0, 0, 0);
+    this.stir();
   }
 
   setMood(mood: Mood): void {

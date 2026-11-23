@@ -232,6 +232,18 @@ const ConfigSchema = z.object({
   noticeShown: z.boolean().default(false),
   /** Optional selected custom character bundle directory name or path. */
   characterBundle: z.string().max(300).nullable().default(null),
+  /** Desktop presentation mode: transparent always-on-top overlay or solid opaque docked window. */
+  windowMode: z.enum(["floating", "solid-docked"]).default("floating"),
+  /** Caps 3D stage FPS and resolution scaling for battery-conscious laptops. */
+  lowPowerStage: z.boolean().default(false),
+  /** Optional global desktop shortcuts (Electron Accelerator format, empty = unbound). */
+  hotkeys: z
+    .object({
+      pushToTalk: z.string().max(40).default(""),
+      summonHide: z.string().max(40).default(""),
+      clickThrough: z.string().max(40).default(""),
+    })
+    .prefault({}),
   /** Tier 10 experimental capabilities: strictly default-off until opted in. */
   tier10: z
     .object({

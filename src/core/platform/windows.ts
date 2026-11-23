@@ -417,6 +417,7 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
     }
 
     const nativeBin = resolveNativeWinHandsBinary(options.scriptPath, options.nativeBinaryPath);
+    const hasFallbackScript = Boolean(options.spawnProcess) || existsSync(this.scriptPath);
     const psArgs = [
       "-NoProfile",
       "-NonInteractive",
@@ -434,23 +435,30 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
         requestTimeoutMs: options.requestTimeoutMs,
         spawnProcess: options.spawnProcess,
       });
-      const psWorker = new PersistentWinWorker({
-        command: "powershell.exe",
-        args: psArgs,
-        requestTimeoutMs: options.requestTimeoutMs,
-        spawnProcess: options.spawnProcess,
-      });
+      const psWorker = hasFallbackScript
+        ? new PersistentWinWorker({
+            command: "powershell.exe",
+            args: psArgs,
+            requestTimeoutMs: options.requestTimeoutMs,
+            spawnProcess: options.spawnProcess,
+          })
+        : null;
       this.primaryWorker = nativeWorker;
       this.fallbackWorker = psWorker;
       this.runScript = async (verb, payload) => {
         if (verb === "controls" || verb === "press" || verb === "fill") {
+          if (!psWorker) {
+            throw new Error(
+              `Action "${verb}" requires hands/win_hands.ps1 which is excluded from packaged Windows builds.`,
+            );
+          }
           return psWorker.call(verb, payload);
         }
         try {
           return await nativeWorker.call(verb, payload);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes("UIA_FALLBACK")) {
+          if (msg.includes("UIA_FALLBACK") && psWorker) {
             return psWorker.call(verb, payload);
           }
           throw err;
@@ -458,15 +466,26 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
       };
     } else {
       this.workerKind = "powershell";
-      const psWorker = new PersistentWinWorker({
-        command: "powershell.exe",
-        args: psArgs,
-        requestTimeoutMs: options.requestTimeoutMs,
-        spawnProcess: options.spawnProcess,
-      });
+      const psWorker = hasFallbackScript
+        ? new PersistentWinWorker({
+            command: "powershell.exe",
+            args: psArgs,
+            requestTimeoutMs: options.requestTimeoutMs,
+            spawnProcess: options.spawnProcess,
+          })
+        : null;
       this.primaryWorker = psWorker;
       this.fallbackWorker = null;
-      this.runScript = (verb, payload) => psWorker.call(verb, payload);
+      this.runScript = (verb, payload) => {
+        if (!psWorker) {
+          return Promise.reject(
+            new Error(
+              "Windows desktop automation requires win-hands.exe (hands/win_hands.ps1 is excluded from packaged builds).",
+            ),
+          );
+        }
+        return psWorker.call(verb, payload);
+      };
     }
   }
 

@@ -1,0 +1,9 @@
+# Pinned Python dependencies for Astra Navi local voice server & design CLI
+# Used automatically by `src/core/bootstrap.ts` (`setupVoice`)
+qwen-tts==0.0.5
+torch==2.6.0
+numpy==2.2.4
+soundfile==0.13.1
+transformers==4.51.3
+accelerate==1.6.0
+safetensors==0.5.3

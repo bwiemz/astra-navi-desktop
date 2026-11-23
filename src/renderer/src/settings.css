@@ -777,3 +777,63 @@ body[data-advanced="false"] .advanced-only {
   display: flex;
   gap: 8px;
 }
+
+.pair-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.pair-qr[hidden] {
+  display: none;
+}
+
+.pair-qr-svg svg {
+  display: block;
+  width: 148px;
+  height: 148px;
+  padding: 6px;
+  background: #ffffff;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+}
+
+.hotkeys-grid {
+  display: grid;
+  gap: 8px;
+  flex: 1 1 280px;
+}
+
+.hotkey-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hotkey-actions,
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+#safe-mode-banner {
+  margin: 0 auto 14px;
+  max-width: 780px;
+  padding: 12px 16px;
+  background: #fff3bf;
+  border: 2px solid #9c4221;
+  border-radius: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+#safe-mode-banner[hidden] {
+  display: none;
+}

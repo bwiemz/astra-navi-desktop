@@ -26,14 +26,21 @@ import org.json.JSONObject;
 /**
  * Periodically polls the paired desktop's GET /alerts endpoint over pinned TLS so
  * triggered standing orders notify the user's phone without exposing PC chat or screen data.
+ *
+ * Uses Android's JobScheduler (JobService) rather than a foreground service, avoiding
+ * Android 15+ foreground-service (dataSync/shortService) timeout restrictions while enforcing
+ * strict per-poll HTTP timeouts and immediate socket teardown in onStopJob().
  */
 public final class AlertPollerService extends JobService {
     private static final int JOB_ID = 47821;
     private static final int JOB_ID_NOW = 47822;
     private static final String CHANNEL_ID = "standing_orders";
     private static final long POLL_INTERVAL_MS = 15L * 60L * 1000L;
+    private static final int CONNECT_TIMEOUT_MS = 5_000;
+    private static final int READ_TIMEOUT_MS = 8_000;
 
     private volatile Thread worker;
+    private volatile HttpsURLConnection activeConnection;
 
     static void schedule(Context context) {
         JobScheduler scheduler = context.getSystemService(JobScheduler.class);
@@ -55,6 +62,7 @@ public final class AlertPollerService extends JobService {
                         .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                         .setMinimumLatency(500L)
                         .setOverrideDeadline(10_000L)
+                        .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
                         .setPersisted(false)
                         .build();
         scheduler.schedule(job);
@@ -86,6 +94,7 @@ public final class AlertPollerService extends JobService {
                             try {
                                 fetchAndNotify(prefs, address, fingerprint, token);
                             } finally {
+                                worker = null;
                                 jobFinished(params, false);
                             }
                         },
@@ -101,6 +110,13 @@ public final class AlertPollerService extends JobService {
         Thread t = worker;
         worker = null;
         if (t != null) t.interrupt();
+        final HttpsURLConnection conn = activeConnection;
+        activeConnection = null;
+        if (conn != null) {
+            Thread closer = new Thread(conn::disconnect, "astranavi-alert-close");
+            closer.setDaemon(true);
+            closer.start();
+        }
         return false;
     }
 
@@ -110,7 +126,11 @@ public final class AlertPollerService extends JobService {
         String path = since != null && !since.isEmpty() ? "/alerts?since=" + Uri.encode(since) : "/alerts";
         HttpsURLConnection conn = null;
         try {
+            if (Thread.currentThread().isInterrupted()) return;
             conn = PinnedTls.openPinned(address, fingerprint, path);
+            activeConnection = conn;
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
             conn.setRequestMethod("GET");
             conn.setRequestProperty("Authorization", "Bearer " + token);
             conn.setRequestProperty("Accept", "application/json");
@@ -133,10 +153,13 @@ public final class AlertPollerService extends JobService {
                             new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
                 char[] buf = new char[2048];
                 int read;
-                while ((read = reader.read(buf)) != -1 && body.length() < 128_000) {
+                while (!Thread.currentThread().isInterrupted()
+                        && (read = reader.read(buf)) != -1
+                        && body.length() < 128_000) {
                     body.append(buf, 0, read);
                 }
             }
+            if (Thread.currentThread().isInterrupted()) return;
             JSONObject json = new JSONObject(body.toString());
             JSONArray alerts = json.optJSONArray("alerts");
             if (alerts == null || alerts.length() == 0) return;
@@ -182,8 +205,9 @@ public final class AlertPollerService extends JobService {
                 prefs.edit().putString(MainActivity.KEY_LAST_ALERT_ID, newestId).apply();
             }
         } catch (Exception ignored) {
-            // Away from LAN/VPN or PC asleep: wait cleanly until the next periodic poll.
+            // Away from LAN/VPN, PC asleep, or job interrupted: wait cleanly until next run.
         } finally {
+            activeConnection = null;
             if (conn != null) conn.disconnect();
         }
     }

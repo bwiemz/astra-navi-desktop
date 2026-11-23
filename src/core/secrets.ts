@@ -21,3 +21,45 @@ export function withoutSecrets(text: string): string {
       .replace(/\b[A-Fa-f0-9]{40,}\b/g, "[hidden]")
   );
 }
+
+export interface LocalSecretBackendProbe {
+  platform: NodeJS.Platform;
+  safeStorageAvailable: boolean;
+  hasSecretService?: boolean;
+}
+
+export interface LocalSecretBackendResolution {
+  backend: "os-keyring" | "owner-file-0600";
+  degraded: boolean;
+  notice: string | null;
+}
+
+/**
+ * Resolves the local secret storage strategy without crashing on minimal Linux desktops
+ * (Sway/Hyprland/headless X11) that do not run gnome-keyring or KWallet Secret Service.
+ */
+export function resolveLocalSecretBackend(
+  probe: LocalSecretBackendProbe,
+): LocalSecretBackendResolution {
+  if (probe.platform !== "linux") {
+    return probe.safeStorageAvailable
+      ? { backend: "os-keyring", degraded: false, notice: null }
+      : {
+          backend: "owner-file-0600",
+          degraded: true,
+          notice: "OS credential store unavailable; storing local key material in 0600 owner-only file.",
+        };
+  }
+
+  const secretServiceReady = probe.safeStorageAvailable && probe.hasSecretService !== false;
+  if (secretServiceReady) {
+    return { backend: "os-keyring", degraded: false, notice: null };
+  }
+
+  return {
+    backend: "owner-file-0600",
+    degraded: true,
+    notice:
+      "No Linux Secret Service daemon (gnome-keyring / KWallet) detected; cleanly using 0600 owner-only key file.",
+  };
+}

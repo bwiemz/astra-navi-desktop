@@ -1,16 +1,20 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { QrMatrix } from "../core/qrCode.ts";
 import type { ShownTrace } from "../core/trace.ts";
 import type {
   BootstrapStatusView,
   HardwareRecommendationView,
   MachineFound,
   PolicyAuditSummaryView,
+  ProfileBackupActionResult,
+  ProfileRestoreActionResult,
   RemoteBackupView,
   SettingsBridge,
   SettingsPatch,
   SettingsView,
   SupportBundleResultView,
 } from "../shared/settings.ts";
+import type { UpdateCheckResult } from "../shared/edition.ts";
 
 const bridge: SettingsBridge = {
   load: () => ipcRenderer.invoke("settings:load") as Promise<SettingsView>,
@@ -21,7 +25,12 @@ const bridge: SettingsBridge = {
     ipcRenderer.invoke("settings:forget-conversations") as Promise<SettingsView>,
   traces: () => ipcRenderer.invoke("settings:traces") as Promise<ShownTrace[]>,
   pairDevice: () =>
-    ipcRenderer.invoke("settings:pair-device") as Promise<{ code: string; expiresAt: number }>,
+    ipcRenderer.invoke("settings:pair-device") as Promise<{
+      code: string;
+      expiresAt: number;
+      pairingUri: string;
+      qrMatrix: QrMatrix;
+    }>,
   pinMission: (id: string | null) =>
     ipcRenderer.invoke("settings:pin-mission", id) as Promise<SettingsView>,
   forgetDevice: (id: string) =>
@@ -70,6 +79,12 @@ const bridge: SettingsBridge = {
     ipcRenderer.invoke("settings:run-policy-audit") as Promise<PolicyAuditSummaryView>,
   exportSupportBundle: () =>
     ipcRenderer.invoke("settings:export-support-bundle") as Promise<SupportBundleResultView>,
+  checkUpdates: () => ipcRenderer.invoke("settings:check-updates") as Promise<UpdateCheckResult>,
+  clearSafeMode: () => ipcRenderer.invoke("settings:clear-safe-mode") as Promise<SettingsView>,
+  exportProfileBackup: () =>
+    ipcRenderer.invoke("settings:export-profile") as Promise<ProfileBackupActionResult>,
+  importProfileBackup: () =>
+    ipcRenderer.invoke("settings:import-profile") as Promise<ProfileRestoreActionResult>,
 };
 
 contextBridge.exposeInMainWorld("aichanSettings", bridge);

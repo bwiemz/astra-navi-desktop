@@ -22,6 +22,7 @@ import type {
 import type { HouseholdIsolationManager, HouseholdRole } from "./household.ts";
 import { isPrivateIpv4 } from "./permissions.ts";
 import type { ApprovalCard } from "./missionApproval.ts";
+import { startMdnsAdvertiser, type MdnsAdvertiserHandle } from "./mdns.ts";
 import type { PinnedMissionView } from "./missionPlan.ts";
 import { StationAccount } from "./stationAccount.ts";
 import { stationPage } from "./stationPage.ts";
@@ -155,6 +156,8 @@ export interface StationDeps {
   passwordCost?: number;
   /** For tests: the addresses to listen for. By default this machine's private IPv4 addresses. */
   localAddresses?(): string[];
+  /** Advertise `_astranavi._tcp.local` over mDNS while running (default true outside mocked certs). */
+  mdns?: boolean;
 }
 
 /** What a connected device is sent besides the events themselves. */
@@ -577,6 +580,7 @@ export class Station {
   /** What a device connecting in the middle of things needs to catch up. */
   private lastStatus: "idle" | "thinking" = "idle";
   private replySoFar: string | null = null;
+  private mdnsHandle: MdnsAdvertiserHandle | null = null;
 
   constructor(deps: StationDeps) {
     this.deps = deps;
@@ -680,6 +684,14 @@ export class Station {
     this.certificate = cert;
     this.server = server;
     this.door = door;
+    if (this.deps.mdns ?? !this.deps.makeCertificate) {
+      this.mdnsHandle = await startMdnsAdvertiser({
+        instanceName: "Astra Navi Desktop",
+        port: this.listeningPort,
+        addresses: this.localAddresses(),
+        fingerprintTail: (this.fingerprint() ?? "").replaceAll(":", "").slice(-8),
+      }).catch(() => null);
+    }
   }
 
   /**
@@ -744,6 +756,10 @@ export class Station {
   /** Stops answering and closes every connection. Paired devices stay paired. */
   async stop(): Promise<void> {
     const { server, door } = this;
+    if (this.mdnsHandle) {
+      await this.mdnsHandle.close().catch(() => undefined);
+      this.mdnsHandle = null;
+    }
     if (!server || !door) return;
     this.server = null;
     this.door = null;

@@ -230,21 +230,29 @@ async function setupVoice(env: ReturnType<typeof resolveEnv>): Promise<string> {
     throw new Error("Python 3.10+ (or uv) is required to create the full voice environment.");
   }
 
+  const reqFile = join(env.appRoot, "voice-server", "requirements.txt");
+  const hasReqs = existsSync(reqFile);
   if (env.dryRun) {
-    emit("done", 100, `Dry run: would create ${envDir} and install qwen-tts.`, true);
-    return `Dry run: voice environment target ${envDir}`;
+    const pkgDesc = hasReqs ? reqFile : "qwen-tts";
+    emit("done", 100, `Dry run: would create ${envDir} and install ${pkgDesc}.`, true);
+    return `Dry run: voice environment target ${envDir} (${hasReqs ? "voice-server/requirements.txt" : "qwen-tts"})`;
   }
 
   await mkdir(env.dataRoot, { recursive: true, mode: 0o700 });
   emit("venv", 45, `Creating virtual environment in ${envDir}...`);
+  const pipArgs = hasReqs ? ["-r", reqFile] : ["qwen-tts"];
   if (hasUv) {
     await env.runCommand("uv", ["venv", envDir, "--python", "3.12"], 120_000);
-    emit("install", 75, "Installing qwen-tts packages via uv...");
-    await env.runCommand("uv", ["pip", "install", "--python", env.voicePython, "qwen-tts"], 600_000);
+    emit("install", 75, "Installing pinned voice packages via uv...");
+    await env.runCommand("uv", ["pip", "install", "--python", env.voicePython, ...pipArgs], 600_000);
   } else if (pyCmd) {
     await env.runCommand(pyCmd.cmd, [...pyCmd.preArgs, "-m", "venv", envDir], 120_000);
-    emit("install", 75, "Installing qwen-tts packages via pip...");
-    await env.runCommand(env.voicePython, ["-m", "pip", "install", "--upgrade", "qwen-tts"], 600_000);
+    emit("install", 75, "Installing pinned voice packages via pip...");
+    await env.runCommand(
+      env.voicePython,
+      ["-m", "pip", "install", "--upgrade", ...pipArgs],
+      600_000,
+    );
   }
 
   emit("done", 100, `Voice environment ready at ${envDir}.`);

@@ -1,4 +1,4 @@
-"""Designs AI-chan's voice from a written description.
+"""Designs Astra Navi's voice from a written description.
 
 This is how the reference clips in ``assets/voice`` were made, and how to make new ones.
 The voice comes from the description alone. No recording of any person is given to the
@@ -20,14 +20,14 @@ from qwen_tts import Qwen3TTSModel
 DESIGN_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 # An original line written for this project, long enough to carry the voice's character.
 REFERENCE_LINE = (
-    "Captain! There you are! AI-chan has been waiting all morning, you know. "
+    "Captain! There you are! Astra Navi has been waiting all morning, you know. "
     "So, what are we working on today? Whatever it is, leave it to me!"
 )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Designs AI-chan's voice from a written description."
+        description="Designs Astra Navi's voice from a written description."
     )
     parser.add_argument(
         "--out",

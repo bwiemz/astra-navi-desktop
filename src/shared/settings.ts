@@ -1,5 +1,20 @@
 import type { LanguageCode } from "../core/languages.ts";
+import type { QrMatrix } from "../core/qrCode.ts";
 import type { ShownTrace } from "../core/trace.ts";
+import type { UpdateCheckResult } from "./edition.ts";
+
+export interface ProfileBackupSummary {
+  version: 1;
+  exportedAt: string;
+  files: { name: string; bytes: number; sha256: string }[];
+  totalBytes: number;
+}
+
+export interface ProfileRestoreResult {
+  restoredFiles: string[];
+  backupSnapshotDir: string | null;
+  exportedAt: string;
+}
 
 export const TIER10_KEYS = [
   "workerMesh",
@@ -99,6 +114,11 @@ export interface SettingsView {
   onboardingComplete: boolean;
   /** Whether Advanced power-user controls are shown in Settings. */
   advancedSettings: boolean;
+  windowMode: "floating" | "solid-docked";
+  lowPowerStage: boolean;
+  hotkeys: { pushToTalk: string; summonHide: string; clickThrough: string };
+  safeModeNotice?: { active: boolean; consecutiveCrashes: number; reason: string | null };
+  updatePolicy?: { standaloneChecksEnabled: boolean; channel: string };
   /** Optional desktop session / compositor compatibility note (e.g. non-KDE Wayland or Flatpak). */
   desktopSessionNotice?: string | null;
   /** Optional local service availability reported by the cross-platform bootstrapper. */
@@ -242,6 +262,9 @@ export interface SettingsPatch {
   pingPhone?: boolean;
   onboardingComplete?: boolean;
   advancedSettings?: boolean;
+  windowMode?: "floating" | "solid-docked";
+  lowPowerStage?: boolean;
+  hotkeys?: Partial<{ pushToTalk: string; summonHide: string; clickThrough: string }>;
   tier10?: Partial<Tier10Settings>;
 }
 
@@ -257,8 +280,13 @@ export interface SettingsBridge {
   forgetConversations(): Promise<SettingsView>;
   /** The records of her last replies, newest first, worded for showing. */
   traces(): Promise<ShownTrace[]>;
-  /** Starts pairing a device: a six-digit code to type on it, good for five minutes. */
-  pairDevice(): Promise<{ code: string; expiresAt: number }>;
+  /** Starts pairing a device: a six-digit code to type on it, plus QR pairing payload, good for five minutes. */
+  pairDevice(): Promise<{
+    code: string;
+    expiresAt: number;
+    pairingUri: string;
+    qrMatrix: QrMatrix;
+  }>;
   /** Pins one mission (or null to unpin) to paired devices from the PC. */
   pinMission(id: string | null): Promise<SettingsView>;
   /** Takes a paired device's access away. */
@@ -318,7 +346,19 @@ export interface SettingsBridge {
   runPolicyAudit(): Promise<PolicyAuditSummaryView>;
   /** Builds a redacted diagnostics bundle (no chat history/memory/secrets) and reveals it in the file manager. */
   exportSupportBundle(): Promise<SupportBundleResultView>;
+  checkUpdates(): Promise<UpdateCheckResult>;
+  clearSafeMode(): Promise<SettingsView>;
+  exportProfileBackup(): Promise<ProfileBackupActionResult>;
+  importProfileBackup(): Promise<ProfileRestoreActionResult>;
 }
+
+export type ProfileBackupActionResult =
+  | { ok: true; canceled: false; path: string; summary: ProfileBackupSummary }
+  | { ok: false; canceled: boolean; error?: string };
+
+export type ProfileRestoreActionResult =
+  | { ok: true; canceled: false; path: string; result: ProfileRestoreResult }
+  | { ok: false; canceled: boolean; error?: string };
 
 export interface SupportBundleResultView {
   path: string;
