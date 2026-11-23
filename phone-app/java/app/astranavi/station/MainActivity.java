@@ -162,6 +162,15 @@ public final class MainActivity extends Activity {
                 WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
         night = getResources().getBoolean(R.bool.night);
         root = new FrameLayout(this);
+        configureWindowInsets();
+        root.setBackgroundColor(getColor(R.color.page));
+        setContentView(root);
+        paintBars();
+        if (!takeLink(getIntent())) render();
+    }
+
+    @SuppressWarnings("deprecation")
+    private void configureWindowInsets() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             getWindow().setDecorFitsSystemWindows(false);
             root.setFitsSystemWindows(false);
@@ -176,10 +185,6 @@ public final class MainActivity extends Activity {
         } else {
             root.setFitsSystemWindows(true);
         }
-        root.setBackgroundColor(getColor(R.color.page));
-        setContentView(root);
-        paintBars();
-        if (!takeLink(getIntent())) render();
     }
 
     @Override

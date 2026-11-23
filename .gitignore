@@ -13,6 +13,7 @@ __pycache__/
 model-src/
 *.pmx
 !assets/models/ai-navigator/ai-navigator.pmx
+!assets/models/variants/*/ai-navigator.pmx
 *.pmd
 *.fbx
 *.vrm
