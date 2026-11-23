@@ -29,6 +29,8 @@ import { oneAtATime } from "./once.ts";
  */
 
 const MIME_TYPES: Record<string, string> = {
+  ".vrm": "model/gltf-binary",
+  ".glb": "model/gltf-binary",
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -137,9 +139,9 @@ export function createModelFiles(deps: ModelFilesDeps): ModelFiles {
     const consent = await dialog.showMessageBox({
       type: "info",
       title: "Import a character model",
-      message: "Choose the model's .pmx file",
+      message: "Choose the model's .vrm or .pmx file",
       detail:
-        "Use a .pmx/.pmd model you are permitted to use and follow its creator's license terms.\n\n" +
+        "Use a .vrm or .pmx/.pmd model you are permitted to use and follow its creator's license terms.\n\n" +
         "The model and its textures are packed into one encrypted file that only opens on this computer, " +
         "for this user account. The app never shares, uploads or exposes the raw model files.\n\n" +
         UNOFFICIAL_NOTICE,
@@ -150,9 +152,9 @@ export function createModelFiles(deps: ModelFilesDeps): ModelFiles {
     if (consent.response !== 0) return;
 
     const picked = await dialog.showOpenDialog({
-      title: "Choose the model's .pmx file",
+      title: "Choose the model's .vrm or .pmx file",
       properties: ["openFile"],
-      filters: [{ name: "MMD model", extensions: ["pmx", "pmd"] }],
+      filters: [{ name: "3D avatar model (.vrm, .pmx, .pmd)", extensions: ["vrm", "pmx", "pmd"] }],
     });
     const file = picked.filePaths[0];
     if (picked.canceled || !file) return;

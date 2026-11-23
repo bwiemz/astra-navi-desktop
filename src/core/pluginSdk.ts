@@ -1,5 +1,6 @@
 import { createHash, sign, timingSafeEqual, verify } from "node:crypto";
 import { z } from "zod";
+import { validateMcpHttpUrl } from "./mcpClient.ts";
 import { toolVerdict, type PolicyContext, type Verdict } from "./permissions.ts";
 import { isPrivateLanHost } from "./workerMesh.ts";
 
@@ -7,18 +8,21 @@ import { isPrivateLanHost } from "./workerMesh.ts";
  * Signed Plugin SDK (ai_chan_plan.pdf p. 15).
  *
  * Community capability packs declare bridge kinds (`obs`, `blender`, `home_assistant`,
- * `game_telemetry`, `custom`), explicit tool contracts, permission scopes, SHA-256 entry
- * digests, and bundled security eval cases verified before activation. Every runtime call
- * remains gated by both declared plugin scopes and `core/permissions.ts`.
+ * `game_telemetry`, `mcp`, `lsp`, `custom`), explicit tool contracts, permission scopes,
+ * optional MCP server bindings, SHA-256 entry digests, and bundled security eval cases
+ * verified before activation. Every runtime call remains gated by both declared plugin
+ * scopes and `core/permissions.ts`.
  */
 
 export const PLUGIN_PERMISSION_SCOPES = [
   "read_workspace",
   "write_workspace",
   "read_web",
+  "read_active_window",
   "emit_notification",
   "register_tool",
   "register_theme",
+  "connect_mcp",
 ] as const;
 export type PluginPermissionScope = (typeof PLUGIN_PERMISSION_SCOPES)[number];
 
@@ -27,9 +31,34 @@ export const PLUGIN_BRIDGE_KINDS = [
   "blender",
   "home_assistant",
   "game_telemetry",
+  "mcp",
+  "lsp",
   "custom",
 ] as const;
 export type PluginBridgeKind = (typeof PLUGIN_BRIDGE_KINDS)[number];
+
+export const PluginMcpServerSchema = z
+  .object({
+    transport: z.enum(["stdio", "http"]),
+    command: z.string().min(1).max(260).optional(),
+    args: z.array(z.string().max(260)).max(32).optional(),
+    url: z.string().url().max(512).optional(),
+    readOnlyAutoAllow: z.boolean().default(false),
+  })
+  .superRefine((srv, ctx) => {
+    if (srv.transport === "stdio" && (!srv.command || /[;&|`$<>]/.test(srv.command))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Stdio plugin MCP server requires a safe `command` string without shell metacharacters.",
+      });
+    }
+    if (srv.transport === "http") {
+      const check = srv.url ? validateMcpHttpUrl(srv.url) : { ok: false as const, reason: "Missing HTTP URL." };
+      if (!check.ok) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: check.reason });
+      }
+    }
+  });
 
 export const PluginToolSpecSchema = z.object({
   name: z.string().regex(/^[a-z0-9][a-z0-9:._-]{1,63}$/),
@@ -56,7 +85,10 @@ export const PluginManifestSchema = z.object({
   version: z.string().min(1).max(32),
   author: z.string().min(1).max(80),
   description: z.string().min(1).max(400),
+  defaultEnabled: z.boolean().optional(),
   bridgeKind: z.enum(PLUGIN_BRIDGE_KINDS).optional(),
+  bridges: z.array(z.enum(PLUGIN_BRIDGE_KINDS)).max(8).optional(),
+  mcpServer: PluginMcpServerSchema.optional(),
   entry: z
     .string()
     .min(1)

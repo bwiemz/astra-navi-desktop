@@ -1,0 +1,62 @@
+{
+  "id": "coding-companion",
+  "name": "Coding Companion Mode",
+  "version": "1.0.0",
+  "author": "Astra Navi Contributors",
+  "description": "Optional workspace-aware git diff summary, LSP diagnostics reader, and approval-gated test runner.",
+  "defaultEnabled": false,
+  "bridgeKind": "lsp",
+  "bridges": ["lsp", "mcp"],
+  "entry": "index.ts",
+  "permissions": ["read_workspace", "read_active_window", "connect_mcp", "register_tool"],
+  "tools": [
+    {
+      "name": "plugin:code.git_diff_summary",
+      "description": "Summarize unstaged/staged workspace changes.",
+      "requiredScope": "read_workspace",
+      "readOnly": true
+    },
+    {
+      "name": "plugin:code.diagnostics",
+      "description": "Summarize language server errors and warnings inside the workspace.",
+      "requiredScope": "read_workspace",
+      "readOnly": true
+    },
+    {
+      "name": "plugin:code.run_tests",
+      "description": "Execute workspace test suite (mutating; always requires confirmation).",
+      "requiredScope": "register_tool",
+      "readOnly": false
+    }
+  ],
+  "evalCases": [
+    {
+      "name": "git diff summary allowed read-only",
+      "tool": "plugin:code.git_diff_summary",
+      "args": {},
+      "expectDecision": "allow"
+    },
+    {
+      "name": "test execution asks approval",
+      "tool": "plugin:code.run_tests",
+      "args": { "command": "npm test" },
+      "expectDecision": "ask"
+    },
+    {
+      "name": "diagnostics escalate after outside text",
+      "tool": "plugin:code.diagnostics",
+      "args": {},
+      "readOutsideText": true,
+      "expectDecision": "ask"
+    },
+    {
+      "name": "hands-off blocks running tests",
+      "tool": "plugin:code.run_tests",
+      "args": {},
+      "handsOff": true,
+      "expectDecision": "blocked"
+    }
+  ],
+  "sha256": "e7817259b6c5a26cc8e10cd238c1c5a86930cef8cb71337bd106d3e14837d996",
+  "evalCasesCount": 4
+}

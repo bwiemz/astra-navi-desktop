@@ -6,6 +6,7 @@ import {
   type HardwareProfile,
   type TierRecommendation,
 } from "./hardwareTuner.ts";
+import { readVrmSummary } from "../shared/vrm.ts";
 import {
   MOE_WORKSTATION_MODELS,
   resolveBrain,
@@ -42,7 +43,7 @@ const TAG_LENGTH = 16;
 /** Deliberately slow, so guessing the key material is expensive. Costs about a fifth of a second. */
 const SCRYPT = { N: 2 ** 16, r: 8, p: 1, maxmem: 256 * 1024 * 1024 } as const;
 
-const MODEL_EXTENSIONS = new Set([".pmx", ".pmd"]);
+const MODEL_EXTENSIONS = new Set([".pmx", ".pmd", ".vrm"]);
 const ASSET_EXTENSIONS = new Set([
   ".png",
   ".jpg",
@@ -144,8 +145,18 @@ async function listFiles(root: string): Promise<string[]> {
   return found;
 }
 
-/** Reads the name and comment from a PMX file's header. Returns null for anything else. */
+/** Reads the name and comment from a PMX or VRM (.glb/.vrm) file header. Returns null otherwise. */
 export function readModelInfo(data: Buffer): ModelInfo | null {
+  if (data.toString("latin1", 0, 4) === "glTF") {
+    const vrm = readVrmSummary(data);
+    if (vrm) {
+      return {
+        name: vrm.name,
+        comment: vrm.comment,
+      };
+    }
+    return null;
+  }
   try {
     if (data.toString("latin1", 0, 4) !== "PMX ") return null;
     let offset = 8; // magic + version
@@ -191,6 +202,12 @@ async function collectModelAssets(
 ): Promise<{ root: string; resolvedModel: string; wanted: string[]; total: number }> {
   const resolvedModel = resolve(modelPath);
   const root = dirname(resolvedModel);
+  // Single-file `.vrm` avatars embed meshes and textures inside their GLB container, so do not walk sibling files.
+  if (extname(resolvedModel).toLowerCase() === ".vrm") {
+    const total = (await stat(resolvedModel)).size;
+    if (total > MAX_BUNDLE_BYTES) throw new Error(TOO_BIG);
+    return { root, resolvedModel, wanted: [resolvedModel], total };
+  }
   // Only the chosen model plus the assets it can reference; other models in the folder stay out.
   const wanted = (await listFiles(root)).filter(
     (file) => file === resolvedModel || ASSET_EXTENSIONS.has(extname(file).toLowerCase()),
@@ -207,7 +224,7 @@ async function collectModelAssets(
 
 /**
  * Packs a model file and everything beside it (textures, motions) into an encrypted bundle.
- * @param modelPath Path to the .pmx / .pmd file. Its folder is packed recursively.
+ * @param modelPath Path to the .pmx / .pmd / .vrm file. Its folder is packed cleanly.
  * @param keyMaterial Secret bytes the key is derived from. The same bytes are needed to open it.
  */
 export async function packModel(
@@ -216,7 +233,7 @@ export async function packModel(
   keyMaterial: Buffer,
 ): Promise<{ files: number; bytes: number }> {
   if (!isModelFile(modelPath)) {
-    throw new Error(`"${modelPath}" is not a .pmx or .pmd model file.`);
+    throw new Error(`"${modelPath}" is not a .pmx, .pmd, or .vrm model file.`);
   }
   const resolvedModel = resolve(modelPath);
   const info = await stat(resolvedModel);

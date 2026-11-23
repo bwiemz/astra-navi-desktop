@@ -10,6 +10,7 @@ import {
   type BrainModel,
   type ModelQuantization,
 } from "./models.ts";
+import { parseMacOsSysctlMemory } from "./platform/macos.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,6 +22,9 @@ export interface HardwareProfile {
   systemRamBytes: number;
   cpuThreads: number;
   activeGameOrRender: boolean;
+  /** True on Apple Silicon unified memory Macs where GPU & CPU share high-bandwidth RAM. */
+  unifiedMemory?: boolean;
+  platform?: NodeJS.Platform;
   /** GPU or system memory bandwidth in GB/s measured or inferred on first launch. */
   memoryBandwidthGbps?: number;
   /** PCIe link bandwidth in GB/s for host-to-GPU transfers. */
@@ -73,9 +77,18 @@ export function recommendHardwareTier(
   profile: HardwareProfile,
   preferred: "auto" | BrainModel["id"] = "auto",
 ): TierRecommendation {
-  const hasDiscreteGpu = profile.totalVramBytes > 0;
+  const isUnifiedMac = profile.unifiedMemory === true;
+  const effectiveVramBytes =
+    isUnifiedMac && profile.totalVramBytes <= 0
+      ? Math.round(profile.systemRamBytes * 0.75)
+      : profile.totalVramBytes;
+  const hasDiscreteGpu = effectiveVramBytes > 0;
   const effectiveGb = hasDiscreteGpu
-    ? (profile.activeGameOrRender ? profile.freeVramBytes : profile.totalVramBytes * 0.85) / GIB
+    ? (profile.activeGameOrRender && profile.freeVramBytes > 0
+        ? profile.freeVramBytes
+        : isUnifiedMac
+          ? effectiveVramBytes * 0.92
+          : effectiveVramBytes * 0.85) / GIB
     : (profile.systemRamBytes * 0.45) / GIB;
 
   let targetList: readonly BrainModel["id"][];
@@ -85,9 +98,12 @@ export function recommendHardwareTier(
     targetList = ["small"];
   } else if (profile.activeGameOrRender) {
     targetList = ["standard", "small"];
-  } else if (effectiveGb >= MOE_WORKSTATION_MODELS.xlMoe.vramGb) {
+  } else if (effectiveGb >= MOE_WORKSTATION_MODELS.xlMoe.vramGb || (isUnifiedMac && effectiveGb >= 46)) {
     targetList = ["xl", "large", "standard", "small"];
-  } else if (effectiveGb >= 24 && (profile.memoryBandwidthGbps ?? 600) >= 450) {
+  } else if (
+    effectiveGb >= 24 &&
+    (isUnifiedMac || (profile.memoryBandwidthGbps ?? 600) >= 450)
+  ) {
     targetList = ["large", "standard", "small"];
   } else {
     targetList = ["standard", "small"];
@@ -259,12 +275,38 @@ export function benchmarkMemoryBandwidthGbps(sampleMb = 8): number {
   return Number(Math.max(1, gbps).toFixed(1));
 }
 
-/** Probes local GPU/VRAM/bandwidth/RAM/CPU capabilities with graceful CPU-only fallback. */
+/** Probes local GPU/VRAM/bandwidth/RAM/CPU capabilities with graceful CPU-only & Apple Silicon fallback. */
 export async function probeLocalHardware(options?: {
+  platform?: NodeJS.Platform;
   activeGameOrRender?: boolean;
   nvidiaSmiCommand?: string;
   measureBandwidth?: boolean;
 }): Promise<HardwareProfile> {
+  const platform = options?.platform ?? process.platform;
+  if (platform === "darwin") {
+    try {
+      const [{ stdout: memOut }, { stdout: vmOut }, { stdout: brandOut }] = await Promise.all([
+        execFileAsync("sysctl", ["-n", "hw.memsize"], { timeout: 3_000, encoding: "utf8" }),
+        execFileAsync("vm_stat", [], { timeout: 3_000, encoding: "utf8" }),
+        execFileAsync("sysctl", ["-n", "machdep.cpu.brand_string"], { timeout: 3_000, encoding: "utf8" }),
+      ]);
+      const mac = parseMacOsSysctlMemory(memOut, vmOut, brandOut);
+      return {
+        gpuName: mac.chipName,
+        totalVramBytes: mac.totalBytes,
+        freeVramBytes: mac.freeBytes,
+        systemRamBytes: mac.totalSystemBytes || totalmem(),
+        cpuThreads: Math.max(1, cpus().length),
+        activeGameOrRender: options?.activeGameOrRender ?? false,
+        unifiedMemory: mac.unifiedMemory,
+        platform: "darwin",
+        memoryBandwidthGbps: mac.estimatedBandwidthGbps,
+      };
+    } catch {
+      // Fall through to generic probe on minimal sandboxes.
+    }
+  }
+
   const queryWithBw = await execFileAsync(
     options?.nvidiaSmiCommand ?? "nvidia-smi",
     [

@@ -25,6 +25,9 @@ extraResources:
       - "!win-hands-native/**/*.cs"
       - "!win-hands-native/**/*.csproj"
       - "!win-hands-native/bin/**/!(win-hands.exe)"
+      - "!linux-hands-native/target/**"
+      - "!linux-hands-native/src/**"
+      - "!linux-hands-native/Cargo.*"
   - from: voice-server
     to: voice-server
   - from: browser-bridge

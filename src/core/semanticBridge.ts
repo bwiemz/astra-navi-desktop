@@ -6,13 +6,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { isPrivateIpv4 } from "./permissions.ts";
+import type { McpCallResult, McpHub } from "./mcpClient.ts";
 
 const execFileAsync = promisify(execFile);
 
 /** Deterministic four-tier application inspection and control priority ladder (Spec §4.1). */
 export type ResolutionTier = "semantic-bridge" | "at-spi" | "som-ocr" | "raw-input";
 
-export type SemanticAppKind = "kwin" | "editor-lsp" | "browser-dom" | "pipewire";
+export type SemanticAppKind = "kwin" | "editor-lsp" | "browser-dom" | "pipewire" | "mcp";
 
 export interface SemanticBridgeProvider<TReq = unknown, TRes = unknown> {
   readonly kind: SemanticAppKind;
@@ -480,5 +481,49 @@ export function parseKWinTopology(rawJson: string): KWinTopology | null {
     };
   } catch {
     return null;
+  }
+}
+
+// ---------- 5. Native MCP Semantic Bridge ----------
+
+export interface McpBridgeRequest {
+  tool: string;
+  args?: Record<string, unknown>;
+}
+
+/** Exposes connected MCP servers as a first-class Semantic Bridge provider. */
+export class McpSemanticBridge implements SemanticBridgeProvider<McpBridgeRequest, McpCallResult> {
+  readonly kind: SemanticAppKind = "mcp";
+  readonly name = "Native MCP Client Bridge";
+  private readonly hub: McpHub;
+
+  constructor(hub: McpHub) {
+    this.hub = hub;
+  }
+
+  supports(target: string): boolean {
+    const clean = target.startsWith("mcp:") ? target : `mcp:${target}`;
+    return this.hub.listPrefixedTools().some((entry) => entry.fullName === clean);
+  }
+
+  async execute(request: McpBridgeRequest): Promise<McpCallResult | null> {
+    const clean = request.tool.startsWith("mcp:") ? request.tool : `mcp:${request.tool}`;
+    if (!this.supports(clean)) return null;
+    return this.hub.callPrefixedTool(clean, request.args ?? {});
+  }
+
+  snapshot(): {
+    servers: number;
+    connectedTools: { fullName: string; serverId: string; description: string }[];
+  } {
+    const tools = this.hub.listPrefixedTools();
+    return {
+      servers: this.hub.listServers().length,
+      connectedTools: tools.map((entry) => ({
+        fullName: entry.fullName,
+        serverId: entry.serverId,
+        description: entry.tool.description ?? "",
+      })),
+    };
   }
 }

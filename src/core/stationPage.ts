@@ -29,6 +29,9 @@ export function stationPage(nonce: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#1b1f3b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Astra Station">
 <title>Astra Navi Station</title>
 <style nonce="${safeNonce}">${STATION_STYLE}</style>
 </head>

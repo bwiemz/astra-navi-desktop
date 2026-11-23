@@ -24,12 +24,21 @@ import { MultiPhysicsRuntime } from "babylon-mmd/esm/Runtime/Optimized/Physics/B
 import { MmdBulletPhysics } from "babylon-mmd/esm/Runtime/Optimized/Physics/mmdBulletPhysics";
 import type { Mood } from "../../shared/ipc.ts";
 import {
+  evaluateGestureMotion,
+  GESTURES,
+  type Gesture,
+  type GestureMotionSample,
+} from "../../shared/gestures.ts";
+import {
   sampleVisemeWeights,
   VISEME_MORPH_CANDIDATES,
   type VisemeFrame,
   type VisemeWeights,
   type VowelViseme,
 } from "../../shared/visemes.ts";
+import { loadVrmIntoScene, type LoadedVrmRig } from "./vrmLoader.ts";
+
+export { GESTURES, evaluateGestureMotion, type Gesture, type GestureMotionSample };
 
 /**
  * Face shapes for each mood, using the standard MMD morph names. Each slot lists
@@ -38,45 +47,53 @@ import {
 const MOOD_FACES: Record<Mood, readonly (readonly [names: readonly string[], weight: number])[]> = {
   neutral: [],
   happy: [
-    [["口角上げ", "にっこり", "にこり口"], 0.7],
-    [["にこり"], 0.5],
+    [["口角上げ", "にっこり", "にこり口", "happy"], 0.7],
+    [["にこり", "relaxed"], 0.5],
     [["笑い", "なごみ"], 0.3],
   ],
   excited: [
-    [["ワ", "わ", "あ２", "お1", "あ"], 0.6],
-    [["にこり"], 0.6],
+    [["ワ", "わ", "あ２", "お1", "あ", "happy"], 0.6],
+    [["にこり", "surprised"], 0.55],
     [["上"], 0.3],
   ],
   thinking: [
-    [["真面目"], 0.45],
-    [["ん", "う"], 0.4],
+    [["真面目", "relaxed"], 0.45],
+    [["ん", "う", "ou"], 0.4],
     [["じと目"], 0.25],
   ],
   surprised: [
-    [["びっくり"], 0.85],
+    [["びっくり", "surprised"], 0.85],
     [["上"], 0.6],
-    [["お", "□"], 0.55],
+    [["お", "□", "oh"], 0.55],
   ],
   worried: [
-    [["困る"], 0.8],
+    [["困る", "sad"], 0.8],
     [["口角下げ", "∧"], 0.5],
   ],
   smug: [
-    [["にやり", "にやり２", "口角上げ"], 0.7],
-    [["じと目"], 0.4],
+    [["にやり", "にやり２", "口角上げ", "happy"], 0.65],
+    [["じと目", "relaxed"], 0.4],
     [["真面目"], 0.3],
   ],
   sad: [
-    [["困る"], 0.7],
+    [["困る", "sad"], 0.7],
     [["口角下げ", "∧"], 0.7],
     [["下"], 0.3],
-    [["まばたき"], 0.2],
+    [["まばたき", "blink"], 0.2],
   ],
 };
 
-const BLINK_MORPH = "まばたき";
-const BROW_UP_MORPHS = ["上", "眉上"] as const;
-const SURPRISE_MORPHS = ["びっくり", "びっくり1"] as const;
+const BLINK_MORPHS = ["まばたき", "blink"] as const;
+const BROW_UP_MORPHS = ["上", "眉上", "surprised"] as const;
+const SURPRISE_MORPHS = ["びっくり", "びっくり1", "surprised"] as const;
+
+const VRM_VISEME_CANDIDATES: Record<VowelViseme, readonly string[]> = {
+  A: ["aa", ...VISEME_MORPH_CANDIDATES.A],
+  I: ["ih", ...VISEME_MORPH_CANDIDATES.I],
+  U: ["ou", ...VISEME_MORPH_CANDIDATES.U],
+  E: ["ee", ...VISEME_MORPH_CANDIDATES.E],
+  O: ["oh", ...VISEME_MORPH_CANDIDATES.O],
+};
 
 /**
  * How often she is drawn. A figure standing still does not need the screen's full rate,
@@ -87,10 +104,7 @@ const LOW_POWER_FPS = { lively: 30, idle: 15, asleep: 4 } as const;
 /** After something happens she stays at the lively rate this long, so easing finishes smoothly. */
 const LIVELY_FOR_MS = 2500;
 
-/** A short movement she makes once: its name and how long it lasts, in seconds. */
-const GESTURES = { nod: 0.9, shake: 1.0, perk: 0.7, wave: 2.0 } as const;
-export type Gesture = keyof typeof GESTURES;
-const TALK_MORPHS = ["あ", "a", "A"] as const;
+const TALK_MORPHS = ["あ", "aa", "a", "A"] as const;
 const DEG = Math.PI / 180;
 
 /** Moves a value toward its target at a rate that does not depend on the frame rate. */
@@ -98,24 +112,32 @@ function approach(current: number, target: number, perSecond: number, dt: number
   return current + (target - current) * (1 - Math.exp(-perSecond * dt));
 }
 
+type RigBoneKey =
+  | "hips"
+  | "upper"
+  | "neck"
+  | "head"
+  | "eyes"
+  | "leftEye"
+  | "rightEye"
+  | "leftShoulder"
+  | "rightShoulder"
+  | "leftArm"
+  | "rightArm"
+  | "leftElbow"
+  | "rightElbow";
+
 interface Rig {
-  model: MmdModel;
+  readonly kind: "mmd" | "vrm";
+  readonly mmdModel?: MmdModel;
+  readonly vrmRig?: LoadedVrmRig;
   morphNames: ReadonlySet<string>;
-  bones: {
-    upper: IMmdRuntimeLinkedBone | null;
-    neck: IMmdRuntimeLinkedBone | null;
-    head: IMmdRuntimeLinkedBone | null;
-    eyes: IMmdRuntimeLinkedBone | null;
-    leftEye: IMmdRuntimeLinkedBone | null;
-    rightEye: IMmdRuntimeLinkedBone | null;
-    leftArm: IMmdRuntimeLinkedBone | null;
-    rightArm: IMmdRuntimeLinkedBone | null;
-    leftElbow: IMmdRuntimeLinkedBone | null;
-    rightElbow: IMmdRuntimeLinkedBone | null;
-  };
   talkMorph: string | null;
   visemeMorphs: Record<VowelViseme, string | null>;
   visemeWeights: VisemeWeights;
+  setMorphWeight(name: string, weight: number): void;
+  setBoneRotation(bone: RigBoneKey, rotation: Quaternion): void;
+  stepPhysics(dt: number): void;
   /** Everything the loader created for this model, so it can all be released together. */
   dispose(): void;
   /** Morph weights currently applied for the mood, eased toward their targets. */
@@ -148,6 +170,9 @@ export class Stage {
   private clock = 0;
   private nextBlinkAt = 2;
   private blinkStartedAt = -1;
+  private saccade = { x: 0, y: 0 };
+  private saccadeTarget = { x: 0, y: 0 };
+  private nextSaccadeAt = 1.4;
   private gaze = { x: 0, y: 0 };
   private gazeTarget = { x: 0, y: 0 };
   private tilt = 0;
@@ -395,6 +420,7 @@ export class Stage {
     outlineColor?: string;
     specularScale?: number;
   }): void {
+    this.rig?.vrmRig?.applyShaderPreset(preset);
     for (const mat of this.scene.materials) {
       const mmdMat = mat as unknown as {
         outlineWidth?: number;
@@ -434,17 +460,83 @@ export class Stage {
     const rig = this.rig;
     this.rig = null;
     if (!rig) return;
-    this.mmdRuntime.destroyMmdModel(rig.model);
+    if (rig.kind === "mmd" && rig.mmdModel) {
+      this.mmdRuntime.destroyMmdModel(rig.mmdModel);
+    }
     rig.dispose();
   }
 
-  /** Loads a model. Resolves to false when a newer load or a removal overtook this one. */
+  /** Loads an MMD (`.pmx`/`.pmd`) or VRM 1.0/0.x (`.vrm`) avatar. */
   async loadModel(url: string): Promise<boolean> {
     this.clearModel();
     const token = this.loadToken;
+    const cleanUrl = url.split("?")[0]?.toLowerCase() ?? "";
+
+    if (cleanUrl.endsWith(".vrm") || cleanUrl.endsWith(".glb")) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Could not load VRM model (${response.status}).`);
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (token !== this.loadToken) return false;
+
+      const vrmRig = await loadVrmIntoScene(this.scene, bytes, "avatar");
+      if (token !== this.loadToken) {
+        vrmRig.dispose();
+        return false;
+      }
+
+      const morphNames = vrmRig.expressionNames;
+      const vrmViseme = (key: VowelViseme): string | null =>
+        VRM_VISEME_CANDIDATES[key].find((name) => morphNames.has(name)) ?? null;
+
+      const VRM_BONE_MAP: Record<RigBoneKey, readonly string[]> = {
+        hips: ["hips"],
+        upper: ["chest", "upperChest", "spine"],
+        neck: ["neck"],
+        head: ["head"],
+        eyes: [],
+        leftEye: ["leftEye"],
+        rightEye: ["rightEye"],
+        leftShoulder: ["leftShoulder"],
+        rightShoulder: ["rightShoulder"],
+        leftArm: ["leftUpperArm"],
+        rightArm: ["rightUpperArm"],
+        leftElbow: ["leftLowerArm"],
+        rightElbow: ["rightLowerArm"],
+      };
+
+      this.rig = {
+        kind: "vrm",
+        vrmRig,
+        morphNames,
+        talkMorph: TALK_MORPHS.find((name) => morphNames.has(name)) ?? null,
+        visemeMorphs: {
+          A: vrmViseme("A"),
+          I: vrmViseme("I"),
+          U: vrmViseme("U"),
+          E: vrmViseme("E"),
+          O: vrmViseme("O"),
+        },
+        visemeWeights: { A: 0, I: 0, U: 0, E: 0, O: 0 },
+        setMorphWeight: (name, weight) => vrmRig.setExpression(name, weight),
+        setBoneRotation: (boneKey, rotation) => {
+          const targetBone = VRM_BONE_MAP[boneKey].find((b) => vrmRig.humanNodes.has(b));
+          if (targetBone) vrmRig.setBoneLocalRotation(targetBone, rotation);
+        },
+        stepPhysics: (dt) => vrmRig.stepSpringBones(dt),
+        face: new Map(),
+        dispose: () => vrmRig.dispose(),
+      };
+      this.frameMeshes(vrmRig.meshes);
+      console.info(
+        `VRM ${vrmRig.meta.specVersion} model loaded (${vrmRig.meta.name}): ${vrmRig.humanNodes.size} humanoid bones, ${morphNames.size} expressions, ${vrmRig.doc.springs.length} spring chains.`,
+      );
+      return true;
+    }
 
     const container = await LoadAssetContainerAsync(url, this.scene, {
-      pluginExtension: url.toLowerCase().endsWith(".pmd") ? ".pmd" : ".pmx",
+      pluginExtension: cleanUrl.endsWith(".pmd") ? ".pmd" : ".pmx",
       // Passed explicitly: without a builder the loader produces meshes with no materials.
       pluginOptions: { mmdmodel: { materialBuilder: new MmdStandardMaterialBuilder() } },
     });
@@ -485,24 +577,28 @@ export class Stage {
       }
       return null;
     };
+    const mmdBones: Record<RigBoneKey, IMmdRuntimeLinkedBone | null> = {
+      hips: bone("腰", "センター"),
+      upper: bone("上半身"),
+      neck: bone("首"),
+      head: bone("頭"),
+      eyes: bone("両目"),
+      leftEye: bone("左目"),
+      rightEye: bone("右目"),
+      leftShoulder: bone("左肩"),
+      rightShoulder: bone("右肩"),
+      leftArm: bone("左腕"),
+      rightArm: bone("右腕"),
+      leftElbow: bone("左ひじ"),
+      rightElbow: bone("右ひじ"),
+    };
     const morphNames = new Set(model.morph.morphs.map((morph) => morph.name));
     const visemeMorph = (key: VowelViseme): string | null =>
       VISEME_MORPH_CANDIDATES[key].find((name) => morphNames.has(name)) ?? null;
     this.rig = {
-      model,
+      kind: "mmd",
+      mmdModel: model,
       morphNames,
-      bones: {
-        upper: bone("上半身"),
-        neck: bone("首"),
-        head: bone("頭"),
-        eyes: bone("両目"),
-        leftEye: bone("左目"),
-        rightEye: bone("右目"),
-        leftArm: bone("左腕"),
-        rightArm: bone("右腕"),
-        leftElbow: bone("左ひじ"),
-        rightElbow: bone("右ひじ"),
-      },
       talkMorph: TALK_MORPHS.find((name) => morphNames.has(name)) ?? null,
       visemeMorphs: {
         A: visemeMorph("A"),
@@ -512,10 +608,16 @@ export class Stage {
         O: visemeMorph("O"),
       },
       visemeWeights: { A: 0, I: 0, U: 0, E: 0, O: 0 },
+      setMorphWeight: (name, weight) => model.morph.setMorphWeight(name, weight),
+      setBoneRotation: (boneKey, rotation) => {
+        const b = mmdBones[boneKey];
+        if (b) b.rotationQuaternion = rotation;
+      },
+      stepPhysics: () => undefined,
       face: new Map(),
       dispose: () => container.dispose(),
     };
-    this.frame(mesh);
+    this.frameMeshes([mesh, ...mesh.getChildMeshes()]);
     console.info(
       `Model loaded: ${model.runtimeBones.length} bones, ${morphNames.size} morphs, physics ${this.hasPhysics ? "on" : "off"}.`,
       `Face morphs available: ${[...morphNames].join(" ")}`,
@@ -560,14 +662,13 @@ export class Stage {
   }
 
   /** Points the camera so the whole figure fills the canvas with a little headroom. */
-  private frame(mesh: Mesh): void {
-    // Measure the figure from its vertices; bounding boxes are padded for physics.
+  private frameMeshes(parts: readonly { getVerticesData(kind: string): unknown }[]): void {
     let bottom = Infinity;
     let top = -Infinity;
     let left = Infinity;
     let right = -Infinity;
-    for (const part of [mesh, ...mesh.getChildMeshes()]) {
-      const positions = part.getVerticesData(VertexBuffer.PositionKind);
+    for (const part of parts) {
+      const positions = part.getVerticesData(VertexBuffer.PositionKind) as ArrayLike<number> | null;
       if (!positions) continue;
       for (let i = 0; i < positions.length; i += 3) {
         const x = positions[i] ?? 0;
@@ -611,7 +712,7 @@ export class Stage {
       const next = approach(rig.face.get(name) ?? 0, targets.get(name) ?? 0, 7, dt);
       if (next < 0.002 && !targets.has(name)) {
         rig.face.delete(name);
-        rig.model.morph.setMorphWeight(name, 0);
+        rig.setMorphWeight(name, 0);
       } else {
         rig.face.set(name, next);
       }
@@ -621,26 +722,24 @@ export class Stage {
     this.attention = approach(this.attention, this.listening && !this.asleep ? 1 : 0, 5, dt);
     this.startle = approach(this.startle, 0, 2.5, dt);
 
-    // One-off movements, each a curve from 0 to 1 over its length.
-    let nod = 0;
-    let shake = 0;
-    let perk = 0;
-    let wave = 0;
-    let waveSwing = 0;
+    // One-off mocap-inspired conversation gestures across 10 curated shapes.
+    let motion: GestureMotionSample = {
+      nod: 0,
+      shake: 0,
+      perk: 0,
+      wave: 0,
+      waveSwing: 0,
+      think: 0,
+      point: 0,
+      shrug: 0,
+      salute: 0,
+      cheer: 0,
+      bow: 0,
+    };
     if (this.gesture) {
       const phase = (t - this.gesture.startedAt) / GESTURES[this.gesture.kind];
       if (phase >= 1) this.gesture = null;
-      else {
-        const envelope = Math.sin(phase * Math.PI);
-        if (this.gesture.kind === "nod") nod = Math.sin(phase * Math.PI * 4) * envelope;
-        if (this.gesture.kind === "shake") shake = Math.sin(phase * Math.PI * 5) * envelope;
-        if (this.gesture.kind === "perk") perk = envelope;
-        if (this.gesture.kind === "wave") {
-          // Up quickly, wave, down again.
-          wave = Math.min(1, phase * 5, (1 - phase) * 5);
-          waveSwing = Math.sin(phase * Math.PI * 7) * wave;
-        }
-      }
+      else motion = evaluateGestureMotion(this.gesture.kind, phase);
     }
 
     if (this.blinkStartedAt < 0 && t >= this.nextBlinkAt) this.blinkStartedAt = t;
@@ -656,7 +755,6 @@ export class Stage {
     }
 
     this.talkLevel = approach(this.talkLevel, t < this.talkUntil ? 1 : 0, 14, dt);
-    // With a real voice the mouth follows its loudness or phoneme visemes; otherwise it flaps while text arrives.
     let targetVisemes: VisemeWeights = { A: 0, I: 0, U: 0, E: 0, O: 0 };
     if (this.visemeTrack) {
       const elapsedMs = Math.max(0, performance.now() - this.visemeTrack.startedAtMs);
@@ -682,9 +780,9 @@ export class Stage {
     const mouth = this.mouthOpen;
 
     const applied = new Map(rig.face);
-    if (rig.morphNames.has(BLINK_MORPH)) {
-      // Asleep, her eyes stay closed; otherwise they only blink.
-      applied.set(BLINK_MORPH, Math.max(applied.get(BLINK_MORPH) ?? 0, blink, this.sleep));
+    const blinkMorph = BLINK_MORPHS.find((name) => rig.morphNames.has(name));
+    if (blinkMorph) {
+      applied.set(blinkMorph, Math.max(applied.get(blinkMorph) ?? 0, blink, this.sleep));
     }
     const browUp = BROW_UP_MORPHS.find((name) => rig.morphNames.has(name));
     if (browUp && this.attention > 0.01) {
@@ -710,17 +808,25 @@ export class Stage {
       }
       if (rig.talkMorph) applied.set(rig.talkMorph, Math.max(applied.get(rig.talkMorph) ?? 0, mouth));
     }
-    for (const [name, weight] of applied) rig.model.morph.setMorphWeight(name, weight);
+    for (const [name, weight] of applied) rig.setMorphWeight(name, weight);
 
-    // --- body ---------------------------------------------------------------
-    // Asleep she does not follow the pointer.
+    // --- body + procedural idle polish -------------------------------------
     const awake = 1 - this.sleep;
+    if (t >= this.nextSaccadeAt) {
+      this.nextSaccadeAt = t + 2.1 + Math.random() * 2.8;
+      this.saccadeTarget = {
+        x: (Math.random() - 0.5) * 0.32,
+        y: (Math.random() - 0.5) * 0.18,
+      };
+    }
+    this.saccade.x = approach(this.saccade.x, this.saccadeTarget.x * awake, 14, dt);
+    this.saccade.y = approach(this.saccade.y, this.saccadeTarget.y * awake, 14, dt);
+
     this.gaze.x = approach(this.gaze.x, this.gazeTarget.x * awake, 4, dt);
     this.gaze.y = approach(this.gaze.y, this.gazeTarget.y * awake, 4, dt);
     this.tilt = approach(this.tilt, mood === "thinking" ? 1 : 0, 3, dt);
     this.lookUp = approach(this.lookUp, mood === "thinking" ? 1 : mood === "sad" ? -1 : 0, 3, dt);
 
-    // Slower, deeper breathing in sleep, and she stops shifting about.
     this.paralinguistic.leanForward = approach(
       this.paralinguistic.leanForward,
       this.paralinguisticTarget.leanForward,
@@ -745,81 +851,114 @@ export class Stage {
       this.breathingScale *
       this.paralinguistic.energyScale;
     const sway = Math.sin(t * 0.53) * awake * this.talkGestureScale;
+    const weightShift = Math.sin(t * 0.37 + 0.6) * 1.4 * awake;
     const drift = Math.sin(t * 0.31 + 1.3) * awake;
-    // In this rig a positive pitch tips backwards, so leaning in and drooping are negative.
+    const listenNod = this.attention * Math.sin(t * 3.1) * 1.6;
     const lean =
-      -this.attention * 3 - this.paralinguistic.leanForward * 4 * awake + perk * 2 - this.sleep * 4;
+      -this.attention * 3 -
+      this.paralinguistic.leanForward * 4 * awake +
+      motion.perk * 2 -
+      motion.bow * 22 -
+      this.sleep * 4;
 
-    const { upper, neck, head, eyes, leftEye, rightEye, leftArm, rightArm, leftElbow, rightElbow } =
-      rig.bones;
     const eyeRotation = Quaternion.RotationYawPitchRoll(
-      this.gaze.x * 8 * DEG * awake,
-      this.gaze.y * 6 * DEG * awake,
+      (this.gaze.x * 8 + this.saccade.x * 5) * DEG * awake,
+      (this.gaze.y * 6 + this.saccade.y * 4) * DEG * awake,
       0,
     );
-    if (eyes) {
-      eyes.rotationQuaternion = eyeRotation;
-    } else {
-      if (leftEye) leftEye.rotationQuaternion = eyeRotation.clone();
-      if (rightEye) rightEye.rotationQuaternion = eyeRotation.clone();
-    }
-    if (upper) {
-      upper.rotationQuaternion = Quaternion.RotationYawPitchRoll(
-        sway * 1.2 * DEG + this.gaze.x * 3 * DEG,
-        breath * 0.7 * DEG + lean * DEG,
-        drift * 0.8 * DEG,
-      );
-    }
-    if (neck) {
-      neck.rotationQuaternion = Quaternion.RotationYawPitchRoll(
-        this.gaze.x * 6 * DEG,
-        this.gaze.y * 3 * DEG,
-        0,
-      );
-    }
-    if (head) {
-      head.rotationQuaternion = Quaternion.RotationYawPitchRoll(
-        this.gaze.x * 10 * DEG + sway * 1.5 * DEG + shake * 12 * DEG,
+    rig.setBoneRotation("eyes", eyeRotation);
+    rig.setBoneRotation("leftEye", eyeRotation.clone());
+    rig.setBoneRotation("rightEye", eyeRotation.clone());
+
+    rig.setBoneRotation(
+      "hips",
+      Quaternion.RotationYawPitchRoll(weightShift * 0.9 * DEG, 0, weightShift * 0.7 * DEG),
+    );
+    rig.setBoneRotation(
+      "upper",
+      Quaternion.RotationYawPitchRoll(
+        sway * 1.2 * DEG + this.gaze.x * 3 * DEG - motion.point * 7 * DEG,
+        breath * 0.75 * DEG + lean * DEG,
+        drift * 0.8 * DEG - weightShift * 0.5 * DEG,
+      ),
+    );
+    rig.setBoneRotation(
+      "neck",
+      Quaternion.RotationYawPitchRoll(this.gaze.x * 6 * DEG, this.gaze.y * 3 * DEG - motion.bow * 6 * DEG, 0),
+    );
+    rig.setBoneRotation(
+      "head",
+      Quaternion.RotationYawPitchRoll(
+        this.gaze.x * 10 * DEG + sway * 1.5 * DEG + motion.shake * 12 * DEG + motion.think * 6 * DEG,
         this.gaze.y * 7 * DEG +
           this.lookUp * 6 * DEG * awake -
           breath * 0.5 * DEG -
-          nod * 9 * DEG -
+          (motion.nod * 9 + listenNod + motion.bow * 14) * DEG -
           this.sleep * 20 * DEG +
           this.startle * 6 * DEG,
         this.tilt * 9 * DEG * awake +
           this.paralinguistic.headTiltDeg * DEG * awake +
           drift * 1.5 * DEG +
           this.attention * 5 * DEG +
+          motion.think * 11 * DEG +
+          motion.shrug * 7 * DEG +
           this.sleep * 6 * DEG,
-      );
-    }
-    // MMD models rest with their arms held out at an angle. Standing at ease, her upper arms
-    // come down to her sides and her elbows give a little, forearms a touch forward and in,
-    // so her hands hang by her hips behind the drums she wears there. (Much further down and
-    // the forearms pass through those drums; this was set by eye, from the front and the side.)
-    const armDrop = 36 * DEG + breath * 0.6 * DEG - perk * 7 * DEG;
+      ),
+    );
+
+    const shoulderBreath = breath * 1.1 * DEG + motion.shrug * 14 * DEG;
+    rig.setBoneRotation("leftShoulder", Quaternion.RotationYawPitchRoll(0, 0, shoulderBreath));
+    rig.setBoneRotation("rightShoulder", Quaternion.RotationYawPitchRoll(0, 0, -shoulderBreath));
+
+    const armDrop = 36 * DEG + breath * 0.6 * DEG - motion.perk * 7 * DEG - motion.shrug * 12 * DEG;
     const elbowForward = 14 * DEG + breath * 0.8 * DEG;
     const elbowIn = 8 * DEG;
-    // Her right arm leaves that pose to wave and comes back to it.
-    const atEase = 1 - wave;
-    if (leftArm) leftArm.rotationQuaternion = Quaternion.RotationYawPitchRoll(0, 0, -armDrop);
-    if (leftElbow) {
-      leftElbow.rotationQuaternion = Quaternion.RotationYawPitchRoll(elbowForward, 0, -elbowIn);
-    }
-    // To wave, her right arm comes up past the shoulder and the forearm swings.
-    if (rightArm) {
-      rightArm.rotationQuaternion = Quaternion.RotationYawPitchRoll(
-        wave * -15 * DEG,
+    const rightBusy = Math.max(motion.wave, motion.think, motion.point, motion.salute, motion.cheer, motion.shrug);
+    const leftBusy = Math.max(motion.cheer, motion.shrug);
+    const rightEase = 1 - rightBusy;
+    const leftEase = 1 - leftBusy;
+
+    rig.setBoneRotation(
+      "leftArm",
+      Quaternion.RotationYawPitchRoll(
+        motion.cheer * 14 * DEG,
         0,
-        armDrop - wave * 86 * DEG, // as high as it always went: 50 degrees above its rest
-      );
-    }
-    if (rightElbow) {
-      rightElbow.rotationQuaternion = Quaternion.RotationYawPitchRoll(
-        -elbowForward * atEase,
+        -armDrop + motion.cheer * 78 * DEG - motion.shrug * 10 * DEG,
+      ),
+    );
+    rig.setBoneRotation(
+      "leftElbow",
+      Quaternion.RotationYawPitchRoll(
+        elbowForward * leftEase,
         0,
-        elbowIn * atEase + wave * (-70 + waveSwing * 28) * DEG,
-      );
-    }
+        -elbowIn * leftEase + motion.cheer * (58 - motion.waveSwing * 22) * DEG - motion.shrug * 35 * DEG,
+      ),
+    );
+
+    rig.setBoneRotation(
+      "rightArm",
+      Quaternion.RotationYawPitchRoll(
+        (motion.wave * -15 + motion.point * -32 + motion.think * -24 + motion.salute * -28 + motion.cheer * -14) * DEG,
+        motion.point * -38 * DEG,
+        armDrop - (motion.wave * 86 + motion.cheer * 78 + motion.salute * 68 + motion.think * 42 + motion.point * 44) * DEG,
+      ),
+    );
+    rig.setBoneRotation(
+      "rightElbow",
+      Quaternion.RotationYawPitchRoll(
+        -elbowForward * rightEase,
+        0,
+        elbowIn * rightEase +
+          (motion.wave * (-70 + motion.waveSwing * 28) +
+            motion.cheer * (-58 + motion.waveSwing * 22) +
+            motion.salute * -105 +
+            motion.think * -92 +
+            motion.point * 6 +
+            motion.shrug * 35) *
+            DEG,
+      ),
+    );
+
+    rig.stepPhysics(dt);
   }
 }

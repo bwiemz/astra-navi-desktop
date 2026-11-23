@@ -961,6 +961,9 @@ export class Station {
     const route = `${request.method} ${path}`;
 
     if (route === "GET /") return this.sendPage(response);
+    if (route === "GET /manifest.webmanifest") return this.sendManifest(response);
+    if (route === "GET /apple-touch-icon.png") return await this.sendTouchIcon(response);
+    if (route === "GET /sw.js") return this.sendServiceWorker(response);
     if (route === "POST /pair") return this.pair(request, response, address);
     if (route === "POST /api/federation") return this.receiveFederation(request, response);
     const pass = /^\/app\/([A-Za-z0-9_-]{20,64})\/(?:astra-navi|ai-chan)\.apk$/.exec(path)?.[1];
@@ -1227,14 +1230,87 @@ export class Station {
         `script-src 'nonce-${nonce}'`,
         `style-src 'nonce-${nonce}'`,
         "connect-src 'self'",
+        "manifest-src 'self'",
+        "img-src 'self'",
+        "worker-src 'self'",
         "base-uri 'none'",
         "form-action 'none'",
         "frame-ancestors 'none'",
       ].join("; "),
       "X-Frame-Options": "DENY",
       "Cross-Origin-Opener-Policy": "same-origin",
+      Link: '</manifest.webmanifest>; rel="manifest", </apple-touch-icon.png>; rel="apple-touch-icon"',
     });
     response.end(stationPage(nonce));
+  }
+
+  private sendManifest(response: ServerResponse): void {
+    const body = JSON.stringify({
+      name: "Astra Navi Station",
+      short_name: "Astra Station",
+      description: "Local-first encrypted companion relay for phones on your home network.",
+      start_url: "/",
+      scope: "/",
+      display: "standalone",
+      background_color: "#1b1f3b",
+      theme_color: "#1b1f3b",
+      icons: [
+        {
+          src: "/apple-touch-icon.png",
+          sizes: "180x180",
+          type: "image/png",
+          purpose: "any",
+        },
+      ],
+    });
+    response.writeHead(200, {
+      ...PLAIN_HEADERS,
+      "Content-Type": "application/manifest+json; charset=utf-8",
+      "Content-Length": Buffer.byteLength(body),
+    });
+    response.end(body);
+  }
+
+  private async sendTouchIcon(response: ServerResponse): Promise<void> {
+    let iconBytes: Buffer;
+    try {
+      iconBytes = await readFile(join(import.meta.dirname, "..", "..", "assets", "icon.png"));
+    } catch {
+      // Valid 1x1 dark slate PNG fallback when packaged assets directory is absent in test harnesses.
+      iconBytes = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        "base64",
+      );
+    }
+    response.writeHead(200, {
+      ...PLAIN_HEADERS,
+      "Content-Type": "image/png",
+      "Content-Length": iconBytes.byteLength,
+    });
+    response.end(iconBytes);
+  }
+
+  private sendServiceWorker(response: ServerResponse): void {
+    // Strictly never caches credentials, tokens, sessions, or API calls; network pass-through only.
+    const swScript = [
+      'self.addEventListener("install", function () { self.skipWaiting(); });',
+      'self.addEventListener("activate", function (event) { event.waitUntil(self.clients.claim()); });',
+      'self.addEventListener("fetch", function (event) {',
+      '  if (event.request.method !== "GET") return;',
+      '  var url = new URL(event.request.url);',
+      '  if (url.origin !== self.location.origin) return;',
+      '  if (event.request.headers.get("authorization")) return;',
+      '  event.respondWith(fetch(event.request));',
+      "});",
+      "",
+    ].join("\n");
+    response.writeHead(200, {
+      ...PLAIN_HEADERS,
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Service-Worker-Allowed": "/",
+      "Content-Length": Buffer.byteLength(swScript),
+    });
+    response.end(swScript);
   }
 
   /** Finds the paired device a request comes from, or refuses it. */

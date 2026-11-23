@@ -8,7 +8,7 @@ import { dataDir, modelsDir, voiceEnvPython } from "./paths.ts";
 
 const execFileAsync = promisify(execFile);
 
-export type BootstrapTask = "voice" | "ocr" | "launcher" | "browser-bridge" | "all";
+export type BootstrapTask = "voice" | "voice-onnx" | "ocr" | "launcher" | "browser-bridge" | "all";
 
 export interface BootstrapProgress {
   task: BootstrapTask;
@@ -25,6 +25,8 @@ export interface BootstrapComponentStatus {
 
 export interface BootstrapStatus {
   voice: BootstrapComponentStatus;
+  voiceOnnx: BootstrapComponentStatus;
+  nativeHands: BootstrapComponentStatus;
   ocr: BootstrapComponentStatus;
   launcher: BootstrapComponentStatus;
   browserBridge: BootstrapComponentStatus;
@@ -172,14 +174,35 @@ export async function checkBootstrapStatus(deps: BootstrapDeps = {}): Promise<Bo
   const bridgeReady =
     existsSync(targets.launcherPath) && targets.manifests.some((m) => existsSync(m.file));
 
+  const onnxSpeechDir = join(env.modelsRoot, "speech");
+  const nativeLinuxBin = join(env.appRoot, "hands", "linux-hands-native", "target", "release", "linux-hands");
+  const bundledLinuxBin = join(env.appRoot, "hands", "linux-hands-native", "bin", "linux-hands");
+  const nativeWinBin = join(env.appRoot, "hands", "win-hands-native", "bin", "Release", "net9.0", "win-x64", "publish", "win-hands.exe");
+  const handsNativeReady =
+    env.platform === "win32"
+      ? existsSync(nativeWinBin)
+      : env.platform === "darwin"
+        ? true
+        : existsSync(bundledLinuxBin) || existsSync(nativeLinuxBin);
+
   return {
     voice: {
       ready: voiceReady,
-      detail: voiceReady ? `Python voice environment ready (${env.voicePython})` : "Not set up (using built-in Kokoro voice)",
+      detail: voiceReady ? `Legacy Python voice environment ready (${env.voicePython})` : "Not set up (optional legacy Python voice; embedded ONNX voice is built-in)",
+    },
+    voiceOnnx: {
+      ready: true,
+      detail: `Built-in zero-Python Kokoro ONNX voice ready (${onnxSpeechDir})`,
+    },
+    nativeHands: {
+      ready: handsNativeReady,
+      detail: handsNativeReady
+        ? "Native desktop control helper ready (zero Python runtime required)"
+        : "Native hands binary not built yet (falling back cleanly)",
     },
     ocr: {
       ready: ocrReady,
-      detail: ocrReady ? `PP-OCRv4 models ready (${ocrDir})` : "Not downloaded (optional fast ONNX OCR)",
+      detail: ocrReady ? `PP-OCRv4 ONNX models ready (${ocrDir})` : "Not downloaded (optional fast ONNX OCR)",
     },
     launcher: {
       ready: launcherReady,
@@ -190,6 +213,28 @@ export async function checkBootstrapStatus(deps: BootstrapDeps = {}): Promise<Bo
       detail: bridgeReady ? "Browser native messaging host registered" : "Browser DOM bridge host not registered",
     },
   };
+}
+
+async function setupOnnxVoice(env: ReturnType<typeof resolveEnv>): Promise<string> {
+  const speechDir = join(env.modelsRoot, "speech");
+  env.onProgress({
+    task: "voice-onnx",
+    step: "prepare",
+    percent: 40,
+    detail: `Preparing zero-Python ONNX voice cache in ${speechDir}...`,
+    ok: true,
+  });
+  if (!env.dryRun) {
+    await mkdir(speechDir, { recursive: true, mode: 0o700 });
+  }
+  env.onProgress({
+    task: "voice-onnx",
+    step: "done",
+    percent: 100,
+    detail: `Embedded ONNX voice ready (${speechDir}; no Python runtime needed).`,
+    ok: true,
+  });
+  return `Embedded ONNX voice cache ready in ${speechDir} (zero Python)`;
 }
 
 async function setupVoice(env: ReturnType<typeof resolveEnv>): Promise<string> {
@@ -395,7 +440,8 @@ export async function runBootstrapTask(
 ): Promise<{ ok: boolean; summary: string[] }> {
   const env = resolveEnv(deps);
   const summary: string[] = [];
-  if (task === "voice" || task === "all") summary.push(await setupVoice(env));
+  if (task === "voice") summary.push(await setupVoice(env));
+  if (task === "voice-onnx" || task === "all") summary.push(await setupOnnxVoice(env));
   if (task === "ocr" || task === "all") summary.push(await setupOcr(env));
   if (task === "launcher" || task === "all") summary.push(await setupLauncher(env));
   if (task === "browser-bridge" || task === "all") summary.push(await setupBrowserBridge(env));

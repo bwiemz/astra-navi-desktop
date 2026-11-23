@@ -3,6 +3,8 @@ out/
 dist/
 hands/win-hands-native/bin/
 hands/win-hands-native/obj/
+hands/linux-hands-native/bin/
+hands/linux-hands-native/target/
 *.log
 *.blend1
 __pycache__/

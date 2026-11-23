@@ -128,6 +128,8 @@ export interface PolicyContext {
   away?: boolean;
   /** Optional policy hook evaluated for signed SDK `plugin:` tool calls. */
   pluginPolicy?(toolName: string, input: unknown): Verdict;
+  /** Optional policy hook evaluated for native MCP `mcp:<server>.<tool>` calls. */
+  mcpPolicy?(toolName: string, input: unknown): Verdict;
 }
 
 // ---------- the verdict ----------
@@ -823,6 +825,25 @@ export async function toolVerdict(
           decision: "ask",
           sensitive: false,
           reason: `Plugin tool "${toolName}" has not been granted standing approval.`,
+        };
+      }
+      if (toolName.startsWith("mcp:")) {
+        if (context.mcpPolicy) {
+          const decided = context.mcpPolicy(toolName, input);
+          if (decided.decision === "allow" && context.readOutsideText) {
+            return {
+              decision: "ask",
+              sensitive: false,
+              reason:
+                "She has read outside text in this conversation, so check before running an MCP tool.",
+            };
+          }
+          return decided;
+        }
+        return {
+          decision: "ask",
+          sensitive: false,
+          reason: `MCP tool "${toolName}" requires confirmation before connecting or running.`,
         };
       }
       return {

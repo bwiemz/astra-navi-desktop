@@ -1633,5 +1633,17 @@ export const STATION_SCRIPT = String.raw`
         else { show("pair"); problem.textContent = "The pairing could not be carried over. Pair with a code from the PC instead."; }
       });
   } else if (token) { enter(""); } else { show("pair"); }
+
+  if (document.head) {
+    [["manifest", "/manifest.webmanifest"], ["apple-touch-icon", "/apple-touch-icon.png"]].forEach(function (pair) {
+      var el = document.createElement("link");
+      el.setAttribute("rel", pair[0]);
+      el.setAttribute("href", pair[1]);
+      document.head.appendChild(el);
+    });
+  }
+  if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
+    navigator.serviceWorker.register("/sw.js").catch(function () {});
+  }
 })();
 `;

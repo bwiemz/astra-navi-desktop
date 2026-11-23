@@ -1,6 +1,23 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { PlatformAdapter } from "./platform/adapter.ts";
+
+/** Locates the compiled Rust `linux-hands` binary when built locally or bundled alongside `hands/`. */
+export function resolveNativeLinuxHandsBinary(appRoot?: string): string | null {
+  if (process.env["ASTRA_NAVI_FORCE_PYTHON_HANDS"] === "1") return null;
+  const override = process.env["ASTRA_NAVI_LINUX_HANDS_BIN"];
+  if (override && existsSync(override)) return override;
+  const root = appRoot ? resolve(appRoot) : resolve(dirname(import.meta.dirname), "..");
+  for (const candidate of [
+    join(root, "hands", "linux-hands-native", "bin", "linux-hands"),
+    join(root, "hands", "linux-hands-native", "target", "release", "linux-hands"),
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
 
 /**
  * Her hands in other programs: the app's side of the small helper in `hands/hands.py`.
@@ -197,10 +214,16 @@ export class Hands {
     if (this.disposed) throw new Error("Her hands have been put away.");
     if (this.child) return this.child;
     const python = this.options.python ?? "python3";
+    const nativeBin =
+      !this.options.start && process.platform === "linux"
+        ? resolveNativeLinuxHandsBinary()
+        : null;
     const child =
       this.options.start?.(python, this.options.script) ??
-      // -I: the helper must not pick up modules from the current folder or the user's site.
-      spawn(python, ["-I", this.options.script], { stdio: ["pipe", "pipe", "pipe"] });
+      (nativeBin
+        ? spawn(nativeBin, [], { stdio: ["pipe", "pipe", "pipe"] })
+        : // -I: the helper must not pick up modules from the current folder or the user's site.
+          spawn(python, ["-I", this.options.script], { stdio: ["pipe", "pipe", "pipe"] }));
     this.child = child;
     const fail = (reason: string): void => {
       if (this.child !== child) return;

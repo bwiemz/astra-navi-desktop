@@ -3,6 +3,7 @@ import type { ControlList, Hands } from "../hands.ts";
 import type { MonitorChild } from "../notices.ts";
 import type { EarsProcess } from "../shipEars.ts";
 import { LinuxPlatformAdapter } from "./linux.ts";
+import { MacOsPlatformAdapter } from "./macos.ts";
 import { WindowsPlatformAdapter } from "./windows.ts";
 
 export interface PlatformAudioStream {
@@ -26,17 +27,16 @@ export interface PlatformGpuVramStatus {
   totalBytes: number;
   freeBytes: number;
   utilizationPercent?: number;
-  source: "nvml" | "dxgi" | "unknown";
+  source: "nvml" | "dxgi" | "metal" | "unknown";
 }
 
 /**
  * Strict cross-platform boundary isolating OS-specific plumbing (KWin/AT-SPI/PipeWire on
- * Linux; Win32/UIA/WGC/WASAPI/DXGI on Windows) so `core/` safety invariants—full-name
- * control matching, foreground-window re-verification before clicks, terminal typing blocks,
- * and hands-off enforcement—remain identical across operating systems.
+ * Linux; Win32/UIA/WGC/WASAPI/DXGI on Windows; JXA/AXUIElement/ScreenCaptureKit/Metal on
+ * macOS) so `core/` safety invariants remain identical across operating systems.
  */
 export interface PlatformAdapter {
-  readonly platform: "linux" | "win32";
+  readonly platform: "linux" | "win32" | "darwin";
   readonly windowManager: {
     layout(): Promise<DesktopLayout>;
     windowAt(x: number, y: number): Promise<{ id: string; app: string; title: string } | null>;
@@ -109,6 +109,9 @@ export function createPlatformAdapter(options: PlatformAdapterOptions): Platform
     return new WindowsPlatformAdapter({
       scriptPath: options.winScriptPath ?? "hands/win_hands.ps1",
     });
+  }
+  if (target === "darwin") {
+    return new MacOsPlatformAdapter();
   }
   return new LinuxPlatformAdapter({
     scriptDir: options.scriptDir,

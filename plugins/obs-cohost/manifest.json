@@ -1,0 +1,69 @@
+{
+  "id": "obs-cohost",
+  "name": "OBS & Twitch Co-Host",
+  "version": "1.0.0",
+  "author": "Astra Navi Contributors",
+  "description": "Optional live-stream co-host integration for OBS status, chat callouts, and approval-gated scene switches.",
+  "defaultEnabled": false,
+  "bridgeKind": "obs",
+  "bridges": ["obs", "mcp"],
+  "mcpServer": {
+    "transport": "http",
+    "url": "http://127.0.0.1:4455",
+    "readOnlyAutoAllow": true
+  },
+  "entry": "index.ts",
+  "permissions": ["connect_mcp", "read_active_window", "register_tool"],
+  "tools": [
+    {
+      "name": "plugin:obs.get_status",
+      "description": "Read current OBS streaming, recording, and scene status.",
+      "requiredScope": "connect_mcp",
+      "readOnly": true,
+      "endpointHost": "127.0.0.1"
+    },
+    {
+      "name": "plugin:obs.switch_scene",
+      "description": "Switch the active OBS broadcast scene (requires explicit approval).",
+      "requiredScope": "connect_mcp",
+      "readOnly": false,
+      "endpointHost": "127.0.0.1"
+    },
+    {
+      "name": "plugin:obs.highlight_chat",
+      "description": "Format a safe viewer question card and reaction for stream overlay.",
+      "requiredScope": "register_tool",
+      "readOnly": true
+    }
+  ],
+  "evalCases": [
+    {
+      "name": "read-only obs status allowed before outside text",
+      "tool": "plugin:obs.get_status",
+      "args": {},
+      "expectDecision": "allow"
+    },
+    {
+      "name": "scene switch requires approval",
+      "tool": "plugin:obs.switch_scene",
+      "args": { "scene": "BRB" },
+      "expectDecision": "ask"
+    },
+    {
+      "name": "read-only status escalates after reading untrusted text",
+      "tool": "plugin:obs.get_status",
+      "args": {},
+      "readOutsideText": true,
+      "expectDecision": "ask"
+    },
+    {
+      "name": "hands-off blocks external obs tool",
+      "tool": "plugin:obs.switch_scene",
+      "args": { "scene": "Ending" },
+      "handsOff": true,
+      "expectDecision": "blocked"
+    }
+  ],
+  "sha256": "a66b32bb33a534b9fd4c4b60a88e1bda6e90a094cbd7048a94f427b72d91af2c",
+  "evalCasesCount": 4
+}

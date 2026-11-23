@@ -169,6 +169,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y poppler-utils fd-find ripgrep rpm
           sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd
+      - name: Build native Rust Linux Hands helper
+        run: |
+          cargo build --release --offline --manifest-path hands/linux-hands-native/Cargo.toml
+          ./hands/linux-hands-native/target/release/linux-hands ping
+          ./hands/linux-hands-native/target/release/linux-hands version
+          mkdir -p hands/linux-hands-native/bin
+          cp hands/linux-hands-native/target/release/linux-hands hands/linux-hands-native/bin/linux-hands
       - run: npm ci
       - run: npm run check
       - run: npm run build

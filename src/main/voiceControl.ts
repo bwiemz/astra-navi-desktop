@@ -7,8 +7,8 @@ import { LANGUAGES, type LanguageCode } from "../core/languages.ts";
 import { modelsDir, voiceEnvPython } from "../core/paths.ts";
 import type { VoiceBackend } from "../core/voice/backend.ts";
 import { FullVoice } from "../core/voice/fullVoice.ts";
-import { LightVoice } from "../core/voice/lightVoice.ts";
 import { Listener } from "../core/voice/listener.ts";
+import { OnnxVoice } from "../core/voice/onnxVoice.ts";
 import { Speaker } from "../core/voice/speaker.ts";
 import { afterWakeName } from "../core/wakeName.ts";
 import type { BrainEvent, VoiceEvent } from "../shared/ipc.ts";
@@ -186,10 +186,14 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         }
       : null;
     fullVoiceReady = full !== null && (await FullVoice.isSetUp(full));
-    voiceBackend =
-      full && fullVoiceReady && voice.engine !== "light"
-        ? new FullVoice(full)
-        : new LightVoice({ cacheDir, voice: voice.name, speed: voice.speed });
+    const useLegacyPython =
+      full !== null &&
+      fullVoiceReady &&
+      voice.engine === "full" &&
+      process.env["ASTRA_NAVI_LEGACY_PYTHON_VOICE"] === "1";
+    voiceBackend = useLegacyPython
+      ? new FullVoice(full)
+      : new OnnxVoice({ cacheDir, voice: voice.design || voice.name, speed: voice.speed });
 
     speaker = new Speaker({
       backend: voiceBackend,

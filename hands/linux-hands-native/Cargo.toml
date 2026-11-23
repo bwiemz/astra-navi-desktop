@@ -1,0 +1,18 @@
+[package]
+name = "linux-hands"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Zero-dependency compiled native Linux desktop control & accessibility helper for Astra Navi Desktop"
+
+[[bin]]
+name = "linux-hands"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

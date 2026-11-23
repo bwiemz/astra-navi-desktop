@@ -22,6 +22,14 @@ jobs:
           sudo apt-get install -y poppler-utils fd-find ripgrep
           sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
+      - name: Build & smoke-test native Rust Linux Hands binary
+        run: |
+          cargo build --release --offline --manifest-path hands/linux-hands-native/Cargo.toml
+          ./hands/linux-hands-native/target/release/linux-hands ping
+          ./hands/linux-hands-native/target/release/linux-hands version
+          mkdir -p hands/linux-hands-native/bin
+          cp hands/linux-hands-native/target/release/linux-hands hands/linux-hands-native/bin/linux-hands
+
       - run: npm ci
       - run: npm run check
       - run: npm run build
@@ -66,6 +74,9 @@ jobs:
           tests/evalWorld.test.ts
           tests/dryRun.test.ts
           tests/permissions.test.ts
+          tests/vrmAndAnimation.test.ts
+          tests/mcpAndWorkshop.test.ts
+          tests/macosMlxIos.test.ts
 
   win-hands-native:
     runs-on: windows-latest
