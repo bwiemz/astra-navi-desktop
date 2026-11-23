@@ -250,7 +250,8 @@ export async function classifyCommand(
         // path leading somewhere else trips this.
         if (recursive && !isInside(path, workspace)) return "broad";
         // Device files never end (`/dev/zero`) or are not text; reading one is not a look-only act.
-        if (path.startsWith("/dev/") && path !== "/dev/null") deviceFile = true;
+        const posixDevice = path.split(sep).join("/").replace(/^[a-zA-Z]:(?=\/)/, "");
+        if (posixDevice.startsWith("/dev/") && posixDevice !== "/dev/null") deviceFile = true;
       }
     }
   }
