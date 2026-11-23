@@ -328,7 +328,10 @@ describe("Pillar 2, 3 & 4b: Native MCP bridge, Steam Workshop / Creator Packs, a
         trustedPublicKeysPem: [publicKey],
         evalContext: { workspace: dir, home: dir },
       });
-      expect(check.ok).toBe(true);
+      expect(check, check.ok ? undefined : check.reason).toEqual({
+        ok: true,
+        manifest,
+      });
 
       const registry = new PluginRegistry({ enabled: true, trustedPublicKeysPem: [publicKey] });
       expect((await registry.register({ manifest, signature: sig, entryBytes })).ok).toBe(true);
