@@ -7,7 +7,7 @@ Everything runs on your own computer. There is no account to create, no subscrip
 - **Codebase & Evaluation Suite:** Open-source under the **[MIT License](LICENSE)** ([`bwiemz/astra-navi-desktop`](https://github.com/bwiemz/astra-navi-desktop))
 - **Security Architecture & Audits:** Documented in **[SECURITY.md](SECURITY.md)** (`npm run eval -- --fuzz`, `npm run eval -- --audit`, and `tests/securityBoundariesAudit.test.ts`)
 - **Benchmarks & GPU Verification:** Live RTX PRO 4500 Blackwell 4B/9B/27B evals, grammar-guarded `Qwen3.5-9B` run (`85%` overall), prompt budgets, routing coverage, rolling catalog matrix, and empirical LoRA distillation results in **[evals/results/BENCHMARKS.md](evals/results/BENCHMARKS.md)**
-- **Default 3D Character & BYO VRM / MMD:** Ships with **Astra Navi** (`assets/models/ai-navigator/`, CC-BY-4.0 / MIT) plus three palette variants (`assets/models/variants/`), native **VRM 1.0** (`VRMC_springBone` + blendshapes), and encrypted **MMD `.pmx`** bundle support — see **[NOTICE.md](NOTICE.md)**
+- **Default 3D Character & BYO VRM / MMD:** Ships with compiled **Astra Navi** (`assets/models/ai-navigator/`, All-Rights-Reserved bundled-app asset license), native **VRM 1.0** (`VRMC_springBone` + blendshapes), and encrypted **MMD `.pmx`** bundle support — see **[NOTICE.md](NOTICE.md)**
 - **Cross-Platform Architecture:** Built behind a strict `PlatformAdapter` boundary (`src/core/platform/adapter.ts`) with verified Linux (KDE Plasma Wayland + Rust `linux-hands`) support, Windows `WinHands` NativeAOT backends, and experimental macOS/iOS preview stubs — see **[CONTRIBUTING.md](CONTRIBUTING.md)**
 
 ---
@@ -30,7 +30,7 @@ Everything runs on your own computer. There is no account to create, no subscrip
 - **Node.js 24 or newer.**
 - **A graphics card helps a lot.** With ~7 GB of VRAM, the 9B Standard brain answers in `< 2 s`; on 24–32 GB cards, the 27B Large brain fits cleanly. Without a discrete GPU, Astra still runs on CPU in Small mode (more slowly).
 - **Disk space:** 2.8 to 17 GB for the language brain you choose, plus ~0.5 GB for speech recognition (`Moonshine`/`Whisper`), `Kokoro-82M` ONNX TTS, and embeddings. Optional designed Python `Qwen3-TTS` voices add ~8.5 GB.
-- **3D Character (`Astra Navi` included, or BYO VRM 1.0 / MMD):** An original chibi navigator built procedurally in Blender (`95` bones, Foot/Toe IK, twist bones, `30` articulated finger bones, hair/skirt physics, `25` morphs) is bundled out of the box alongside three theme variants (`astral-midnight`, `sakura-nebula`, `solar-dawn`). You can import custom `.vrm` or `.pmx` models locally at any time — subject to each model's license terms.
+- **3D Character (`Astra Navi` included, or BYO VRM 1.0 / MMD):** An original chibi navigator (`95` bones, Foot/Toe IK, twist bones, `30` articulated finger bones, hair/skirt physics, `25` morphs) is bundled out of the box alongside three core synthetic voices (`aria`, `bright`, `perky`) and free reference plugins (`plugins/`). Paid Supporter Edition builds overlay extra palette variants, 7 extra voices, and storefront packages from the private `bwiemz/astra-navi-supporter` overlay repo during CI release builds. You can import custom `.vrm` or `.pmx` models locally at any time — subject to each model's license terms.
 
 ## Set Up & 60-Second Onboarding
 
@@ -100,8 +100,7 @@ npm run eval -- --fuzz         # 500-case deterministic security/taint fuzz gate
 npm run eval -- --audit        # Static policy & rule-conflict audit
 npm run prompt-size -- --ci    # Prompt & tool budget verifier
 npm run route-check            # Dynamic tool-router coverage & semantic benchmark
-npm run package:dry            # Verify release packaging manifest
-npm run publish:dry            # Verify store upload plan (GitHub / Steam / itch.io)
+npm run package:dry            # Verify release packaging manifest & detected overlay packs
 ```
 
 | Path | Contents |
@@ -112,7 +111,7 @@ npm run publish:dry            # Verify store upload plan (GitHub / Steam / itch
 | `src/main/` & `src/preload/` | Electron main process, encrypted `astranavi://` model loader, tray, IPC bridges, multi-monitor docking |
 | `src/renderer/` | 3D BabylonJS VRM 1.0 + MMD stage, spatial rooms/lighting/presence UI, Settings & 60s Onboarding Wizard |
 | `src/shared/` | Cross-process types, VRM 1.0 GLB/spring-bone solver (`vrm.ts`), spatial stage math (`spatialStage.ts`), gestures, and edition flags |
-| `assets/models/` | Original bundled **Astra Navi** asset (`ai-navigator/`) plus three variants (`variants/astral-midnight`, `sakura-nebula`, `solar-dawn`) |
+| `assets/models/` | Compiled default **Astra Navi** asset (`ai-navigator/`) under bundled-app asset license |
 | `plugins/` | Optional signed Creator Plugin Packs (`coding-companion`, `obs-cohost`; disabled by default) |
 | `hands/` | Native Rust `linux-hands-native/` helper, Linux `hands.py`, and `.NET 9` NativeAOT `win-hands-native/` helper |
 | `browser-bridge/` | Read-only WebExtension + Native Messaging host (`app.astranavi.dom_bridge`) + cross-platform installer |

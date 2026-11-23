@@ -1,5 +1,12 @@
 export type Edition = "community" | "supporter";
 
+export interface BundledPackInventory {
+  variantIds: string[];
+  voicePresets: string[];
+  tunedLoraFiles: string[];
+  hasSupporterOverlay: boolean;
+}
+
 export interface EditionFeatures {
   edition: Edition;
   // Core open-source capabilities: always enabled in every edition
@@ -10,15 +17,75 @@ export interface EditionFeatures {
   offlineEvalSuite: true;
   localLoraTrainer: true;
   mobileStation: true;
-  // Storefront distribution conveniences & optional supporter perks:
-  // `preTunedLoraPack` only ships when a LoRA checkpoint clears `npm run eval -- --compare`;
-  // v1.0.0 distributes verified baseline GGUF weights without a tuned adapter.
+  // Build/distribution flags: govern storefront packaging behavior (disabling GitHub update nags
+  // on Steam/itch.io) and auto-detect overlaid packs rather than enforcing client-side DRM booleans.
   preTunedLoraPack: boolean;
   supporterAvatarPacks: boolean;
   storeAutoUpdate: boolean;
   signedInstallers: boolean;
   prebuiltAndroidApk: boolean;
   packagedBrowserBridge: boolean;
+}
+
+function joinSubpath(root: string, ...parts: string[]): string {
+  const cleanRoot = root.replace(/[\\/]+$/, "");
+  const suffix = parts.map((p) => p.replace(/^[\\/]+|[\\/]+$/g, "")).filter(Boolean).join("/");
+  return cleanRoot ? `${cleanRoot}/${suffix}` : suffix;
+}
+
+/**
+ * Pure filesystem-callback helper that detects optional overlaid asset packs
+ * (`variants/`, extra voice presets beyond the 3 core public voices, and optional `assets/lora/`).
+ */
+export function detectBundledPacks(options: {
+  bundledRoot: string;
+  exists?: (path: string) => boolean;
+  readDir?: (path: string) => string[];
+}): BundledPackInventory {
+  const readDirSafe = (dir: string): string[] => {
+    try {
+      return options.readDir ? [...options.readDir(dir)] : [];
+    } catch {
+      return [];
+    }
+  };
+  const existsSafe = (path: string): boolean => {
+    try {
+      return options.exists ? options.exists(path) : false;
+    } catch {
+      return false;
+    }
+  };
+
+  const variantsDir = joinSubpath(options.bundledRoot, "assets", "models", "variants");
+  const variantIds = readDirSafe(variantsDir)
+    .filter((entry) => !entry.startsWith("."))
+    .filter((entry) => {
+      const manifestPath = joinSubpath(variantsDir, entry, "manifest.json");
+      return options.exists ? existsSafe(manifestPath) : true;
+    })
+    .sort();
+
+  const voiceDir = joinSubpath(options.bundledRoot, "assets", "voice");
+  const voicePresets = readDirSafe(voiceDir)
+    .filter((name) => name.endsWith(".wav"))
+    .map((name) => name.slice(0, -".wav".length))
+    .sort();
+
+  const loraDir = joinSubpath(options.bundledRoot, "assets", "lora");
+  const tunedLoraFiles = readDirSafe(loraDir)
+    .filter((name) => /\.(gguf|safetensors|bin)$/i.test(name) && !name.startsWith("."))
+    .sort();
+
+  const hasSupporterOverlay =
+    variantIds.length > 0 || tunedLoraFiles.length > 0 || voicePresets.length > 3;
+
+  return {
+    variantIds,
+    voicePresets,
+    tunedLoraFiles,
+    hasSupporterOverlay,
+  };
 }
 
 /**
@@ -87,7 +154,10 @@ export function shouldCheckGithubUpdates(
   return detectDistributionChannel(env, exists) === "standalone";
 }
 
-export function editionFeatures(edition: Edition): EditionFeatures {
+export function editionFeatures(
+  edition: Edition,
+  bundledPacks?: BundledPackInventory,
+): EditionFeatures {
   const isSupporter = edition === "supporter";
   return {
     edition,
@@ -98,8 +168,8 @@ export function editionFeatures(edition: Edition): EditionFeatures {
     offlineEvalSuite: true,
     localLoraTrainer: true,
     mobileStation: true,
-    preTunedLoraPack: isSupporter,
-    supporterAvatarPacks: isSupporter,
+    preTunedLoraPack: bundledPacks ? bundledPacks.tunedLoraFiles.length > 0 : isSupporter,
+    supporterAvatarPacks: bundledPacks ? bundledPacks.variantIds.length > 0 : isSupporter,
     storeAutoUpdate: isSupporter,
     signedInstallers: isSupporter,
     prebuiltAndroidApk: isSupporter,

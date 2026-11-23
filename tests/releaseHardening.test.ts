@@ -1,5 +1,6 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -27,17 +28,6 @@ import { detectDistributionChannel } from "../src/shared/edition.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const GIB = 1024 ** 3;
-
-function readPngDimensions(buf: Buffer): { width: number; height: number } {
-  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  if (buf.length < 24 || !buf.subarray(0, 8).equals(sig)) {
-    throw new Error("Invalid PNG header");
-  }
-  return {
-    width: buf.readUInt32BE(16),
-    height: buf.readUInt32BE(20),
-  };
-}
 
 function parseXmlStringKeys(xml: string): string[] {
   const names: string[] = [];
@@ -415,55 +405,78 @@ describe("pre-launch release hardening, mobile QR/mDNS, profile backup, variants
     expect(mainJava).toContain("_astranavi._tcp.");
   });
 
-  it("ships 3 valid Supporter character variants that pack and verify as signed .bundle archives", async () => {
-    const work = await mkdtemp(join(tmpdir(), "astranavi-variants-"));
+  it("ships valid default Astra Navi asset under All-Rights-Reserved bundled license and packs cleanly", async () => {
+    const work = await mkdtemp(join(tmpdir(), "astranavi-default-asset-"));
     try {
       const { publicKey, privateKey } = generateKeyPairSync("ed25519", {
         publicKeyEncoding: { type: "spki", format: "pem" },
         privateKeyEncoding: { type: "pkcs8", format: "pem" },
       });
 
-      for (const id of ["astral-midnight", "solar-dawn", "sakura-nebula"]) {
-        const dir = join(ROOT, "assets", "models", "variants", id);
-        const manifestJson = JSON.parse(await readFile(join(dir, "manifest.json"), "utf8")) as unknown;
-        const parsed = CharacterBundleManifestSchema.parse(manifestJson);
-        expect(parsed.id).toBe(id);
+      const dir = join(ROOT, "assets", "models", "ai-navigator");
+      const manifestJson = JSON.parse(await readFile(join(dir, "manifest.json"), "utf8")) as unknown;
+      const parsed = CharacterBundleManifestSchema.parse(manifestJson);
+      expect(parsed.id).toBe("astra-navi-chibi");
+      expect(parsed.license).toMatch(/All-Rights-Reserved/i);
 
-        const inspected = await inspectCharacterBundle(dir);
-        expect(inspected.ok).toBe(true);
+      const licenseTxt = await readFile(join(dir, "LICENSE.txt"), "utf8");
+      expect(licenseTxt).toContain("All Rights Reserved");
+      expect(licenseTxt).toContain("excluded from");
+      expect(existsSync(join(dir, "ai-navigator.blend"))).toBe(false);
 
-        const bundleOut = join(work, `${id}.bundle`);
-        const packed = await packSignedCharacterBundle(dir, bundleOut, { privateKeyPem: privateKey });
-        expect(packed.files).toBeGreaterThanOrEqual(8);
+      const inspected = await inspectCharacterBundle(dir);
+      expect(inspected.ok).toBe(true);
 
-        const opened = await openSignedCharacterBundle(bundleOut, {
-          trustedPublicKeysPem: [publicKey],
-          requireSignature: true,
-        });
-        expect(opened.verifiedSignature).toBe(true);
-        expect(opened.manifest.id).toBe(id);
-      }
+      const bundleOut = join(work, "astra-navi.bundle");
+      const packed = await packSignedCharacterBundle(dir, bundleOut, { privateKeyPem: privateKey });
+      expect(packed.files).toBeGreaterThanOrEqual(8);
+
+      const opened = await openSignedCharacterBundle(bundleOut, {
+        trustedPublicKeysPem: [publicKey],
+        requireSignature: true,
+      });
+      expect(opened.verifiedSignature).toBe(true);
+      expect(opened.manifest.id).toBe("astra-navi-chibi");
     } finally {
       await rm(work, { recursive: true, force: true });
     }
   });
 
-  it("includes exact-dimension store capsules and <10 MB trailer in store/assets/", async () => {
-    const expectedDims: [string, number, number][] = [
-      ["steam-header-capsule.png", 920, 430],
-      ["steam-main-capsule.png", 1232, 706],
-      ["steam-small-capsule.png", 462, 174],
-      ["steam-vertical-capsule.png", 748, 896],
-      ["steam-library-hero.png", 1920, 620],
-      ["itch-cover.png", 630, 500],
-    ];
-    for (const [file, width, height] of expectedDims) {
-      const buf = await readFile(join(ROOT, "store", "assets", file));
-      expect(readPngDimensions(buf)).toEqual({ width, height });
+  it("enforces two-repo open-core boundary and .gitignore secret/checkpoint hygiene", async () => {
+    for (const privatePath of [
+      "assets/models/variants",
+      "assets/models/ai-navigator/ai-navigator.blend",
+      "scripts/blender",
+      "scripts/build-character-variants.ts",
+      "scripts/build-store-assets.ts",
+      "scripts/publish-store.ts",
+      "store",
+      "build/steam",
+    ]) {
+      expect(existsSync(join(ROOT, privatePath)), `Private path leaked into public repo: ${privatePath}`).toBe(false);
     }
 
-    const trailerInfo = await stat(join(ROOT, "store", "assets", "astra-navi-trailer.mp4"));
-    expect(trailerInfo.size).toBeGreaterThan(50_000);
-    expect(trailerInfo.size).toBeLessThan(10 * 1024 * 1024);
+    const voiceFiles = (await readdir(join(ROOT, "assets", "voice"))).filter((f) => f.endsWith(".wav")).sort();
+    expect(voiceFiles).toEqual(["aria.wav", "bright.wav", "perky.wav"]);
+
+    for (const dir of ["train", "voice-server"]) {
+      const entries = await readdir(join(ROOT, dir));
+      expect(entries.some((name) => /\.(safetensors|gguf|pt|pth|ckpt)$/i.test(name))).toBe(false);
+    }
+
+    const gitignore = await readFile(join(ROOT, ".gitignore"), "utf8");
+    for (const rule of [
+      "*.p12",
+      "*.jks",
+      "*.keystore",
+      "*.pfx",
+      "*.safetensors",
+      "*.gguf",
+      ".env",
+      "*.blend",
+      "assets/models/variants/",
+    ]) {
+      expect(gitignore).toContain(rule);
+    }
   });
 });

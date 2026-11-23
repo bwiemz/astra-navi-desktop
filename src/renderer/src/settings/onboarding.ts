@@ -1,18 +1,7 @@
 import type { SettingsPatch, SettingsView } from "../../../shared/settings.ts";
 import { bridge, element, fill } from "./dom.ts";
 
-const BUNDLED_VOICE_NAMES: readonly string[] = [
-  "aria",
-  "bright",
-  "lively",
-  "lumi",
-  "melody",
-  "nova",
-  "perky",
-  "stella",
-  "sweet",
-  "vega",
-];
+const BUNDLED_VOICE_NAMES: readonly string[] = ["aria", "bright", "perky"];
 
 let latestView: SettingsView | null = null;
 let wizardStep = 1;

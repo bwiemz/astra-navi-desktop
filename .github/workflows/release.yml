@@ -181,6 +181,28 @@ jobs:
       - run: npm run build
       - run: npm run eval -- --fuzz
       - run: npm run eval -- --audit
+      - name: Verify Supporter overlay secret when building Supporter Edition
+        if: ${{ inputs.edition == 'supporter' }}
+        env:
+          SUPPORTER_OVERLAY_TOKEN: ${{ secrets.SUPPORTER_OVERLAY_TOKEN }}
+        run: |
+          if [[ -z "${SUPPORTER_OVERLAY_TOKEN}" ]]; then
+            echo "::error::SUPPORTER_OVERLAY_TOKEN secret is required for edition=supporter to check out bwiemz/astra-navi-supporter."
+            exit 1
+          fi
+      - name: Checkout private Supporter overlay
+        if: ${{ inputs.edition == 'supporter' }}
+        uses: actions/checkout@v4
+        with:
+          repository: bwiemz/astra-navi-supporter
+          path: _supporter
+          token: ${{ secrets.SUPPORTER_OVERLAY_TOKEN }}
+          persist-credentials: false
+      - name: Apply Supporter overlay & clean staging directory
+        if: ${{ inputs.edition == 'supporter' }}
+        run: |
+          cp -a _supporter/overlay/. .
+          rm -rf _supporter
       - name: Package Linux AppImage & .deb
         env:
           ASTRA_NAVI_EDITION: ${{ inputs.edition || 'community' }}
@@ -213,6 +235,29 @@ jobs:
       - run: npm run build
       - run: npm run eval -- --fuzz
       - run: npm run eval -- --audit
+      - name: Verify Supporter overlay secret when building Supporter Edition
+        if: ${{ inputs.edition == 'supporter' }}
+        shell: pwsh
+        env:
+          SUPPORTER_OVERLAY_TOKEN: ${{ secrets.SUPPORTER_OVERLAY_TOKEN }}
+        run: |
+          if (-not $env:SUPPORTER_OVERLAY_TOKEN) {
+            throw "SUPPORTER_OVERLAY_TOKEN secret is required for edition=supporter to check out bwiemz/astra-navi-supporter."
+          }
+      - name: Checkout private Supporter overlay
+        if: ${{ inputs.edition == 'supporter' }}
+        uses: actions/checkout@v4
+        with:
+          repository: bwiemz/astra-navi-supporter
+          path: _supporter
+          token: ${{ secrets.SUPPORTER_OVERLAY_TOKEN }}
+          persist-credentials: false
+      - name: Apply Supporter overlay & clean staging directory
+        if: ${{ inputs.edition == 'supporter' }}
+        shell: pwsh
+        run: |
+          Copy-Item -Path "_supporter/overlay/*" -Destination "." -Recurse -Force
+          Remove-Item -Path "_supporter" -Recurse -Force
       - name: Package Windows NSIS & Portable
         shell: pwsh
         env:

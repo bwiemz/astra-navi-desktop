@@ -8,10 +8,15 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { editionFeatures, resolveEdition, type Edition } from "../src/shared/edition.ts";
+import {
+  detectBundledPacks,
+  editionFeatures,
+  resolveEdition,
+  type Edition,
+} from "../src/shared/edition.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 
@@ -63,7 +68,12 @@ const platform = (parseFlag("--platform") ?? (process.platform === "win32" ? "wi
   | "win"
   | "all";
 
-const features = editionFeatures(edition);
+const bundledPacks = detectBundledPacks({
+  bundledRoot: ROOT,
+  exists: existsSync,
+  readDir: (dir) => readdirSync(dir),
+});
+const features = editionFeatures(edition, bundledPacks);
 const nativeExe = join(ROOT, "hands", "win-hands-native", "bin", "Release", "net9.0", "win-x64", "publish", "win-hands.exe");
 const apk = join(ROOT, "phone-app", "build", "astra-navi.apk");
 const winIcon = join(ROOT, "assets", "icon.ico");
@@ -73,6 +83,7 @@ const extFirefoxZip = join(ROOT, "dist", "astra-navi-browser-bridge-firefox-0.1.
 const plan = {
   edition,
   features,
+  bundledPacks,
   platform,
   dryRun,
   checksums: generateChecksums,
@@ -97,6 +108,12 @@ if (dryRun) {
   process.exit(0);
 }
 
+if (edition === "supporter" && bundledPacks.variantIds.length === 0) {
+  throw new Error(
+    "Supporter Edition build requested, but no Supporter overlay variants were found under assets/models/variants/. Apply bwiemz/astra-navi-supporter overlay/ first (or configure SUPPORTER_OVERLAY_TOKEN in CI).",
+  );
+}
+
 await runCommand("npm", ["run", "build"]);
 await runCommand(process.execPath, [join(ROOT, "scripts", "package-extension.ts")]);
 
@@ -104,7 +121,7 @@ const distDir = join(ROOT, "dist");
 await mkdir(distDir, { recursive: true });
 await writeFile(
   join(distDir, "edition-manifest.json"),
-  `${JSON.stringify({ edition, features, builtAt: new Date().toISOString() }, null, 2)}\n`,
+  `${JSON.stringify({ edition, features, bundledPacks, builtAt: new Date().toISOString() }, null, 2)}\n`,
   "utf8",
 );
 

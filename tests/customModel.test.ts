@@ -150,7 +150,7 @@ describe("custom distributable chibi AI navigator model", () => {
     expect(inspection.ok).toBe(true);
     expect(inspection.manifest?.id).toBe("astra-navi-chibi");
     expect(inspection.manifest?.version).toBe("2.0.0");
-    expect(inspection.manifest?.license).toBe("CC-BY-4.0 / MIT");
+    expect(inspection.manifest?.license).toBe("All-Rights-Reserved (Bundled-App Asset License; see LICENSE.txt)");
     expect(inspection.modelInfo?.name).toBe("Astra Navi");
 
     const bundle = await openLooseModelFolder(PMX_PATH);

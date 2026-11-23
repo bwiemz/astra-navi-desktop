@@ -3,11 +3,11 @@
 ## Codebase & Bundled Character License
 
 - **Core Codebase & Evaluation Suite:** Licensed under the **MIT License** ([LICENSE](LICENSE)). Open-core, local-first, and independent.
-- **Bundled Original 3D Character (`Astra Navi`) & Supporter Variants:** Located in [`assets/models/ai-navigator/`](assets/models/ai-navigator/LICENSE.txt) and [`assets/models/variants/`](assets/models/variants/) (`astral-midnight`, `sakura-nebula`, `solar-dawn`), licensed under **CC-BY-4.0 / MIT**. Astra Navi and her textures were procedurally created and rigged from scratch using Blender (`scripts/blender/build_navigator_mmd.py`, `scripts/build-character-variants.ts`) with 100% original geometry, textures, and shaders so the application works out of the box without third-party assets.
+- **Bundled Original 3D Character (`Astra Navi`):** Compiled model and textures located in [`assets/models/ai-navigator/`](assets/models/ai-navigator/LICENSE.txt), excluded from the MIT code license under an **All-Rights-Reserved Bundled-App Asset License** (unmodified redistribution permitted solely as the default bundled character inside Astra Navi Desktop; source `.blend` rig, palette variants, and storefront packages live in the private Supporter overlay repository).
 
 ## Bring-Your-Own VRM & MMD Models
 
-`.gitignore` blocks arbitrary third-party character model binaries (`.pmx`, `.pmd`, `.fbx`, `.vrm`, `.aichan`, `.astranavi`, `.bpmx`) from being committed to this repository while explicitly allowing the original `assets/models/ai-navigator/ai-navigator.pmx` and first-party variants.
+`.gitignore` blocks arbitrary third-party character model binaries (`.pmx`, `.pmd`, `.fbx`, `.vrm`, `.aichan`, `.astranavi`, `.bpmx`) and source `.blend` rigs from being committed to this repository while explicitly allowing the compiled default `assets/models/ai-navigator/ai-navigator.pmx`.
 
 Users may supply any `.vrm` (VRM 1.0 / 0.x) or `.pmx` MMD model they are permitted to use and import it locally (`Import character model…` in the tray or `npm run import-model`). Importing packs the user-supplied model and its textures into one authenticated, encrypted local bundle in that user's data folder (`~/.local/share/astra-navi/`, with automatic fallback for existing `~/.local/share/ai-chan/` installs):
 

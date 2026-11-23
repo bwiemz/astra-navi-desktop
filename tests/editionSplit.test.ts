@@ -1,5 +1,9 @@
+import { existsSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { editionFeatures, resolveEdition } from "../src/shared/edition.ts";
+import { detectBundledPacks, editionFeatures, resolveEdition } from "../src/shared/edition.ts";
+
+const ROOT = resolve(import.meta.dirname, "..");
 
 describe("Open-Core vs Supporter Edition Split", () => {
   it("defaults to community edition and never gates security, evals, training, or BYO-MMD", () => {
@@ -31,5 +35,64 @@ describe("Open-Core vs Supporter Edition Split", () => {
     expect(supporter.signedInstallers).toBe(true);
     expect(supporter.prebuiltAndroidApk).toBe(true);
     expect(supporter.packagedBrowserBridge).toBe(true);
+  });
+
+  it("detects overlaid packs in the public community tree vs a simulated Supporter overlay", () => {
+    const publicPacks = detectBundledPacks({
+      bundledRoot: ROOT,
+      exists: existsSync,
+      readDir: (dir) => readdirSync(dir),
+    });
+    expect(publicPacks.variantIds).toEqual([]);
+    expect(publicPacks.voicePresets).toEqual(["aria", "bright", "perky"]);
+    expect(publicPacks.tunedLoraFiles).toEqual([]);
+    expect(publicPacks.hasSupporterOverlay).toBe(false);
+
+    const publicFeatures = editionFeatures("community", publicPacks);
+    expect(publicFeatures.supporterAvatarPacks).toBe(false);
+    expect(publicFeatures.preTunedLoraPack).toBe(false);
+
+    const supporterOverlay = detectBundledPacks({
+      bundledRoot: "/opt/supporter-app",
+      exists: (path) =>
+        path.endsWith("/astral-midnight/manifest.json") ||
+        path.endsWith("/sakura-nebula/manifest.json") ||
+        path.endsWith("/solar-dawn/manifest.json"),
+      readDir: (dir) => {
+        if (dir.endsWith("/assets/models/variants")) {
+          return ["astral-midnight", "sakura-nebula", "solar-dawn", ".gitkeep"];
+        }
+        if (dir.endsWith("/assets/voice")) {
+          return [
+            "aria.wav",
+            "bright.wav",
+            "lively.wav",
+            "lumi.wav",
+            "melody.wav",
+            "nova.wav",
+            "perky.wav",
+            "stella.wav",
+            "sweet.wav",
+            "vega.wav",
+          ];
+        }
+        if (dir.endsWith("/assets/lora")) {
+          return ["router-v1.safetensors", ".gitkeep"];
+        }
+        return [];
+      },
+    });
+    expect(supporterOverlay.variantIds).toEqual([
+      "astral-midnight",
+      "sakura-nebula",
+      "solar-dawn",
+    ]);
+    expect(supporterOverlay.voicePresets).toHaveLength(10);
+    expect(supporterOverlay.tunedLoraFiles).toEqual(["router-v1.safetensors"]);
+    expect(supporterOverlay.hasSupporterOverlay).toBe(true);
+
+    const supporterFeatures = editionFeatures("supporter", supporterOverlay);
+    expect(supporterFeatures.supporterAvatarPacks).toBe(true);
+    expect(supporterFeatures.preTunedLoraPack).toBe(true);
   });
 });

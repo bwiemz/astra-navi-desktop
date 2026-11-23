@@ -39,7 +39,6 @@ jobs:
       - run: npm run prompt-size -- --ci
       - run: npm run route-check -- --words-only
       - run: npm run package:dry
-      - run: npm run publish:dry
 
   verify-windows:
     runs-on: windows-latest
@@ -60,7 +59,6 @@ jobs:
       - run: npm run prompt-size -- --ci
       - run: npm run route-check -- --words-only
       - run: npm run package:dry
-      - run: npm run publish:dry
       - name: Run Windows & cross-platform Vitest suites
         run: >
           npx vitest run

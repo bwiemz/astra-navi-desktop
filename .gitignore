@@ -11,11 +11,14 @@ __pycache__/
 *.pyc
 .ruff_cache/
 
-# Keep third-party character model files out of git while shipping our original Astra Navi asset.
+# Keep third-party & Supporter overlay character model files out of public git
+# while shipping our original compiled default Astra Navi asset.
 model-src/
+assets/models/variants/
+_supporter/
+*.blend
 *.pmx
 !assets/models/ai-navigator/ai-navigator.pmx
-!assets/models/variants/*/ai-navigator.pmx
 *.pmd
 *.fbx
 *.vrm
@@ -38,11 +41,17 @@ evals/results/*
 !evals/results/README.md
 !evals/results/BENCHMARKS.md
 
-# Signing keys, keystores, and proprietary Steamworks SDK must never enter git.
+# Signing keys, keystores, local trained weights, env files, and proprietary Steamworks SDK must never enter git.
 *.p12
 *.jks
 *.keystore
 *.pfx
 *.cer
 *.snk
+.env
+.env.*
+*.safetensors
+*.gguf
+*.pt
+*.pth
 steamworks-sdk/

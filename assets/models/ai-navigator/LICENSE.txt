@@ -1,5 +1,13 @@
 Astra Navi — Original Chibi AI Navigator MMD Model
 Created from scratch for Astra Navi Desktop.
-License: Creative Commons Attribution 4.0 (CC-BY-4.0) / MIT.
-Free for personal and commercial redistribution with the software.
+License: All Rights Reserved — Bundled-App Asset License.
+
+While the Astra Navi Desktop source code is licensed under MIT, this original character
+design, compiled `ai-navigator.pmx` model, and accompanying textures are excluded from
+the MIT license.
+
+Permitted: Running and redistributing these unmodified files solely as the default bundled
+character inside Astra Navi Desktop builds.
+Prohibited without written permission: Extracting, reselling, training derivative commercial
+clones on, or reusing the Astra Navi character assets in third-party games, apps, or packs.
 No third-party or proprietary game assets used.
