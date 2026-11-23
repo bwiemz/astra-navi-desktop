@@ -1,11 +1,24 @@
 {
   "manifest_version": 3,
-  "name": "AI-chan Local DOM Bridge",
+  "name": "Astra Navi Local DOM Bridge",
   "version": "0.1.0",
-  "description": "Read-only local DOM and media companion communicating strictly via native messaging with AI-chan Desktop.",
-  "permissions": ["activeTab", "nativeMessaging"],
-  "host_permissions": [],
+  "description": "Read-only local DOM and media companion communicating strictly via native messaging with Astra Navi Desktop.",
+  "permissions": ["activeTab", "scripting", "nativeMessaging"],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "dom-bridge@astranavi.app",
+      "strict_min_version": "115.0"
+    }
   }
 }

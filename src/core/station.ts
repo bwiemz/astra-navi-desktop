@@ -360,7 +360,7 @@ async function makeWithOpenssl(dir: string, addresses: string[]): Promise<void> 
           "-days",
           "3650",
           "-subj",
-          "/CN=AI-chan station",
+          "/CN=Astra Navi station",
           "-addext",
           `subjectAltName=${names.map((entry) => `IP:${entry}`).join(",")}`,
         ],
@@ -947,7 +947,7 @@ export class Station {
     if (route === "GET /") return this.sendPage(response);
     if (route === "POST /pair") return this.pair(request, response, address);
     if (route === "POST /api/federation") return this.receiveFederation(request, response);
-    const pass = /^\/app\/([A-Za-z0-9_-]{20,64})\/ai-chan\.apk$/.exec(path)?.[1];
+    const pass = /^\/app\/([A-Za-z0-9_-]{20,64})\/(?:astra-navi|ai-chan)\.apk$/.exec(path)?.[1];
     if (request.method === "GET" && pass) return this.sendApp(response, pass, address);
     if (ACCOUNT_ROUTES.has(route)) {
       const device = this.authenticate(request, address);
@@ -1340,7 +1340,7 @@ export class Station {
     if (this.appPasses.size >= 20) throw new Refusal(429, "Try again in a couple of minutes.");
     const pass = randomBytes(24).toString("base64url");
     this.appPasses.set(pass, now + APP_PASS_MS);
-    sendJson(response, 200, { path: `/app/${pass}/ai-chan.apk`, version: app.version });
+    sendJson(response, 200, { path: `/app/${pass}/astra-navi.apk`, version: app.version });
   }
 
   private async sendApp(response: ServerResponse, pass: string, address: string): Promise<void> {
@@ -1360,7 +1360,7 @@ export class Station {
       ...PLAIN_HEADERS,
       "Content-Type": "application/vnd.android.package-archive",
       "Content-Length": size,
-      "Content-Disposition": 'attachment; filename="ai-chan.apk"',
+      "Content-Disposition": 'attachment; filename="astra-navi.apk"',
     });
     await new Promise<void>((resolve) => {
       const file = handle.createReadStream({ start: 0, end: Math.max(0, size - 1) });

@@ -118,12 +118,14 @@ export function createModelFiles(deps: ModelFilesDeps): ModelFiles {
   }
 
   function registerProtocol(): void {
-    protocol.handle(deps.scheme, (request) => {
+    const handle = (request: Request): Promise<Response> | Response => {
       const url = new URL(request.url);
       if (url.host === "model") return serveModelFile(url);
       if (url.host === "app") return serveAppFile(url);
       return new Response(null, { status: 404 });
-    });
+    };
+    protocol.handle(deps.scheme, handle);
+    if (deps.scheme !== "aichan") protocol.handle("aichan", handle);
   }
 
   /** One import at a time: a second request while its dialogs are open is not a second import. */
@@ -137,7 +139,7 @@ export function createModelFiles(deps: ModelFilesDeps): ModelFiles {
       title: "Import a character model",
       message: "Choose the model's .pmx file",
       detail:
-        "Use a model you are permitted to use, such as an official fan-use release, and follow its terms.\n\n" +
+        "Use a .pmx/.pmd model you are permitted to use and follow its creator's license terms.\n\n" +
         "The model and its textures are packed into one encrypted file that only opens on this computer, " +
         "for this user account. The app never shares, uploads or exposes the raw model files.\n\n" +
         UNOFFICIAL_NOTICE,

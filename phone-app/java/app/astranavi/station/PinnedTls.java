@@ -1,4 +1,4 @@
-package fan.aichan.station;
+package app.astranavi.station;
 
 import java.io.IOException;
 import java.net.URI;

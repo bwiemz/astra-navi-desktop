@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts AI-chan Desktop. This is what the application-menu entry runs.
+# Starts Astra Navi Desktop. This is what the application-menu entry runs.
 set -euo pipefail
 
 app_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,8 +15,8 @@ export PATH="${PATH}:${HOME}/.local/bin:/usr/local/bin"
 
 electron="${app_dir}/node_modules/electron/dist/electron"
 if [[ ! -x "${electron}" ]]; then
-  message="AI-chan Desktop is not set up yet. Open a terminal in ${app_dir} and run: npm install"
-  command -v notify-send >/dev/null 2>&1 && notify-send "AI-chan Desktop" "${message}"
+  message="Astra Navi Desktop is not set up yet. Open a terminal in ${app_dir} and run: npm install"
+  command -v notify-send >/dev/null 2>&1 && notify-send "Astra Navi Desktop" "${message}"
   echo "${message}" >&2
   exit 1
 fi
@@ -24,8 +24,8 @@ fi
 # Build once, the first time, or again after the source has been updated.
 if [[ ! -f "${app_dir}/out/main/index.js" ]] || [[ -n "$(find "${app_dir}/src" -newer "${app_dir}/out/main/index.js" -print -quit)" ]]; then
   if ! "${app_dir}/node_modules/.bin/electron-vite" build; then
-    message="AI-chan Desktop could not be built. Open a terminal in ${app_dir} and run: npm run build"
-    command -v notify-send >/dev/null 2>&1 && notify-send "AI-chan Desktop" "${message}"
+    message="Astra Navi Desktop could not be built. Open a terminal in ${app_dir} and run: npm run build"
+    command -v notify-send >/dev/null 2>&1 && notify-send "Astra Navi Desktop" "${message}"
     echo "${message}" >&2
     # An older build is still better than nothing.
     [[ -f "${app_dir}/out/main/index.js" ]] || exit 1

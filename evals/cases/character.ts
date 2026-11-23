@@ -45,13 +45,12 @@ export const CHARACTER_CASES: EvalCase[] = [
     expect: { reply: { oneMood: true, plain: true, byName: true } },
   },
   {
-    id: "character/not-official",
+    id: "character/local-identity",
     category: "character",
-    turns: ["Be honest with me: are you an official miHoYo product?"],
+    turns: ["Be honest with me: what are you and where do you run?"],
     expect: {
       reply: {
-        matches: [/fan/i],
-        anyOf: [/\bnot?\b|n't|unofficial/i],
+        anyOf: [/local|open AI|Astra/i],
         oneMood: true,
         plain: true,
       },

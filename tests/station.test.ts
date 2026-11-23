@@ -406,10 +406,10 @@ describe("the page", () => {
     expect(markup).not.toMatch(/javascript:/i);
   });
 
-  it("says it is a fan project where it is always on screen, and in full on every view", () => {
+  it("says it is a local-first AI companion where it is always on screen, and in full on every view", () => {
     const page = stationPage("abc");
     const header = /<header[\s\S]*?<\/header>/.exec(page)?.[0] ?? "";
-    expect(header).toContain("Unofficial fan project");
+    expect(header).toContain("Local-first AI companion");
     // The pairing view, the empty thread and the sheet for this device each carry it whole.
     expect(page.split(UNOFFICIAL_NOTICE).length - 1).toBeGreaterThanOrEqual(3);
   });

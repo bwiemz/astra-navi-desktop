@@ -4,15 +4,99 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'; media-src 'self' data: blob:"
     />
-    <title>AI-chan Desktop settings (unofficial fan project)</title>
+    <title>Astra Navi Desktop settings</title>
   </head>
-  <body>
+  <body data-advanced="false">
     <header class="masthead">
-      <h1>Ship's settings</h1>
-      <p id="days" class="days"></p>
+      <div class="masthead-top">
+        <div>
+          <h1>Ship's settings</h1>
+          <p id="days" class="days"></p>
+        </div>
+        <div class="masthead-actions">
+          <button id="open-wizard" type="button" class="quiet">60s Setup Wizard</button>
+          <label class="mode-toggle" for="advancedSettings">
+            <input id="advancedSettings" type="checkbox" />
+            <span>Advanced</span>
+          </label>
+        </div>
+      </div>
     </header>
+
+    <section id="onboarding-wizard" class="wizard-overlay" hidden aria-label="60-second setup wizard">
+      <div class="wizard-card">
+        <header class="wizard-head">
+          <h2>Astra Navi 60-Second Setup</h2>
+          <p id="wiz-step-indicator" class="why">Step 1 of 4</p>
+        </header>
+
+        <div id="wiz-step-1" class="wiz-step">
+          <h3>1. Hardware &amp; Brain</h3>
+          <p id="wiz-hw-summary" class="note">Probing GPU VRAM, memory bandwidth, and system RAM…</p>
+          <p id="wiz-hw-reason" class="why"></p>
+          <div class="row">
+            <span class="what">Brain tier</span>
+            <select id="wiz-brain-select"></select>
+            <button id="wiz-use-recommended" type="button">Apply recommended</button>
+            <button id="wiz-hw-refresh" type="button" class="quiet">Re-probe</button>
+          </div>
+        </div>
+
+        <div id="wiz-step-2" class="wiz-step" hidden>
+          <h3>2. Character &amp; Voice</h3>
+          <p class="note">
+            Ships with the built-in <strong>Astra Navi</strong> 3D navigator. You can also import your
+            own <code>.pmx</code>/<code>.pmd</code> model from the tray menu at any time.
+          </p>
+          <label class="row">
+            <span class="what">Language</span>
+            <select id="wiz-language"></select>
+          </label>
+          <div class="row">
+            <span class="what">Voice preset</span>
+            <select id="wiz-voice"></select>
+            <button id="wiz-voice-preview" type="button">Play sample</button>
+            <span id="wiz-voice-status" class="why" role="status"></span>
+          </div>
+        </div>
+
+        <div id="wiz-step-3" class="wiz-step" hidden>
+          <h3>3. Wake Word &amp; Local Tools</h3>
+          <label class="row switch">
+            <input id="wiz-always-listening" type="checkbox" />
+            <span class="what">Hands-free wake word ("Astra")</span>
+            <span class="why">Processed strictly offline on this computer.</span>
+          </label>
+          <div id="wiz-bootstrap-list" class="wiz-services"></div>
+          <p id="wiz-bootstrap-note" class="why" role="status"></p>
+        </div>
+
+        <div id="wiz-step-4" class="wiz-step" hidden>
+          <h3>4. Safety &amp; Ready Check</h3>
+          <p class="note">
+            Local-first defaults: nothing leaves your machine, mutating actions ask first, and
+            experimental Tier 10 switches stay off until enabled.
+          </p>
+          <div class="row">
+            <span class="what">Policy audit</span>
+            <span id="wiz-audit-badge" class="audit-badge">Checking…</span>
+            <button id="wiz-audit-rerun" type="button" class="quiet">Re-check</button>
+          </div>
+          <ul id="wiz-audit-findings" class="why"></ul>
+        </div>
+
+        <footer class="wizard-foot">
+          <button id="wiz-skip" type="button" class="quiet">Close</button>
+          <div class="wizard-nav">
+            <button id="wiz-prev" type="button" class="quiet">Back</button>
+            <button id="wiz-next" type="button">Next</button>
+            <button id="wiz-finish" type="button" hidden>Finish &amp; Launch</button>
+          </div>
+        </footer>
+      </div>
+    </section>
 
     <!-- Stays at the top while the page scrolls: where each section is, and which one is in view. -->
     <nav id="sections" class="sections" aria-label="Sections">
@@ -21,9 +105,9 @@
       <a href="#sec-watch">Watch</a>
       <a href="#sec-agenda">Agenda</a>
       <a href="#sec-devices">Devices</a>
-      <a href="#sec-machines">Machines</a>
+      <a href="#sec-machines" class="advanced-only">Machines</a>
       <a href="#sec-memory">Memory</a>
-      <a href="#sec-search">Search</a>
+      <a href="#sec-search" class="advanced-only">Search</a>
       <a href="#sec-mind">Mind</a>
     </nav>
     <p id="saved" class="saved" role="status" aria-live="polite"></p>
@@ -63,8 +147,8 @@
         </label>
         <label class="row">
           <span class="what">Other names she answers to</span>
-          <input id="otherNames" type="text" placeholder="Computer, Hyperion" autocomplete="off" />
-          <span class="why">Separate with commas. Useful when "AI-chan" keeps being misheard.</span>
+          <input id="otherNames" type="text" placeholder="Computer, Navi" autocomplete="off" />
+          <span class="why">Separate with commas. Useful when "Astra" keeps being misheard.</span>
         </label>
       </section>
 
@@ -299,7 +383,7 @@
         </label>
       </section>
 
-      <section id="sec-machines" class="panel">
+      <section id="sec-machines" class="panel advanced-only">
         <h2>Your other machines</h2>
         <p class="note">
           A server or a NAS she may work on for you over SSH. She gets a key of her own for each
@@ -370,7 +454,7 @@
         </div>
       </section>
 
-      <section id="sec-search" class="panel">
+      <section id="sec-search" class="panel advanced-only">
         <h2>Looking things up</h2>
         <p class="note">
           She already searches Wikipedia, Stack Overflow and other open sources without any account.
@@ -408,7 +492,7 @@
           <span class="what">Language</span>
           <select id="language"></select>
         </label>
-        <label class="row">
+        <label class="row advanced-only">
           <span class="what">Thinking before she answers</span>
           <select id="thinkingTokens">
             <option value="0">None: answer at once</option>
@@ -448,7 +532,7 @@
             waking her.</span
           >
         </label>
-        <label class="row switch">
+        <label class="row switch advanced-only">
           <input id="leanMemory" type="checkbox" />
           <span class="what">Use less graphics memory (experimental)</span>
           <span class="why"
@@ -456,7 +540,7 @@
             her reply and reloads her brain.</span
           >
         </label>
-        <label class="row switch">
+        <label class="row switch advanced-only">
           <input id="fittingTools" type="checkbox" />
           <span class="what">Offer her only the tools a message needs (experimental)</span>
           <span class="why"
@@ -465,7 +549,7 @@
             is then given every tool and tries once more.</span
           >
         </label>
-        <label class="row switch">
+        <label class="row switch advanced-only">
           <input id="keepTraces" type="checkbox" />
           <span class="what">Keep a record of each reply on this computer</span>
           <span class="why"
@@ -475,7 +559,7 @@
             <code>npm run export-pairs</code> reads.</span
           >
         </label>
-        <details id="tier10-block" class="traces">
+        <details id="tier10-block" class="traces advanced-only">
           <summary>Tier 10 experimental capabilities (all off by default)</summary>
           <p class="note">
             Every capability stays off until switched on here. Everything runs on your hardware or
@@ -483,7 +567,7 @@
           </p>
           <div id="tier10-toggles"></div>
         </details>
-        <details id="traces-block" class="traces">
+        <details id="traces-block" class="traces advanced-only">
           <summary>Why did she do that?</summary>
           <p class="note">
             Her last replies since she was started, newest first: which tools she was offered, what
@@ -499,8 +583,7 @@
     </main>
 
     <footer>
-      Unofficial fan project. Not affiliated with miHoYo / HoYoverse, who own AI-chan and
-      <i>Honkai Impact 3rd</i>. Free, and everything stays on this computer.
+      Astra Navi Desktop &mdash; Open-source, local-first AI companion. Everything stays on your computer.
     </footer>
     <script type="module" src="./src/settings.ts"></script>
   </body>

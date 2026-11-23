@@ -127,7 +127,7 @@ export function createReports(deps: ReportsDeps): Reports {
     const result = await runSelfCheck();
     const file = join(dataDir(), "self-check.md");
     const page = [
-      "# AI-chan's self-check",
+      "# Astra Navi's self-check",
       "",
       `Taken ${new Date().toLocaleString("en-GB")}.`,
       "",

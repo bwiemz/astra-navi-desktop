@@ -59,6 +59,8 @@ export const SettingsPatchSchema = z
     headsUpMinutes: z.number().int().min(0).max(120),
     station: z.boolean(),
     pingPhone: z.boolean(),
+    onboardingComplete: z.boolean(),
+    advancedSettings: z.boolean(),
     tier10: z
       .object({
         workerMesh: z.boolean(),

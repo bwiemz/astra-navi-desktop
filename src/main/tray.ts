@@ -105,7 +105,7 @@ export function createTrayMenu(deps: TrayDeps): TrayMenu {
     };
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        { label: "Talk to AI-chan", click: () => deps.showWindow(true) },
+        { label: "Talk to Astra Navi", click: () => deps.showWindow(true) },
         { label: "Settings…", click: deps.openSettings },
         {
           label: "Show or hide",

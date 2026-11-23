@@ -23,8 +23,8 @@ const clock = { now: Date.parse("2026-11-21T12:00:00Z") };
 const APP_BYTES = Buffer.from("PK\u0003\u0004 pretend this is an app package");
 
 beforeAll(async () => {
-  dir = await mkdtemp(join(tmpdir(), "aichan-app-"));
-  appFile = join(dir, "ai-chan.apk");
+  dir = await mkdtemp(join(tmpdir(), "astranavi-app-"));
+  appFile = join(dir, "astra-navi.apk");
   await writeFile(appFile, APP_BYTES);
   await writeFile(join(dir, "version"), "0.1.0\n");
   station = new Station({
@@ -172,12 +172,12 @@ describe("handing the phone app to a paired phone", () => {
     expect(pass.status).toBe(200);
     expect(pass.json["version"]).toBe("0.1.0");
     const path = String(pass.json["path"]);
-    expect(path).toMatch(/^\/app\/[A-Za-z0-9_-]{20,64}\/ai-chan\.apk$/);
+    expect(path).toMatch(/^\/app\/[A-Za-z0-9_-]{20,64}\/astra-navi\.apk$/);
     // The download itself carries no token: the phone's download manager fetches it bare.
     const file = await call("GET", path);
     expect(file.status).toBe(200);
     expect(file.headers["content-type"]).toBe("application/vnd.android.package-archive");
-    expect(file.headers["content-disposition"]).toContain('filename="ai-chan.apk"');
+    expect(file.headers["content-disposition"]).toContain('filename="astra-navi.apk"');
     expect(file.body.equals(APP_BYTES)).toBe(true);
     // A download manager may ask twice; the pass holds for its two minutes.
     expect((await call("GET", path)).status).toBe(200);
@@ -187,8 +187,8 @@ describe("handing the phone app to a paired phone", () => {
 
   it("gives no pass without a token, and no file for a made-up pass", async () => {
     expect((await call("POST", "/app-pass", undefined, {})).status).toBe(401);
-    expect((await call("GET", `/app/${"x".repeat(32)}/ai-chan.apk`)).status).toBe(404);
-    expect((await call("GET", "/app/short/ai-chan.apk")).status).toBe(404);
+    expect((await call("GET", `/app/${"x".repeat(32)}/astra-navi.apk`)).status).toBe(404);
+    expect((await call("GET", "/app/short/astra-navi.apk")).status).toBe(404);
   });
 
   it("says so when the app has not been built", async () => {
@@ -299,12 +299,12 @@ describe("her page and the app", () => {
     expect(page).toContain('id="get-app"');
     expect(page).toContain("/app-pass");
     expect(page).toContain("/handover");
-    expect(page).toContain("aichan://station?at=");
+    expect(page).toContain("astranavi://station?at=");
     expect(page).toContain("#pair=");
   });
 
   it("does not offer the app from inside the app", () => {
-    expect(page).toContain("AIChanApp");
+    expect(page).toContain("AstraNaviApp");
   });
 
   it("still loads nothing from anywhere else", () => {

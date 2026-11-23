@@ -50,7 +50,7 @@ export const STATION_SCRIPT = String.raw`
   var traceDrawer = byId("trace-drawer"), traceRefresh = byId("trace-refresh");
   var traceStatus = byId("trace-status"), traceList = byId("trace-list");
   // Inside the app the page says so in how it names itself, and does not offer the app again.
-  var inApp = /AIChanApp\//.test(navigator.userAgent);
+  var inApp = /AstraNaviApp\/|AIChanApp\//.test(navigator.userAgent);
   var onAndroid = /Android/.test(navigator.userAgent);
   var appOnOffer = false;
 
@@ -68,7 +68,7 @@ export const STATION_SCRIPT = String.raw`
   var session = null;
   // The phone app, when this page is inside it: it can keep a key behind the phone's own
   // fingerprint or face check, and hand it back after that check.
-  var app = window.AiChanApp || null;
+  var app = window.AstraNaviApp || window.AiChanApp || null;
   var promptedToUnlock = false; // the phone's check is put up by itself once per opening
   var waitingToUnlock = false;  // the app left the foreground while the sign-in screen was up
   var reader = null;      // the open stream of events
@@ -992,7 +992,7 @@ export const STATION_SCRIPT = String.raw`
   byId("unlock").addEventListener("click", function () { signProblem.textContent = ""; unlockNow(); });
 
   // The app calls these. The key is only ever passed on to the PC, never kept by the page.
-  window.aiChanUnlocked = function (key) {
+  window.astraNaviUnlocked = window.aiChanUnlocked = function (key) {
     if (session || !token) return;
     post("/unlock", { key: String(key) }, true)
       .then(function (result) {
@@ -1008,12 +1008,12 @@ export const STATION_SCRIPT = String.raw`
       })
       .catch(function () { signProblem.textContent = NO_ANSWER; });
   };
-  window.aiChanUnlockFailed = function () {
+  window.astraNaviUnlockFailed = window.aiChanUnlockFailed = function () {
     // Cancelled, or not recognised: the form is there, and so is the button to try again.
     if (!hasKey()) unlockBox.hidden = true;
   };
   // The app has left the foreground: whoever opens it next is asked again.
-  window.aiChanLock = function () {
+  window.astraNaviLock = window.aiChanLock = function () {
     if (!token) return;
     cancelVoiceCapture();
     if (session) post("/sign-out", {}, true).catch(function () { /* it ends here all the same */ });
@@ -1032,14 +1032,14 @@ export const STATION_SCRIPT = String.raw`
     signProblem.textContent = "";
   };
   // The app is in front again: find out how things stand, and put up the phone's check.
-  window.aiChanShown = function () {
+  window.astraNaviShown = window.aiChanShown = function () {
     if (!waitingToUnlock || session) return;
     waitingToUnlock = false;
     enter("");
   };
 
   var keyOnItsWay = false;
-  window.aiChanKeyKept = function (kept) {
+  window.astraNaviKeyKept = window.aiChanKeyKept = function (kept) {
     if (!keyOnItsWay) return;
     keyOnItsWay = false;
     unlockSwitch.disabled = false;
@@ -1315,7 +1315,7 @@ export const STATION_SCRIPT = String.raw`
     if (webAudio) stopWebVoice(false);
     try { if (app && typeof app.cancelVoice === "function") app.cancelVoice(); } catch (e) { /* ignore */ }
   }
-  window.aiChanVoiceReady = function (base64Wav) {
+  window.astraNaviVoiceReady = window.aiChanVoiceReady = function (base64Wav) {
     resetVoiceButton();
     if (!base64Wav) return;
     try {
@@ -1327,7 +1327,7 @@ export const STATION_SCRIPT = String.raw`
       add("caution", "Voice note could not be decoded.", "");
     }
   };
-  window.aiChanVoiceError = function (msg) {
+  window.astraNaviVoiceError = window.aiChanVoiceError = function (msg) {
     resetVoiceButton();
     add("caution", String(msg || "Voice recording failed."), "");
   };
@@ -1530,7 +1530,7 @@ export const STATION_SCRIPT = String.raw`
           appNote.textContent = data.error || "That did not work. Try again.";
           return;
         }
-        var target = "aichan://station?at=" + encodeURIComponent(String(data.at)) +
+        var target = "astranavi://station?at=" + encodeURIComponent(String(data.at)) +
           "&fp=" + encodeURIComponent(String(data.fingerprint)) +
           "&code=" + encodeURIComponent(String(data.code));
         // Some browsers only follow a link to another app when it is tapped directly, so

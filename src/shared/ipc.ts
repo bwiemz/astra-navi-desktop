@@ -228,10 +228,12 @@ export function resizeAboutCorner(
   return { bounds: placed, held: moved ? { corner, placed } : null };
 }
 
-export const UNOFFICIAL_NOTICE =
-  "AI-chan Desktop is an unofficial, non-commercial fan project. It is free and must never be sold. " +
-  "AI-chan, Honkai Impact 3rd and the character model are © miHoYo / HoYoverse. " +
-  "This project is not affiliated with, sponsored by or endorsed by miHoYo / HoYoverse.";
+export const APP_NOTICE =
+  "Astra Navi Desktop is an open-source, local-first AI desktop companion. " +
+  "Everything stays on your own hardware: local LLM inference, local voice, local memory, and explicit user approvals.";
+
+/** Alias retained for existing imports across main/station/tests. */
+export const UNOFFICIAL_NOTICE = APP_NOTICE;
 
 /** The API the preload script exposes to the window as `window.aichan`. */
 export interface AichanBridge {

@@ -1,15 +1,15 @@
 {
-  "name": "ai-chan-desktop",
+  "name": "astra-navi-desktop",
   "version": "0.1.0",
-  "description": "Local-first desktop AI companion with 3D MMD avatar support (ships with original Astra Navi chibi character & BYO-MMD import), explicit permission gating, and an offline evaluation suite.",
+  "description": "Local-first AI desktop navigator with 3D MMD avatar support (ships with original Astra Navi chibi character & BYO-MMD import), explicit permission gating, and an offline evaluation suite.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/bwiemz/ai-chan-desktop.git"
+    "url": "https://github.com/bwiemz/astra-navi-desktop.git"
   },
-  "homepage": "https://github.com/bwiemz/ai-chan-desktop#readme",
+  "homepage": "https://github.com/bwiemz/astra-navi-desktop#readme",
   "bugs": {
-    "url": "https://github.com/bwiemz/ai-chan-desktop/issues"
+    "url": "https://github.com/bwiemz/astra-navi-desktop/issues"
   },
   "type": "module",
   "main": "out/main/index.js",
@@ -28,8 +28,13 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "check": "npm run typecheck && npm run lint && npm run test",
-    "setup-voice": "bash scripts/setup-voice.sh",
-    "install-launcher": "bash scripts/install-launcher.sh"
+    "setup": "node scripts/bootstrap.ts",
+    "setup-voice": "node scripts/bootstrap.ts voice",
+    "setup-ocr": "node scripts/bootstrap.ts ocr",
+    "setup-browser-bridge": "node scripts/bootstrap.ts browser-bridge",
+    "install-launcher": "node scripts/bootstrap.ts launcher",
+    "package:dry": "node scripts/package-release.ts --dry-run",
+    "publish:dry": "node scripts/publish-store.ts --dry-run"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

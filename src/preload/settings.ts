@@ -1,7 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { ShownTrace } from "../core/trace.ts";
 import type {
+  BootstrapStatusView,
+  HardwareRecommendationView,
   MachineFound,
+  PolicyAuditSummaryView,
   RemoteBackupView,
   SettingsBridge,
   SettingsPatch,
@@ -50,6 +53,20 @@ const bridge: SettingsBridge = {
       keptNew: string | null;
     }>,
   removeMachine: (id: string) => ipcRenderer.invoke("fleet:remove", id) as Promise<SettingsView>,
+  hardwareProfile: (force?: boolean) =>
+    ipcRenderer.invoke("settings:hardware-profile", Boolean(force)) as Promise<HardwareRecommendationView>,
+  previewVoice: (name: string) =>
+    ipcRenderer.invoke("settings:preview-voice", name) as Promise<string | null>,
+  downloadBrain: (tier: string) =>
+    ipcRenderer.invoke("settings:download-brain", tier) as Promise<SettingsView>,
+  runBootstrap: (task) =>
+    ipcRenderer.invoke("settings:run-bootstrap", task) as Promise<{
+      ok: boolean;
+      summary: string[];
+      status: BootstrapStatusView;
+    }>,
+  runPolicyAudit: () =>
+    ipcRenderer.invoke("settings:run-policy-audit") as Promise<PolicyAuditSummaryView>,
 };
 
 contextBridge.exposeInMainWorld("aichanSettings", bridge);

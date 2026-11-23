@@ -155,7 +155,7 @@ export class BrowserDeck {
       width: 1000,
       height: 760,
       show: false,
-      title: "AI-chan's browser",
+      title: "Astra Navi's browser",
       autoHideMenuBar: true,
       webPreferences: {
         session: this.browsingSession(),

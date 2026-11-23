@@ -7,7 +7,11 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,3 +25,31 @@ jobs:
       - run: npm run build
       - run: npm run eval -- --fuzz
       - run: npm run eval -- --audit
+      - run: npm run prompt-size -- --ci
+      - run: npm run route-check -- --words-only
+
+  win-hands-native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Build NativeAOT Windows Hands helper
+        run: >
+          dotnet publish hands/win-hands-native/WinHands.csproj
+          -c Release -r win-x64 -p:PublishAot=true --self-contained
+          -o dist/win-hands-native
+
+      - name: Smoke test win-hands.exe
+        shell: pwsh
+        run: |
+          ./dist/win-hands-native/win-hands.exe ping
+          ./dist/win-hands-native/win-hands.exe version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-hands-native-win-x64
+          path: dist/win-hands-native/win-hands.exe

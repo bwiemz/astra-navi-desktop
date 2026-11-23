@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AI-chan</string>
-    <string name="notice">AI-chan Desktop is an unofficial, non-commercial fan project. It is free and must never be sold. AI-chan, Honkai Impact 3rd and the character model are © miHoYo / HoYoverse. This project is not affiliated with, sponsored by or endorsed by miHoYo / HoYoverse.</string>
+    <string name="app_name">Astra Navi</string>
+    <string name="notice">Astra Navi Desktop is an open-source, local-first AI desktop companion that keeps files, memory, and screen private on your own hardware.</string>
     <string name="setup_title">Find her on your network</string>
-    <string name="fan_line">Unofficial fan project</string>
+    <string name="fan_line">Local-first AI companion</string>
     <string name="setup_step_1">On the PC, open her Settings and find \"Your other devices\".</string>
     <string name="setup_step_2">Type the address shown there.</string>
     <string name="setup_label">Her address</string>
@@ -24,9 +24,9 @@
     <string name="unreachable_title">She cannot be reached</string>
     <string name="unreachable_words">Nothing answered at %1$s. Check that the PC is on, that she is running with \"Let my other devices talk to her\" switched on, and that this phone is on the same network.</string>
     <string name="try_again">Try again</string>
-    <string name="check_title">Open AI-chan</string>
-    <string name="check_keep_title">Let this phone open AI-chan</string>
-    <string name="check_sub">Unofficial fan project</string>
+    <string name="check_title">Open Astra Navi</string>
+    <string name="check_keep_title">Let this phone open Astra Navi</string>
+    <string name="check_sub">Local-first AI companion</string>
     <string name="check_cancel">Use the password</string>
     <string name="start_over">Connect from the start</string>
     <string name="outbox_hint">Queue a message while away…</string>

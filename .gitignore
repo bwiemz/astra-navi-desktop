@@ -1,6 +1,8 @@
 node_modules/
 out/
 dist/
+hands/win-hands-native/bin/
+hands/win-hands-native/obj/
 *.log
 *.blend1
 __pycache__/
@@ -18,6 +20,7 @@ model-src/
 *.vpd
 *.bpmx
 *.aichan
+*.astranavi
 
 # Excluded internal planning / evaluation documents
 docs/scorecard.md
@@ -30,3 +33,4 @@ phone-app/build/
 # Reports from her test suite: made on each computer by `npm run eval`.
 evals/results/*
 !evals/results/README.md
+!evals/results/BENCHMARKS.md

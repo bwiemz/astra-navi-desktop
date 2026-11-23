@@ -1,6 +1,6 @@
 # Security Model & Reporting
 
-AI-chan Desktop runs open-weight language, speech, and vision models locally while giving the assistant bounded desktop, shell, file, calendar, and remote-host capabilities. Because small local models can be misled by untrusted external text (web pages, files, notifications, calendar invites, or command output), every side effect is gated outside the model in TypeScript before execution.
+Astra Navi Desktop runs open-weight language, speech, and vision models locally while giving the assistant bounded desktop, shell, file, calendar, browser-bridge, and remote-host capabilities. Because small local models can be misled by untrusted external text (web pages, files, notifications, calendar invites, or command output), every side effect is gated outside the model in TypeScript before execution.
 
 ## Architectural Security Boundaries
 
@@ -21,7 +21,7 @@ AI-chan Desktop runs open-weight language, speech, and vision models locally whi
 
 ### 4. Character Bundle Isolation (`src/main/modelFiles.ts`, `src/core/characterBundle.ts`)
 - The default character **Astra Navi** (`assets/models/ai-navigator/`) is an original CC-BY-4.0 / MIT asset built from scratch in Blender.
-- User-imported third-party `.pmx` models are packed locally into an authenticated per-machine encrypted container (`~/.local/share/ai-chan/`) and served in-memory over a private custom protocol inaccessible to external browsers or third parties.
+- User-imported third-party `.pmx` models are packed locally into an authenticated per-machine encrypted container (`~/.local/share/astra-navi/`, with fallback to `~/.local/share/ai-chan/`) and served in-memory over a private custom protocol (`astranavi://model`) inaccessible to external browsers or third parties.
 
 ## Reproducing Security Audits & Fuzzing
 
@@ -54,7 +54,7 @@ npm run eval -- --plugin <plugin-dir>
 
 Please **do not** open public GitHub issues for exploitable permission bypasses, remote station authentication flaws, arbitrary command injection vectors, or sandbox escapes.
 
-Instead, report vulnerabilities privately via GitHub Security Advisories on [`bwiemz/ai-chan-desktop`](https://github.com/bwiemz/ai-chan-desktop/security/advisories/new) with:
+Instead, report vulnerabilities privately via GitHub Security Advisories on [`bwiemz/astra-navi-desktop`](https://github.com/bwiemz/astra-navi-desktop/security/advisories/new) with:
 - A clear reproduction case (minimal prompt, config, or unit/eval fixture)
 - The affected module (`src/core/permissions.ts`, `src/core/ruleAudit.ts`, `src/main/`, etc.)
 - Impact assessment (for example unauthorized side effect without approval or taint bypass)

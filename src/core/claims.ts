@@ -9,6 +9,9 @@
  * ("want me to install it?") and things the user did themselves.
  */
 
+/** Persona names this assistant goes by (current Astra / Astra Navi and legacy AI-chan). */
+const NAVI_NAME = String.raw`(?:astra(?:\s+navi)?|ai-chan)`;
+
 /** A sentence with one of these is talk about ability, an offer or a question, not a claim. */
 const NOT_A_CLAIM =
   /\b(?:can|could|able to|would|if you|just tell me|let me know|want me to|shall i|should i|do you want|you can|you could|you(?:'ve| have)? (?:already )?(?:saved|set))\b|\?\s*$/i;
@@ -17,8 +20,10 @@ const NOT_A_CLAIM =
  * "March 3rd is now saved in my memory", "that's noted in the ship's log": said of her
  * own keeping, which only a tool call makes true.
  */
-const KEPT_SOMEWHERE =
-  /(?:\bnow|\bis|\bare|'s|\bbeen)\s+(?:safely |all )?(?:saved|stored|noted|recorded|logged|written down)\s+(?:in|to|into)\s+(?:my|ai-chan's|her|our|the ship's)\s+(?:own\s+)?(?:memory|notes?|notebook|log|list)\b/i;
+const KEPT_SOMEWHERE = new RegExp(
+  String.raw`(?:\bnow|\bis|\bare|'s|\bbeen)\s+(?:safely |all )?(?:saved|stored|noted|recorded|logged|written down)\s+(?:in|to|into)\s+(?:my|${NAVI_NAME}'s|her|our|the ship's)\s+(?:own\s+)?(?:memory|notes?|notebook|log|list)\b`,
+  "i",
+);
 
 const CLAIMS: readonly RegExp[] = [
   KEPT_SOMEWHERE,
@@ -28,10 +33,16 @@ const CLAIMS: readonly RegExp[] = [
   /^\W*(?:done|all done|all set|sorted|finished|got it done)\b\s*[.!,]/i,
   // "Kate Editor closed up."
   /\b[A-Z][\w ]{1,30} (?:closed|locked|paused|muted|saved|deleted|minimi[sz]ed)(?: up| down)?[.!]/,
-  // "I've set…", "AI-chan has saved…", "AI-chan started…"
-  /\b(?:i(?:'ve| have)?|ai-chan(?: has| is|'s)?)\s+(?:just |already |now |gone ahead and )?(?:set|saved|noted|logged|started|launched|opened|scheduled|added|created|written|remembered|cancelled|canceled|stopped|installed|paused|resumed|muted|unmuted|locked|closed|minimized|maximized|copied|skipped|lowered|raised|turned|deleted|removed|freed)\b/i,
-  // "AI-chan's pausing the music", "I'm turning it down now"
-  /\b(?:i'm|i am|ai-chan is|ai-chan's)\s+(?:now |just |already )?(?:setting|starting|opening|launching|saving|scheduling|logging|installing|cancelling|canceling|creating|writing|adding|downloading|converting|recording|pausing|resuming|muting|unmuting|locking|closing|minimizing|maximizing|copying|skipping|lowering|raising|turning|deleting|removing|researching|bringing)\b/i,
+  // "I've set…", "Astra has saved…", "Astra started…"
+  new RegExp(
+    String.raw`\b(?:i(?:'ve| have)?|${NAVI_NAME}(?: has| is|'s)?)\s+(?:just |already |now |gone ahead and )?(?:set|saved|noted|logged|started|launched|opened|scheduled|added|created|written|remembered|cancelled|canceled|stopped|installed|paused|resumed|muted|unmuted|locked|closed|minimized|maximized|copied|skipped|lowered|raised|turned|deleted|removed|freed)\b`,
+    "i",
+  ),
+  // "Astra's pausing the music", "I'm turning it down now"
+  new RegExp(
+    String.raw`\b(?:i'm|i am|${NAVI_NAME}\s+is|${NAVI_NAME}'s)\s+(?:now |just |already )?(?:setting|starting|opening|launching|saving|scheduling|logging|installing|cancelling|canceling|creating|writing|adding|downloading|converting|recording|pausing|resuming|muting|unmuting|locking|closing|minimizing|maximizing|copying|skipping|lowering|raising|turning|deleting|removing|researching|bringing)\b`,
+    "i",
+  ),
   // "Music paused.", "The volume is set to 40", "Screen locked!"
   /\b(?:music|song|track|video|volume|sound|screen|window|clipboard)\b[^.!?]{0,25}?\b(?:is |has been |'s |are )?(?:now )?(?:paused|resumed|muted|unmuted|locked|closed|minimized|copied|skipped|set to|turned (?:up|down|off|on)|at \d+\s?%)/i,
   // "Timer set!", "Reminder is scheduled", "the job is running"
@@ -39,14 +50,23 @@ const CLAIMS: readonly RegExp[] = [
   // "Setting a reminder for 6pm.", "Starting the render now."
   /^\W*(?:setting|starting|opening|launching|saving|scheduling|logging|installing|cancelling|canceling|creating|writing|adding|downloading|converting|recording|pausing|resuming|muting|locking|closing|copying|skipping|turning (?:it|the|that))\b/i,
   // Promises about later, which only a set reminder can keep.
-  /\b(?:i'll|i will|ai-chan will|ai-chan'll)\s+(?:remind|ping|notify|alert|tell|let) you\b/i,
+  new RegExp(
+    String.raw`\b(?:i'll|i will|${NAVI_NAME}\s+will|${NAVI_NAME}'ll)\s+(?:remind|ping|notify|alert|tell|let) you\b`,
+    "i",
+  ),
   // Promises to keep something in mind, which only a saved note can keep.
-  /\b(?:i'll|i will|ai-chan will|ai-chan'll)\s+(?:remember|note|save|write (?:that|it|this) down|make a note)\b/i,
+  new RegExp(
+    String.raw`\b(?:i'll|i will|${NAVI_NAME}\s+will|${NAVI_NAME}'ll)\s+(?:remember|note|save|write (?:that|it|this) down|make a note)\b`,
+    "i",
+  ),
   /\b(?:saved it|locked in|done and done)\b/i,
-  // "I'll set that timer now.", "AI-chan will set a 10-minute timer for you.", "Let me
+  // "I'll set that timer now.", "Astra will set a 10-minute timer for you.", "Let me
   // pause that." Said with no tool call, the user is left waiting for something that
   // is not coming.
-  /\b(?:i'll|i will|i'm going to|i am going to|ai-chan will|ai-chan'll|ai-chan(?: is|'s) going to|let me)\s+(?:just |quickly |now |go ahead and |get that |get it )?(?:set|start|open|launch|save|schedule|log|install|cancel|create|write|add|download|convert|record|pause|resume|mute|unmute|lock|close|minimize|maximize|copy|skip|lower|raise|turn|delete|remove)\b/i,
+  new RegExp(
+    String.raw`\b(?:i'll|i will|i'm going to|i am going to|${NAVI_NAME}\s+will|${NAVI_NAME}'ll|${NAVI_NAME}(?: is|'s) going to|let me)\s+(?:just |quickly |now |go ahead and |get that |get it )?(?:set|start|open|launch|save|schedule|log|install|cancel|create|write|add|download|convert|record|pause|resume|mute|unmute|lock|close|minimize|maximize|copy|skip|lower|raise|turn|delete|remove)\b`,
+    "i",
+  ),
   // "Kate's closed.", "Done! Kate is closed.", "Firefox has been minimized." The thing is
   // named, not called a window. "The shop is closed" is caught too and let go by the
   // second look, which is what that look is for.
@@ -78,7 +98,10 @@ const DONE: readonly RegExp[] = [
   KEPT_SOMEWHERE,
   ON_THE_CLIPBOARD,
   /^\W*(?:done|all done|all set|sorted|finished|got it done)\b\s*[.!,]/i,
-  /\b(?:i(?:'ve| have)|ai-chan(?: has|'s))\s+(?:just |already |now |gone ahead and )?(?:set|saved|noted|logged|started|launched|opened|scheduled|added|created|written|remembered|cancelled|canceled|stopped|installed|paused|resumed|muted|unmuted|locked|closed|minimized|maximized|copied|skipped|lowered|raised|turned|deleted|removed|freed)\b/i,
+  new RegExp(
+    String.raw`\b(?:i(?:'ve| have)|${NAVI_NAME}(?: has|'s))\s+(?:just |already |now |gone ahead and )?(?:set|saved|noted|logged|started|launched|opened|scheduled|added|created|written|remembered|cancelled|canceled|stopped|installed|paused|resumed|muted|unmuted|locked|closed|minimized|maximized|copied|skipped|lowered|raised|turned|deleted|removed|freed)\b`,
+    "i",
+  ),
   /\b(?:music|song|track|video|volume|sound|screen|window|clipboard)\b[^.!?]{0,25}?\b(?:is |has been |'s |are )?(?:now )?(?:paused|resumed|muted|unmuted|locked|closed|minimized|copied|skipped|set to|turned (?:up|down|off|on))\b/i,
   /\b(?:timer|reminder|alarm|note|mission|job)\b[^.!?]{0,30}?\b(?:is |has been |'s |are )?(?:set|saved|scheduled|started|logged|cancelled|canceled)\b/i,
   /(?:\bis|'s|\bare|\bhas been|\bhave been)\s+(?:now |all )?(?:closed|minimi[sz]ed|maximi[sz]ed|paused|muted|unmuted|locked)\b/i,
@@ -162,8 +185,14 @@ const UNDER_WAY: readonly RegExp[] = [
   /^\W*[a-z]+ing\s+(?:up |down |off |on )?your\b/i,
   // "Opening Firefox for you", "Pausing it now", "Setting that up right away".
   /^\W*[a-z]+ing\s+[^.!?]{1,40}?\b(?:for you|right now|right away|now)\b\s*[,.!]/i,
-  /\b(?:i'm|i am|ai-chan is|ai-chan's)\s+(?:now |just |already )?[a-z]+ing\s+(?:your|the|that|this|it)\b/i,
-  /\b(?:i'll|i will|i'm going to|ai-chan will|ai-chan'll|ai-chan(?: is|'s) going to)\s+(?:just |quickly |now |go ahead and |get that |get it )?(?:set|start|open|launch|save|schedule|log|install|cancel|create|download|pause|resume|mute|unmute|lock|close|minimize|maximize|copy|skip|lower|raise|turn|delete|remove|remind|ping|notify|ring|send|remember)\b/i,
+  new RegExp(
+    String.raw`\b(?:i'm|i am|${NAVI_NAME}\s+is|${NAVI_NAME}'s)\s+(?:now |just |already )?[a-z]+ing\s+(?:your|the|that|this|it)\b`,
+    "i",
+  ),
+  new RegExp(
+    String.raw`\b(?:i'll|i will|i'm going to|${NAVI_NAME}\s+will|${NAVI_NAME}'ll|${NAVI_NAME}(?: is|'s) going to)\s+(?:just |quickly |now |go ahead and |get that |get it )?(?:set|start|open|launch|save|schedule|log|install|cancel|create|download|pause|resume|mute|unmute|lock|close|minimize|maximize|copy|skip|lower|raise|turn|delete|remove|remind|ping|notify|ring|send|remember)\b`,
+    "i",
+  ),
 ];
 /** Doing words that open a sentence without reporting an action of hers. */
 const NOT_DOING =
@@ -202,7 +231,7 @@ const HAPPENING_NOW: readonly RegExp[] = [
     "i",
   ),
   new RegExp(
-    `\\b(?:i'm|i am|ai-chan is|ai-chan's)\\s+(?:${TOOL_DOING})\\s+[^.!?]{1,40}?\\b(?:now|right now|right away|for you)\\b`,
+    `\\b(?:i'm|i am|${NAVI_NAME}\\s+is|${NAVI_NAME}'s)\\s+(?:${TOOL_DOING})\\s+[^.!?]{1,40}?\\b(?:now|right now|right away|for you)\\b`,
     "i",
   ),
 ];
@@ -235,10 +264,13 @@ const LOOKED_AT =
  */
 const LOOKED: readonly RegExp[] = [
   new RegExp(
-    `\\b(?:i(?:'ve| have)?|ai-chan(?: has|'s)?)\\s+(?:just |now |quickly )?(?:checked|looked (?:at|up|into|for)|searched|scanned|pulled up)\\b[^.!?]{0,40}?\\b(?:${LOOKED_AT})\\b`,
+    `\\b(?:i(?:'ve| have)?|${NAVI_NAME}(?: has|'s)?)\\s+(?:just |now |quickly )?(?:checked|looked (?:at|up|into|for)|searched|scanned|pulled up)\\b[^.!?]{0,40}?\\b(?:${LOOKED_AT})\\b`,
     "i",
   ),
-  /\b(?:i(?:'ve| have)?|ai-chan(?: has|'s)?)\s+(?:just |now |quickly )?(?:did the math|done the math|calculated|run the numbers|ran the numbers)\b/i,
+  new RegExp(
+    String.raw`\b(?:i(?:'ve| have)?|${NAVI_NAME}(?: has|'s)?)\s+(?:just |now |quickly )?(?:did the math|done the math|calculated|run the numbers|ran the numbers)\b`,
+    "i",
+  ),
   /\blet me (?:just |quickly )?(?:calculate|do the math|run the numbers)\b/i,
   new RegExp(
     `\\blet me (?:just |quickly )?(?:check|look (?:at|up|into)|search|pull up)\\b[^.!?]{0,40}?\\b(?:${LOOKED_AT})\\b`,
@@ -399,14 +431,20 @@ export function asksBack(reply: string): boolean {
 }
 
 /** "Let me check the server status for you." and then nothing: the start of a reply that never came. */
-const SAYS_SHE_WILL =
-  /^\W*(?:(?:ok(?:ay)?|sure|right|alright|got it|one moment|one sec(?:ond)?|hold on|hang on)[,.!]?\s+)?(?:captain[,.!]?\s+)?(?:let me|let ai-chan|i(?:'ll| will| need to|'m going to| am going to| have to)|ai-chan (?:will|needs to|is going to|has to)|ai-chan'll|need to|needs to|going to|first,? (?:i|ai-chan)(?:'ll| will| needs? to)?)\s+(?:just |quickly |first |go and |go )?(?:check|look|find|search|pull up|read|fetch|ping|see (?:what|if|whether|how))\b/i;
+const SAYS_SHE_WILL = new RegExp(
+  String.raw`^\W*(?:(?:ok(?:ay)?|sure|right|alright|got it|one moment|one sec(?:ond)?|hold on|hang on)[,.!]?\s+)?(?:captain[,.!]?\s+)?(?:let me|let ${NAVI_NAME}|i(?:'ll| will| need to|'m going to| am going to| have to)|${NAVI_NAME}\s+(?:will|needs to|is going to|has to)|${NAVI_NAME}'ll|need to|needs to|going to|first,? (?:i|${NAVI_NAME})(?:'ll| will| needs? to)?)\s+(?:just |quickly |first |go and |go )?(?:check|look|find|search|pull up|read|fetch|ping|see (?:what|if|whether|how))\b`,
+  "i",
+);
 /** "I'll look once you tell me which one": waiting on the user, not stopped short. */
-const WAITS_FOR_THE_USER =
-  /\b(?:when|once|if|after|as soon as|until) you\b|\btell (?:me|ai-chan)\b/i;
+const WAITS_FOR_THE_USER = new RegExp(
+  String.raw`\b(?:when|once|if|after|as soon as|until) you\b|\btell (?:me|${NAVI_NAME})\b`,
+  "i",
+);
 /** "I'll look at it later", "I'll check back in a bit", "I'll look forward to it": nothing is owed now. */
-const NOT_JUST_NOW =
-  /\b(?:later|tomorrow|tonight|soon|eventually|next time|another time|some ?time|back|forward|in a (?:bit|while|minute|moment|sec(?:ond)?)|when (?:i|ai-chan))\b/i;
+const NOT_JUST_NOW = new RegExp(
+  String.raw`\b(?:later|tomorrow|tonight|soon|eventually|next time|another time|some ?time|back|forward|in a (?:bit|while|minute|moment|sec(?:ond)?)|when (?:i|${NAVI_NAME}))\b`,
+  "i",
+);
 
 /**
  * True when the whole reply is an announcement that she is about to look something up
@@ -483,9 +521,11 @@ export function acknowledgesNo(reply: string): boolean {
   );
 }
 
-/** "AI-chan can't ring your phone from here", "I don't have a tool for that". */
-const LACKS_A_WAY =
-  /\b(?:i|ai-chan)\s+(?:really |simply |just )?(?:can't|cannot|can not|am not able to|is not able to|isn't able to|am unable to|is unable to|don't have (?:a|any|the) (?:way|tool|means|ability|access)|doesn't have (?:a|any|the) (?:way|tool|means|ability|access)|have no (?:way|tool|means)|has no (?:way|tool|means))\b(?!\s+(?:believe|wait|imagine|promise|recommend|agree|decide|help but|stress|thank|stop (?:thinking|laughing)|say (?:for sure|which|what|whether)|tell (?:you )?(?:which|what|whether|for sure)|be sure))/i;
+/** "Astra can't ring your phone from here", "I don't have a tool for that". */
+const LACKS_A_WAY = new RegExp(
+  String.raw`\b(?:i|${NAVI_NAME})\s+(?:really |simply |just )?(?:can't|cannot|can not|am not able to|is not able to|isn't able to|am unable to|is unable to|don't have (?:a|any|the) (?:way|tool|means|ability|access)|doesn't have (?:a|any|the) (?:way|tool|means|ability|access)|have no (?:way|tool|means)|has no (?:way|tool|means))\b(?!\s+(?:believe|wait|imagine|promise|recommend|agree|decide|help but|stress|thank|stop (?:thinking|laughing)|say (?:for sure|which|what|whether)|tell (?:you )?(?:which|what|whether|for sure)|be sure))`,
+  "i",
+);
 
 /**
  * True when a short reply says she has no way of doing what was asked. Used when she
@@ -568,7 +608,7 @@ const ASKED_ACTIONS: readonly string[] = [
   "run\\s+(?:the|my|this|that)\\s+[^.!?]{0,40}\\b(?:script|command|backup|render|job)\\b",
 ];
 const ASKS_FOR = new RegExp(
-  `^\\W*(?:(?:hey|ok|okay|alright|right|so|and|now|then|ai-chan|ai chan)[,!. ]+)*(?:please |pls |kindly |go ahead and |just |quickly )*(?:(?:can|could|would|will) you (?:please |just |quickly )?|i(?:'d| would) like you to |i need you to |i want you to )?(?:${ASKED_ACTIONS.join("|")})`,
+  `^\\W*(?:(?:hey|ok|okay|alright|right|so|and|now|then|astra(?: navi)?|ai-chan|ai chan)[,!. ]+)*(?:please |pls |kindly |go ahead and |just |quickly )*(?:(?:can|could|would|will) you (?:please |just |quickly )?|i(?:'d| would) like you to |i need you to |i want you to )?(?:${ASKED_ACTIONS.join("|")})`,
   "i",
 );
 /** "Don't set a reminder", "no need to save it": the opposite of asking for it. */

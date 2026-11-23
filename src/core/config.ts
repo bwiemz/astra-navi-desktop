@@ -224,7 +224,11 @@ const ConfigSchema = z.object({
   alertsRaised: z.record(z.string(), z.number()).default({}),
   /** The day (YYYY-MM-DD) the last briefing was given. */
   lastBriefingDay: z.string().nullable().default(null),
-  /** Whether the unofficial-fan-work notice has been shown at least once. */
+  /** Whether the user has completed the initial 60-second setup wizard. */
+  onboardingComplete: z.boolean().default(false),
+  /** Whether power-user controls and diagnostics are expanded in Settings. */
+  advancedSettings: z.boolean().default(false),
+  /** Whether the startup/model notice has been shown at least once. */
   noticeShown: z.boolean().default(false),
   /** Optional selected custom character bundle directory name or path. */
   characterBundle: z.string().max(300).nullable().default(null),

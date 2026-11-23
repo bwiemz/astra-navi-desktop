@@ -1,15 +1,22 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
  * Where the app keeps everything it writes. Kept outside the project folder so the
  * repository never contains user data or the character model.
+ * Uses `astra-navi` for new installs while falling back to an existing `ai-chan`
+ * folder so prior models, config, and databases keep working seamlessly.
  */
 export function dataDir(): string {
-  const override = process.env["AI_CHAN_DATA_DIR"];
+  const override = process.env["ASTRA_NAVI_DATA_DIR"] ?? process.env["AI_CHAN_DATA_DIR"];
   if (override) return override;
   const xdg = process.env["XDG_DATA_HOME"];
-  return join(xdg && xdg.length > 0 ? xdg : join(homedir(), ".local", "share"), "ai-chan");
+  const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".local", "share");
+  const primary = join(base, "astra-navi");
+  const legacy = join(base, "ai-chan");
+  if (!existsSync(primary) && existsSync(legacy)) return legacy;
+  return primary;
 }
 
 export function memoryFile(): string {
@@ -126,12 +133,20 @@ export function deckLogFile(): string {
 
 /** Downloaded AI models (language, speech). Large; safe to delete, they download again. */
 export function modelsDir(): string {
-  return process.env["AI_CHAN_MODELS_DIR"] ?? join(dataDir(), "models");
+  return (
+    process.env["ASTRA_NAVI_MODELS_DIR"] ??
+    process.env["AI_CHAN_MODELS_DIR"] ??
+    join(dataDir(), "models")
+  );
 }
 
-/** The Python environment of the full voice, made by `npm run setup-voice`. */
+/** The Python environment of the full voice, made by `npm run setup -- voice`. */
 export function voiceEnvPython(): string {
-  return process.env["AI_CHAN_VOICE_PYTHON"] ?? join(dataDir(), "voice-env", "bin", "python");
+  return (
+    process.env["ASTRA_NAVI_VOICE_PYTHON"] ??
+    process.env["AI_CHAN_VOICE_PYTHON"] ??
+    join(dataDir(), "voice-env", "bin", "python")
+  );
 }
 
 /** This install's random secret for the character-model bundle. */
@@ -140,10 +155,18 @@ export function modelKeyFile(): string {
 }
 
 export function modelBundleFile(): string {
-  return join(dataDir(), "model.aichan");
+  const primary = join(dataDir(), "model.astranavi");
+  const legacy = join(dataDir(), "model.aichan");
+  if (!existsSync(primary) && existsSync(legacy)) return legacy;
+  return primary;
 }
 
 /** Default folder for documents and other files the assistant creates. */
 export function workspaceDir(): string {
-  return process.env["AI_CHAN_WORKSPACE"] ?? join(homedir(), "Documents", "AI-chan");
+  const override = process.env["ASTRA_NAVI_WORKSPACE"] ?? process.env["AI_CHAN_WORKSPACE"];
+  if (override) return override;
+  const primary = join(homedir(), "Documents", "Astra-Navi");
+  const legacy = join(homedir(), "Documents", "AI-chan");
+  if (!existsSync(primary) && existsSync(legacy)) return legacy;
+  return primary;
 }

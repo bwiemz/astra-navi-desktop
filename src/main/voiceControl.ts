@@ -33,9 +33,9 @@ const WAKE_REPLIES: Record<LanguageCode, string> = {
 };
 
 const VOICE_SAMPLES: Record<LanguageCode, string> = {
-  en: "Captain! This is how AI-chan sounds now. What do you think?",
-  ja: "艦長！愛ちゃんの声はこんな感じだよ。どうかな？",
-  zh: "舰长！爱酱现在的声音是这样的。你觉得怎么样？",
+  en: "Captain! This is how Astra sounds now. What do you think?",
+  ja: "艦長！アストラの声はこんな感じだよ。どうかな？",
+  zh: "舰长！阿斯特拉现在的声音是这样的。你觉得怎么样？",
 };
 
 export function toSamples(value: unknown): Float32Array | null {

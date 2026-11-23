@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  AI-chan's station on a phone: an unofficial, free fan app. It is a window onto the page
-  the desktop app serves on the home network, and holds nothing of the character model.
+  Astra Navi's station on a phone: an open-source mobile companion. It is a window onto
+  the page the desktop app serves on the home network, and holds nothing of the model.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="fan.aichan.station">
+    package="app.astranavi.station">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- For letting this phone back in to her by its own fingerprint or face check. -->
@@ -30,12 +30,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- The page's "open in the app" link: aichan://station?at=…&fp=…&code=… -->
+            <!-- The page's "open in the app" link: astranavi://station?at=…&fp=…&code=… -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:host="station" android:scheme="aichan" />
+                <data android:host="station" android:scheme="astranavi" />
             </intent-filter>
         </activity>
         <service

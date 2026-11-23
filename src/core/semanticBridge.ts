@@ -1,5 +1,9 @@
 import { execFile } from "node:child_process";
-import { isIP } from "node:net";
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { connect, isIP } from "node:net";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { isPrivateIpv4 } from "./permissions.ts";
 
@@ -315,11 +319,21 @@ export function isBrowserOriginAllowed(rawUrl: string, allowlist: readonly strin
   return true;
 }
 
+export const NATIVE_HOST_NAME = "app.astranavi.dom_bridge";
+
 export interface BrowserDomState {
   url: string;
   title: string;
   articleText: string;
-  mediaPlaying?: { title: string; paused: boolean } | null;
+  selection?: string;
+  mediaPlaying?: {
+    title: string;
+    paused: boolean;
+    playing?: boolean;
+    artist?: string;
+    currentTime?: number;
+    duration?: number;
+  } | null;
 }
 
 export class BrowserDomBridge {
@@ -339,6 +353,103 @@ export class BrowserDomBridge {
       throw new Error(`Browser DOM bridge refused unlisted or restricted origin: ${url}`);
     }
     return this.queryExtension(url);
+  }
+}
+
+export function defaultDomBridgeSocketPath(platform = process.platform): string {
+  const override = process.env["ASTRA_NAVI_DOM_SOCKET"];
+  if (override) return override;
+  if (platform === "win32") return "\\\\.\\pipe\\astra-navi-dom-bridge";
+  const xdg = process.env["XDG_DATA_HOME"];
+  const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".local", "share");
+  const primary = join(base, "astra-navi");
+  const legacy = join(base, "ai-chan");
+  const dataRoot = !existsSync(primary) && existsSync(legacy) ? legacy : primary;
+  return join(dataRoot, "scratch", "dom-bridge.sock");
+}
+
+/**
+ * Connects over local Native Messaging IPC socket/pipe (`native-host.mjs`) to request
+ * read-only page state from the browser extension, gated strictly by `allowlist`.
+ */
+export class NativeBrowserDomClient {
+  private readonly allowlist: () => readonly string[];
+  private readonly socketPath: () => string;
+  private readonly timeoutMs: number;
+  private readonly bridge: BrowserDomBridge;
+
+  constructor(options: {
+    allowlist: () => readonly string[];
+    socketPath?: () => string;
+    timeoutMs?: number;
+  }) {
+    this.allowlist = options.allowlist;
+    this.socketPath = options.socketPath ?? (() => defaultDomBridgeSocketPath());
+    this.timeoutMs = options.timeoutMs ?? 5000;
+    this.bridge = new BrowserDomBridge({
+      allowlist: this.allowlist,
+      queryExtension: (url) => this.requestNative("read-page", url),
+    });
+  }
+
+  private requestNative(action: "read-page" | "ping", url?: string): Promise<BrowserDomState | null> {
+    return new Promise((resolve, reject) => {
+      const targetSocket = this.socketPath();
+      const id = randomUUID();
+      const socket = connect(targetSocket);
+      let recv = Buffer.alloc(0);
+      let settled = false;
+
+      const finish = (err: Error | null, value: BrowserDomState | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.destroy();
+        if (err) reject(err);
+        else resolve(value);
+      };
+
+      const timer = setTimeout(
+        () => finish(new Error(`Browser DOM bridge timed out waiting for ${NATIVE_HOST_NAME}.`), null),
+        this.timeoutMs,
+      );
+
+      socket.on("connect", () => {
+        socket.write(encodeNativeMessage({ id, action, ...(url ? { url } : {}) }));
+      });
+      socket.on("data", (chunk: Buffer) => {
+        const combined = Buffer.concat([recv, chunk]);
+        const decoded = decodeNativeMessages(combined);
+        recv = Buffer.from(decoded.rest);
+        for (const msg of decoded.messages) {
+          if (typeof msg !== "object" || msg === null) continue;
+          const record = msg as Record<string, unknown>;
+          if (record["id"] !== id) continue;
+          if (record["ok"] !== true) {
+            finish(new Error(String(record["error"] ?? "Browser DOM bridge failed.")), null);
+            return;
+          }
+          const data = record["data"] as BrowserDomState | undefined;
+          finish(null, data ?? null);
+          return;
+        }
+      });
+      socket.on("error", (err) => finish(err, null));
+      socket.on("end", () => finish(new Error("Browser DOM bridge disconnected before replying."), null));
+    });
+  }
+
+  async ping(): Promise<boolean> {
+    try {
+      await this.requestNative("ping");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async readPage(url: string): Promise<BrowserDomState | null> {
+    return this.bridge.readPage(url);
   }
 }
 

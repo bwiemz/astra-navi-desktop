@@ -1,0 +1,395 @@
+import { execFile } from "node:child_process";
+import { chmodSync, existsSync } from "node:fs";
+import { copyFile, mkdir, rename, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
+import { dataDir, modelsDir, voiceEnvPython } from "./paths.ts";
+
+const execFileAsync = promisify(execFile);
+
+export type BootstrapTask = "voice" | "ocr" | "launcher" | "browser-bridge" | "all";
+
+export interface BootstrapProgress {
+  task: BootstrapTask;
+  step: string;
+  percent: number;
+  detail: string;
+  ok: boolean;
+}
+
+export interface BootstrapComponentStatus {
+  ready: boolean;
+  detail: string;
+}
+
+export interface BootstrapStatus {
+  voice: BootstrapComponentStatus;
+  ocr: BootstrapComponentStatus;
+  launcher: BootstrapComponentStatus;
+  browserBridge: BootstrapComponentStatus;
+}
+
+export interface BootstrapDeps {
+  platform?: NodeJS.Platform;
+  home?: string;
+  xdgConfigHome?: string;
+  xdgDataHome?: string;
+  appData?: string;
+  localAppData?: string;
+  dataRoot?: string;
+  modelsRoot?: string;
+  voicePython?: string;
+  appRoot?: string;
+  dryRun?: boolean;
+  runCommand?(command: string, args: readonly string[], timeoutMs?: number): Promise<{ stdout: string; stderr: string }>;
+  fetchBytes?(url: string): Promise<Buffer>;
+  onProgress?(progress: BootstrapProgress): void;
+}
+
+const DEFAULT_OCR_FILES = [
+  {
+    name: "det.onnx",
+    url:
+      process.env["ASTRA_NAVI_OCR_DET_URL"] ??
+      process.env["AI_CHAN_OCR_DET_URL"] ??
+      "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/detection/v4/det.onnx",
+  },
+  {
+    name: "rec.onnx",
+    url:
+      process.env["ASTRA_NAVI_OCR_REC_URL"] ??
+      process.env["AI_CHAN_OCR_REC_URL"] ??
+      "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/rec.onnx",
+  },
+  {
+    name: "dict.txt",
+    url:
+      process.env["ASTRA_NAVI_OCR_DICT_URL"] ??
+      process.env["AI_CHAN_OCR_DICT_URL"] ??
+      "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/dict.txt",
+  },
+] as const;
+
+async function defaultRun(
+  command: string,
+  args: readonly string[],
+  timeoutMs = 300_000,
+): Promise<{ stdout: string; stderr: string }> {
+  const { stdout, stderr } = await execFileAsync(command, [...args], {
+    timeout: timeoutMs,
+    encoding: "utf8",
+  });
+  return { stdout, stderr };
+}
+
+async function defaultFetchBytes(url: string): Promise<Buffer> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+function desktopExecEscape(path: string): string {
+  return `"${path.replace(/[\\"`$]/g, "\\$&").replaceAll("%", "%%")}"`;
+}
+
+function resolveEnv(deps: BootstrapDeps) {
+  const platform = deps.platform ?? process.platform;
+  const home = deps.home ?? homedir();
+  const xdgConfigHome = deps.xdgConfigHome ?? process.env["XDG_CONFIG_HOME"] ?? join(home, ".config");
+  const xdgDataHome = deps.xdgDataHome ?? process.env["XDG_DATA_HOME"] ?? join(home, ".local", "share");
+  const appData = deps.appData ?? process.env["APPDATA"] ?? join(home, "AppData", "Roaming");
+  const localAppData = deps.localAppData ?? process.env["LOCALAPPDATA"] ?? join(home, "AppData", "Local");
+  const dataRoot = deps.dataRoot ?? dataDir();
+  const modelsRoot = deps.modelsRoot ?? modelsDir();
+  const voicePython =
+    deps.voicePython ??
+    (deps.dataRoot
+      ? join(
+          deps.dataRoot,
+          "voice-env",
+          platform === "win32" ? "Scripts" : "bin",
+          platform === "win32" ? "python.exe" : "python",
+        )
+      : voiceEnvPython());
+  const appRoot = deps.appRoot ?? resolve(import.meta.dirname, "..", "..");
+  return {
+    platform,
+    home,
+    xdgConfigHome,
+    xdgDataHome,
+    appData,
+    localAppData,
+    dataRoot,
+    modelsRoot,
+    voicePython,
+    appRoot,
+    dryRun: deps.dryRun === true,
+    runCommand: deps.runCommand ?? defaultRun,
+    fetchBytes: deps.fetchBytes ?? defaultFetchBytes,
+    onProgress: deps.onProgress ?? (() => undefined),
+  };
+}
+
+export function launcherTargetPath(deps: BootstrapDeps = {}): string {
+  const env = resolveEnv(deps);
+  if (env.platform === "win32") {
+    return join(env.appData, "Microsoft", "Windows", "Start Menu", "Programs", "Astra Navi Desktop.lnk");
+  }
+  if (env.platform === "darwin") {
+    return join(env.home, "Applications", "Astra Navi Desktop.command");
+  }
+  return join(env.xdgDataHome, "applications", "astra-navi-desktop.desktop");
+}
+
+export async function checkBootstrapStatus(deps: BootstrapDeps = {}): Promise<BootstrapStatus> {
+  const env = resolveEnv(deps);
+  const voiceReady = existsSync(env.voicePython);
+  const ocrDir = join(env.modelsRoot, "ocr");
+  const ocrReady =
+    existsSync(join(ocrDir, "det.onnx")) &&
+    existsSync(join(ocrDir, "rec.onnx")) &&
+    existsSync(join(ocrDir, "dict.txt"));
+  const launcherFile = launcherTargetPath(deps);
+  const launcherReady = existsSync(launcherFile);
+
+  const installer = (await import("../../browser-bridge/install-host.mjs")) as {
+    nativeHostTargets(opts?: {
+      platform?: NodeJS.Platform;
+      home?: string;
+      configHome?: string;
+      localAppData?: string;
+      dataRoot?: string;
+    }): { launcherPath: string; manifests: { file: string }[] };
+  };
+  const targets = installer.nativeHostTargets({
+    platform: env.platform,
+    home: env.home,
+    configHome: env.xdgConfigHome,
+    localAppData: env.localAppData,
+    dataRoot: join(env.dataRoot, "browser-bridge"),
+  });
+  const bridgeReady =
+    existsSync(targets.launcherPath) && targets.manifests.some((m) => existsSync(m.file));
+
+  return {
+    voice: {
+      ready: voiceReady,
+      detail: voiceReady ? `Python voice environment ready (${env.voicePython})` : "Not set up (using built-in Kokoro voice)",
+    },
+    ocr: {
+      ready: ocrReady,
+      detail: ocrReady ? `PP-OCRv4 models ready (${ocrDir})` : "Not downloaded (optional fast ONNX OCR)",
+    },
+    launcher: {
+      ready: launcherReady,
+      detail: launcherReady ? `Desktop launcher installed (${launcherFile})` : "Desktop menu shortcut not installed",
+    },
+    browserBridge: {
+      ready: bridgeReady,
+      detail: bridgeReady ? "Browser native messaging host registered" : "Browser DOM bridge host not registered",
+    },
+  };
+}
+
+async function setupVoice(env: ReturnType<typeof resolveEnv>): Promise<string> {
+  const emit = (step: string, percent: number, detail: string, ok = true) =>
+    env.onProgress({ task: "voice", step, percent, detail, ok });
+
+  const envDir = join(env.dataRoot, "voice-env");
+  emit("probe", 15, "Checking Python / uv toolchain...");
+
+  let hasUv = false;
+  try {
+    await env.runCommand("uv", ["--version"], 5000);
+    hasUv = true;
+  } catch {
+    // uv not installed; fall back to python venv
+  }
+
+  let pyCmd: { cmd: string; preArgs: string[] } | null = null;
+  for (const candidate of env.platform === "win32"
+    ? [
+        { cmd: "py", preArgs: ["-3"] },
+        { cmd: "python", preArgs: [] },
+      ]
+    : [
+        { cmd: "python3", preArgs: [] },
+        { cmd: "python", preArgs: [] },
+      ]) {
+    try {
+      await env.runCommand(candidate.cmd, [...candidate.preArgs, "--version"], 5000);
+      pyCmd = candidate;
+      break;
+    } catch {
+      // try next candidate
+    }
+  }
+
+  if (!hasUv && !pyCmd) {
+    throw new Error("Python 3.10+ (or uv) is required to create the full voice environment.");
+  }
+
+  if (env.dryRun) {
+    emit("done", 100, `Dry run: would create ${envDir} and install qwen-tts.`, true);
+    return `Dry run: voice environment target ${envDir}`;
+  }
+
+  await mkdir(env.dataRoot, { recursive: true, mode: 0o700 });
+  emit("venv", 45, `Creating virtual environment in ${envDir}...`);
+  if (hasUv) {
+    await env.runCommand("uv", ["venv", envDir, "--python", "3.12"], 120_000);
+    emit("install", 75, "Installing qwen-tts packages via uv...");
+    await env.runCommand("uv", ["pip", "install", "--python", env.voicePython, "qwen-tts"], 600_000);
+  } else if (pyCmd) {
+    await env.runCommand(pyCmd.cmd, [...pyCmd.preArgs, "-m", "venv", envDir], 120_000);
+    emit("install", 75, "Installing qwen-tts packages via pip...");
+    await env.runCommand(env.voicePython, ["-m", "pip", "install", "--upgrade", "qwen-tts"], 600_000);
+  }
+
+  emit("done", 100, `Voice environment ready at ${envDir}.`);
+  return `Voice environment installed in ${envDir}`;
+}
+
+async function setupOcr(env: ReturnType<typeof resolveEnv>): Promise<string> {
+  const ocrDir = join(env.modelsRoot, "ocr");
+  env.onProgress({ task: "ocr", step: "prepare", percent: 10, detail: `Preparing ${ocrDir}...`, ok: true });
+  if (env.dryRun) {
+    env.onProgress({
+      task: "ocr",
+      step: "done",
+      percent: 100,
+      detail: `Dry run: would download ${DEFAULT_OCR_FILES.length} ONNX OCR assets into ${ocrDir}.`,
+      ok: true,
+    });
+    return `Dry run: OCR directory ${ocrDir}`;
+  }
+
+  await mkdir(ocrDir, { recursive: true, mode: 0o700 });
+  let idx = 0;
+  for (const file of DEFAULT_OCR_FILES) {
+    idx += 1;
+    const pct = Math.round((idx / (DEFAULT_OCR_FILES.length + 1)) * 100);
+    env.onProgress({ task: "ocr", step: "download", percent: pct, detail: `Fetching ${file.name}...`, ok: true });
+    const bytes = await env.fetchBytes(file.url);
+    const dest = join(ocrDir, file.name);
+    const tmp = `${dest}.tmp`;
+    await writeFile(tmp, bytes, { mode: 0o600 });
+    await rename(tmp, dest);
+  }
+  env.onProgress({ task: "ocr", step: "done", percent: 100, detail: `OCR models installed in ${ocrDir}.`, ok: true });
+  return `OCR models installed in ${ocrDir}`;
+}
+
+async function setupLauncher(env: ReturnType<typeof resolveEnv>): Promise<string> {
+  const target = launcherTargetPath(env);
+  env.onProgress({ task: "launcher", step: "write", percent: 40, detail: `Installing shortcut at ${target}...`, ok: true });
+  if (env.dryRun) {
+    env.onProgress({ task: "launcher", step: "done", percent: 100, detail: `Dry run: would install launcher at ${target}.`, ok: true });
+    return `Dry run: launcher ${target}`;
+  }
+
+  if (env.platform === "win32") {
+    await mkdir(dirname(target), { recursive: true });
+    const exeTarget = process.execPath;
+    const iconIco = join(env.appRoot, "assets", "icon.png");
+    const ps = [
+      "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:ASTRA_LNK_OUT);",
+      "$s.TargetPath=$env:ASTRA_LNK_EXE;",
+      "$s.WorkingDirectory=$env:ASTRA_LNK_CWD;",
+      `$s.Description='Astra Navi Desktop';`,
+      `if (Test-Path $env:ASTRA_LNK_ICON) { $s.IconLocation=$env:ASTRA_LNK_ICON };`,
+      "$s.Save();",
+    ].join(" ");
+    await env.runCommand(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", ps],
+      15_000,
+    ).catch(async () => {
+      // Fallback: write a direct Start Menu .cmd launcher when COM shortcut creation is unavailable in CI/sandbox
+      const fallbackCmd = target.replace(/\.lnk$/i, ".cmd");
+      await writeFile(fallbackCmd, `@echo off\r\nstart "" "${exeTarget}" "${env.appRoot}"\r\n`, "utf8");
+      void iconIco;
+    });
+  } else if (env.platform === "darwin") {
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(
+      target,
+      `#!/usr/bin/env sh\ncd "${env.appRoot}" && exec "${process.execPath}" .\n`,
+      "utf8",
+    );
+    chmodSync(target, 0o755);
+  } else {
+    const iconDest = join(env.xdgDataHome, "icons", "hicolor", "256x256", "apps", "astra-navi-desktop.png");
+    const iconSrc = join(env.appRoot, "assets", "icon.png");
+    await mkdir(dirname(target), { recursive: true });
+    await mkdir(dirname(iconDest), { recursive: true });
+    if (existsSync(iconSrc)) {
+      await copyFile(iconSrc, iconDest);
+    }
+    const execScript = join(env.appRoot, "scripts", "launch.sh");
+    const entry = [
+      "[Desktop Entry]",
+      "Type=Application",
+      "Name=Astra Navi Desktop",
+      "GenericName=Local AI Navigator",
+      "Comment=Local-first AI desktop companion with 3D MMD avatar.",
+      `Exec=${desktopExecEscape(execScript)}`,
+      "Icon=astra-navi-desktop",
+      "Terminal=false",
+      "Categories=Utility;",
+      "StartupWMClass=astra-navi-desktop",
+      "StartupNotify=false",
+      "",
+    ].join("\n");
+    await writeFile(target, entry, { encoding: "utf8", mode: 0o644 });
+  }
+
+  env.onProgress({ task: "launcher", step: "done", percent: 100, detail: `Launcher ready at ${target}.`, ok: true });
+  return `Launcher installed at ${target}`;
+}
+
+async function setupBrowserBridge(env: ReturnType<typeof resolveEnv>): Promise<string> {
+  env.onProgress({ task: "browser-bridge", step: "register", percent: 50, detail: "Registering browser native messaging host...", ok: true });
+  const installer = (await import("../../browser-bridge/install-host.mjs")) as {
+    installNativeHost(opts?: {
+      platform?: NodeJS.Platform;
+      home?: string;
+      configHome?: string;
+      localAppData?: string;
+      dataRoot?: string;
+      hostScript?: string;
+      dryRun?: boolean;
+    }): Promise<{ files: string[]; launcherPath: string }>;
+  };
+  const result = await installer.installNativeHost({
+    platform: env.platform,
+    home: env.home,
+    configHome: env.xdgConfigHome,
+    localAppData: env.localAppData,
+    dataRoot: join(env.dataRoot, "browser-bridge"),
+    hostScript: join(env.appRoot, "browser-bridge", "native-host.mjs"),
+    dryRun: env.dryRun,
+  });
+  env.onProgress({
+    task: "browser-bridge",
+    step: "done",
+    percent: 100,
+    detail: `Registered ${result.files.length} browser host manifest(s).`,
+    ok: true,
+  });
+  return `Registered browser native host (${result.files.length} target manifests)`;
+}
+
+export async function runBootstrapTask(
+  task: BootstrapTask,
+  deps: BootstrapDeps = {},
+): Promise<{ ok: boolean; summary: string[] }> {
+  const env = resolveEnv(deps);
+  const summary: string[] = [];
+  if (task === "voice" || task === "all") summary.push(await setupVoice(env));
+  if (task === "ocr" || task === "all") summary.push(await setupOcr(env));
+  if (task === "launcher" || task === "all") summary.push(await setupLauncher(env));
+  if (task === "browser-bridge" || task === "all") summary.push(await setupBrowserBridge(env));
+  return { ok: true, summary };
+}

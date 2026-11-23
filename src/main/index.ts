@@ -113,23 +113,37 @@ import { programShown } from "./shown.ts";
 import { createTrayMenu } from "./tray.ts";
 import { createVoiceController } from "./voiceControl.ts";
 
-const SCHEME = "aichan";
+const SCHEME = "astranavi";
+const LEGACY_SCHEME = "aichan";
 const APP_ORIGIN = `${SCHEME}://app`;
 /** Gap kept between the window and the screen's bottom-right corner. */
 const CORNER_MARGIN = { right: 24, bottom: 8 };
-const WINDOW_TITLE = "AI-chan Desktop (unofficial fan project)";
+const WINDOW_TITLE = "Astra Navi Desktop";
 const RENDERER_DIR = join(import.meta.dirname, "../renderer");
 
 // Draw through the session's own display system. (Going through XWayland instead was
 // tried for its self-positioning windows; with NVIDIA drivers the window never appears.)
 if (process.platform === "linux") {
   const display = process.env["XDG_SESSION_TYPE"] === "wayland" ? "wayland" : "x11";
-  app.commandLine.appendSwitch("ozone-platform", process.env["AI_CHAN_OZONE"] ?? display);
+  app.commandLine.appendSwitch(
+    "ozone-platform",
+    process.env["ASTRA_NAVI_OZONE"] ?? process.env["AI_CHAN_OZONE"] ?? display,
+  );
 }
 
 protocol.registerSchemesAsPrivileged([
   {
     scheme: SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+  {
+    scheme: LEGACY_SCHEME,
     privileges: {
       standard: true,
       secure: true,
@@ -797,7 +811,7 @@ function showNotice(text: string): void {
     // Some desktops read a notification's text as markup. A job's output is not ours
     // to have rendered, so the two characters markup is written with are swapped out.
     const body = message.replace(/</g, "‹").replace(/>/g, "›");
-    const notice = new Notification({ title: "AI-chan", body });
+    const notice = new Notification({ title: "Astra Navi", body });
     notice.on("click", () => showWindow(true));
     notice.show();
   } else if (mainWindow && !mainWindow.isVisible()) {
@@ -932,7 +946,7 @@ async function askAboutStep(
     buttons: ["Allow this step", "Do not allow"],
     defaultId: 1,
     cancelId: 1,
-    title: "AI-chan: a mission is waiting for you",
+    title: "Astra Navi: a mission is waiting for you",
     message: `Mission "${card.mission}", step ${card.step} of ${card.steps}: ${card.title}`,
     // The card's command already has any character that would not show written out.
     detail: `On ${card.where}:\n${card.command}\n\n${card.reason}${sensitive ? "\n\nThis touches a place where passwords or keys are kept, so it can only be answered here." : ""}`,
@@ -1065,7 +1079,7 @@ async function main(): Promise<void> {
     await memory.load();
   } catch (error) {
     dialog.showErrorBox(
-      "AI-chan's memory could not be read",
+      "Astra Navi's memory could not be read",
       error instanceof Error ? error.message : String(error),
     );
     app.quit();
@@ -1078,7 +1092,7 @@ async function main(): Promise<void> {
     store = new HerStore(storeFile());
   } catch (error) {
     dialog.showErrorBox(
-      "AI-chan's records could not be opened",
+      "Astra Navi's records could not be opened",
       error instanceof Error ? error.message : String(error),
     );
     app.quit();
@@ -1089,7 +1103,7 @@ async function main(): Promise<void> {
   startShipServices(environment.workspace);
   engine = new LocalEngine({
     modelsDir: modelsDir(),
-    choice: process.env["AI_CHAN_BRAIN"] ?? config.value.brain,
+    choice: process.env["ASTRA_NAVI_BRAIN"] ?? process.env["AI_CHAN_BRAIN"] ?? config.value.brain,
     contextSize: config.value.contextSize,
     idleUnloadMs: config.value.idleUnloadMinutes * 60_000,
     lean: config.value.leanMemory,
@@ -1122,7 +1136,7 @@ async function main(): Promise<void> {
   noticeWatch = new NoticeWatch({
     skip: () => config.value.notices.skip,
     // Her own notifications (a reminder shown while her window is hidden) are not news to her.
-    ownNames: [app.getName(), "ai-chan"],
+    ownNames: [app.getName(), "Astra Navi", "astra-navi", "ai-chan"],
   });
   if (config.value.notices.read) noticeWatch.start();
   // Before the station opens (it reads the same file), so Settings can show whether a
@@ -1134,9 +1148,9 @@ async function main(): Promise<void> {
     scriptDir: scratchDir(),
     modelsCacheDir: join(modelsDir(), "speech"),
     handsScript: join(app.getAppPath(), "hands", "hands.py"),
-    ownApps: [app.getName()],
+    ownApps: [app.getName(), "astra-navi-desktop", "ai-chan-desktop"],
     stationDir: stationDir(),
-    phoneAppFile: join(app.getAppPath(), "phone-app", "build", "ai-chan.apk"),
+    phoneAppFile: join(app.getAppPath(), "phone-app", "build", "astra-navi.apk"),
     onNotice: (text) =>
       initiative?.raise({ kind: "alert", requested: false, outsideText: true, text }),
     // Shown in her window too, and before her reply to it starts: see takeAwayMessage.
@@ -1352,6 +1366,13 @@ async function main(): Promise<void> {
   settings.noteStartAtLogin(await startsAtLogin());
   createWindow();
   createTray();
+  if (
+    !config.value.onboardingComplete &&
+    !process.env["AI_CHAN_DEBUG_CAPTURE"] &&
+    !process.env["AI_CHAN_DEBUG_SETTINGS"]
+  ) {
+    settings.openSettings();
+  }
   // Her watch, her memory of the PC's sound and the station, as the settings have them.
   void reach.start().then(() => {
     rebuildTrayMenu();

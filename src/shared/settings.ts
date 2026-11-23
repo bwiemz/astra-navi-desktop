@@ -95,8 +95,46 @@ export interface SettingsView {
   machines: MachineView[];
   /** The desktop has a password window she can have SSH ask with. */
   canAskPassword: boolean;
+  /** Whether the first-run setup wizard has been completed. */
+  onboardingComplete: boolean;
+  /** Whether Advanced power-user controls are shown in Settings. */
+  advancedSettings: boolean;
+  /** Optional local service availability reported by the cross-platform bootstrapper. */
+  bootstrapStatus?: BootstrapStatusView;
   /** Default-off Tier 10 experimental capability switches. */
   tier10: Tier10Settings;
+}
+
+export interface BootstrapComponentView {
+  ready: boolean;
+  detail: string;
+}
+
+export interface BootstrapStatusView {
+  voice: BootstrapComponentView;
+  ocr: BootstrapComponentView;
+  launcher: BootstrapComponentView;
+  browserBridge: BootstrapComponentView;
+}
+
+export interface HardwareRecommendationView {
+  gpuName: string | null;
+  totalVramGb: number;
+  freeVramGb: number;
+  systemRamGb: number;
+  cpuThreads: number;
+  memoryBandwidthGbps: number | null;
+  recommendedTier: "small" | "standard" | "large" | "xl";
+  quantization: string;
+  contextSize: number;
+  leanMemory: boolean;
+  reason: string;
+}
+
+export interface PolicyAuditSummaryView {
+  ok: boolean;
+  counts: { critical: number; warning: number; info: number };
+  findings: { code: string; severity: string; subject: string; message: string; remediation: string }[];
 }
 
 /** One of the user's calendars, as the panel shows it. */
@@ -200,6 +238,8 @@ export interface SettingsPatch {
   headsUpMinutes?: number;
   station?: boolean;
   pingPhone?: boolean;
+  onboardingComplete?: boolean;
+  advancedSettings?: boolean;
   tier10?: Partial<Tier10Settings>;
 }
 
@@ -262,4 +302,16 @@ export interface SettingsBridge {
   ): Promise<{ restored: boolean; keptNew: string | null }>;
   /** Asks (with a confirmation) to forget a machine; resolves with the fresh view. */
   removeMachine(id: string): Promise<SettingsView>;
+  /** Probes local GPU/VRAM/RAM and recommends the optimal brain tier & quantization. */
+  hardwareProfile(force?: boolean): Promise<HardwareRecommendationView>;
+  /** Reads a bundled voice sample wav as a base64 data URI, or null if missing. */
+  previewVoice(name: string): Promise<string | null>;
+  /** Switches to (and triggers download/load of) a brain tier from the onboarding wizard. */
+  downloadBrain(tier: string): Promise<SettingsView>;
+  /** Runs a cross-platform optional setup task and returns updated service statuses. */
+  runBootstrap(
+    task: "voice" | "ocr" | "launcher" | "browser-bridge" | "all",
+  ): Promise<{ ok: boolean; summary: string[]; status: BootstrapStatusView }>;
+  /** Runs static security policy audit against current config & standing orders. */
+  runPolicyAudit(): Promise<PolicyAuditSummaryView>;
 }

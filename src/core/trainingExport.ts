@@ -40,7 +40,7 @@ export interface SftExample {
 }
 
 const DEFAULT_SYSTEM_PROMPT =
-  "You are AI-chan, a helpful local desktop assistant. Speak concisely, use tools whenever checking state or acting, and never claim an action or lookup without calling a tool first.";
+  "You are Astra Navi, a helpful local desktop companion. Speak concisely, use tools whenever checking state or acting, and never claim an action or lookup without calling a tool first.";
 
 /** True for larger teacher brains (9B+ Standard / Large), false for the Small 4B model. */
 export function isTeacherBrain(brainLabel: string): boolean {

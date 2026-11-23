@@ -1,4 +1,6 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { DesktopLayout, MediaAction, NowPlaying, WindowAction, WindowDetail } from "../desktop.ts";
 import type { Control } from "../hands.ts";
 import type { MonitorChild } from "../notices.ts";
@@ -199,56 +201,282 @@ export function verifyTopWindowBeforeInput(
   return topWindow !== null && topWindow.id === expectedWindowId;
 }
 
+export interface WinWorkerRpcResponse {
+  id?: unknown;
+  ok?: unknown;
+  data?: unknown;
+  error?: unknown;
+}
+
+export interface PersistentWinWorkerOptions {
+  command: string;
+  args: readonly string[];
+  requestTimeoutMs?: number;
+  maxLineBytes?: number;
+  spawnProcess?: (
+    command: string,
+    args: readonly string[],
+    options: { stdio: ["pipe", "pipe", "pipe"] },
+  ) => ChildProcess;
+}
+
+/**
+ * Keeps a single stdio worker process alive (`win-hands.exe --serve` or `win_hands.ps1 -Serve`)
+ * and multiplexes newline-delimited JSON-RPC calls to avoid process spawn overhead on every action.
+ */
+export class PersistentWinWorker {
+  private readonly command: string;
+  private readonly args: readonly string[];
+  private readonly requestTimeoutMs: number;
+  private readonly maxLineBytes: number;
+  private readonly spawnProcess: NonNullable<PersistentWinWorkerOptions["spawnProcess"]>;
+  private child: ChildProcess | null = null;
+  private disposed = false;
+  private seq = 0;
+  private lineBuffer = "";
+  private readonly pending = new Map<
+    string,
+    {
+      resolve: (value: string) => void;
+      reject: (error: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
+
+  constructor(options: PersistentWinWorkerOptions) {
+    this.command = options.command;
+    this.args = options.args;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
+    this.maxLineBytes = options.maxLineBytes ?? 4 * 1024 * 1024;
+    this.spawnProcess =
+      options.spawnProcess ??
+      ((command, args, opts) => spawn(command, [...args], opts));
+  }
+
+  private ensureStarted(): ChildProcess {
+    if (this.disposed) throw new Error("Persistent Windows worker has been disposed.");
+    if (this.child && !this.child.killed && this.child.exitCode === null) return this.child;
+
+    const proc = this.spawnProcess(this.command, this.args, {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    this.child = proc;
+    this.lineBuffer = "";
+
+    const failAll = (reason: string): void => {
+      if (this.child === proc) this.child = null;
+      for (const [id, entry] of this.pending.entries()) {
+        this.pending.delete(id);
+        clearTimeout(entry.timer);
+        entry.reject(new Error(reason));
+      }
+    };
+
+    proc.stdout?.setEncoding("utf8");
+    proc.stdout?.on("data", (chunk: string) => {
+      this.lineBuffer += chunk;
+      if (this.lineBuffer.length > this.maxLineBytes) {
+        this.lineBuffer = "";
+        proc.kill();
+        failAll("Windows persistent worker exceeded maximum response size.");
+        return;
+      }
+      for (let nl = this.lineBuffer.indexOf("\n"); nl !== -1; nl = this.lineBuffer.indexOf("\n")) {
+        const rawLine = this.lineBuffer.slice(0, nl).trim();
+        this.lineBuffer = this.lineBuffer.slice(nl + 1);
+        if (!rawLine) continue;
+        let parsed: WinWorkerRpcResponse;
+        try {
+          parsed = JSON.parse(rawLine) as WinWorkerRpcResponse;
+        } catch {
+          continue;
+        }
+        const id = typeof parsed.id === "string" ? parsed.id : String(parsed.id ?? "");
+        const waiter = this.pending.get(id);
+        if (!waiter) continue;
+        this.pending.delete(id);
+        clearTimeout(waiter.timer);
+        if (parsed.ok === true) {
+          waiter.resolve(typeof parsed.data === "string" ? parsed.data : JSON.stringify(parsed.data ?? ""));
+        } else {
+          waiter.reject(new Error(typeof parsed.error === "string" ? parsed.error : "Windows worker error."));
+        }
+      }
+    });
+
+    const stderrTail: string[] = [];
+    proc.stderr?.setEncoding("utf8");
+    proc.stderr?.on("data", (chunk: string) => {
+      if (stderrTail.length < 10) stderrTail.push(chunk.slice(0, 500));
+    });
+
+    proc.on("error", (err) => {
+      failAll(err.message || "Windows worker failed to start.");
+    });
+    proc.on("exit", (code, signal) => {
+      const detail = stderrTail.join("").trim();
+      failAll(
+        detail ||
+          `Windows persistent worker exited unexpectedly (${signal ?? `code ${code ?? "unknown"}`}).`,
+      );
+    });
+
+    return proc;
+  }
+
+  call(verb: string, payload: unknown): Promise<string> {
+    const proc = this.ensureStarted();
+    const id = `w-${++this.seq}`;
+    const line = `${JSON.stringify({ id, verb, payload: payload ?? {} })}\n`;
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        proc.kill();
+        if (this.child === proc) this.child = null;
+        reject(new Error(`Windows helper timed out on ${verb}.`));
+      }, this.requestTimeoutMs);
+
+      this.pending.set(id, { resolve, reject, timer });
+      try {
+        proc.stdin?.write(line, "utf8", (err) => {
+          if (!err) return;
+          const waiter = this.pending.get(id);
+          if (!waiter) return;
+          this.pending.delete(id);
+          clearTimeout(waiter.timer);
+          waiter.reject(err);
+        });
+      } catch (err) {
+        const waiter = this.pending.get(id);
+        if (waiter) {
+          this.pending.delete(id);
+          clearTimeout(waiter.timer);
+        }
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  isRunning(): boolean {
+    return this.child !== null && !this.child.killed && this.child.exitCode === null;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    const proc = this.child;
+    this.child = null;
+    for (const [id, entry] of this.pending.entries()) {
+      this.pending.delete(id);
+      clearTimeout(entry.timer);
+      entry.reject(new Error("Windows worker disposed."));
+    }
+    if (proc && !proc.killed) {
+      proc.stdin?.end();
+      proc.kill();
+    }
+  }
+}
+
+export function resolveNativeWinHandsBinary(
+  scriptPath: string,
+  explicitPath?: string,
+  checkExists: (path: string) => boolean = existsSync,
+): string | null {
+  const candidates = [
+    explicitPath,
+    process.env["ASTRA_NAVI_WIN_HANDS_BIN"],
+    join(dirname(scriptPath), "win-hands-native", "win-hands.exe"),
+    join(dirname(scriptPath), "win-hands-native", "bin", "win-hands.exe"),
+    join(dirname(scriptPath), "win-hands-native", "bin", "Release", "net9.0", "win-x64", "publish", "win-hands.exe"),
+  ].filter((p): p is string => typeof p === "string" && p.length > 0);
+  return candidates.find((candidate) => checkExists(candidate)) ?? null;
+}
+
 export class WindowsPlatformAdapter implements PlatformAdapter {
   readonly platform = "win32" as const;
   private readonly scriptPath: string;
   private readonly runScript: (verb: string, payload: unknown) => Promise<string>;
+  private readonly primaryWorker: PersistentWinWorker | null;
+  private readonly fallbackWorker: PersistentWinWorker | null;
+  private readonly workerKind: "native" | "powershell" | "custom";
 
   constructor(options: {
     scriptPath: string;
+    nativeBinaryPath?: string;
+    requestTimeoutMs?: number;
+    spawnProcess?: PersistentWinWorkerOptions["spawnProcess"];
     runScript?: (verb: string, payload: unknown) => Promise<string>;
   }) {
     this.scriptPath = options.scriptPath;
-    this.runScript = options.runScript ?? ((verb, payload) => this.invokePowershell(verb, payload));
+    if (options.runScript) {
+      this.primaryWorker = null;
+      this.fallbackWorker = null;
+      this.workerKind = "custom";
+      this.runScript = options.runScript;
+      return;
+    }
+
+    const nativeBin = resolveNativeWinHandsBinary(options.scriptPath, options.nativeBinaryPath);
+    const psArgs = [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      this.scriptPath,
+      "-Serve",
+    ];
+    if (nativeBin) {
+      this.workerKind = "native";
+      const nativeWorker = new PersistentWinWorker({
+        command: nativeBin,
+        args: ["--serve"],
+        requestTimeoutMs: options.requestTimeoutMs,
+        spawnProcess: options.spawnProcess,
+      });
+      const psWorker = new PersistentWinWorker({
+        command: "powershell.exe",
+        args: psArgs,
+        requestTimeoutMs: options.requestTimeoutMs,
+        spawnProcess: options.spawnProcess,
+      });
+      this.primaryWorker = nativeWorker;
+      this.fallbackWorker = psWorker;
+      this.runScript = async (verb, payload) => {
+        if (verb === "controls" || verb === "press" || verb === "fill") {
+          return psWorker.call(verb, payload);
+        }
+        try {
+          return await nativeWorker.call(verb, payload);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes("UIA_FALLBACK")) {
+            return psWorker.call(verb, payload);
+          }
+          throw err;
+        }
+      };
+    } else {
+      this.workerKind = "powershell";
+      const psWorker = new PersistentWinWorker({
+        command: "powershell.exe",
+        args: psArgs,
+        requestTimeoutMs: options.requestTimeoutMs,
+        spawnProcess: options.spawnProcess,
+      });
+      this.primaryWorker = psWorker;
+      this.fallbackWorker = null;
+      this.runScript = (verb, payload) => psWorker.call(verb, payload);
+    }
   }
 
-  private invokePowershell(verb: string, payload: unknown): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", this.scriptPath, verb],
-        { stdio: ["pipe", "pipe", "pipe"] },
-      );
-      const out: Buffer[] = [];
-      const err: Buffer[] = [];
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        child.kill();
-        reject(new Error(`Windows helper timed out on ${verb}.`));
-      }, 15_000);
+  activeWorkerKind(): "native" | "powershell" | "custom" {
+    return this.workerKind;
+  }
 
-      child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
-      child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
-      child.on("error", (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        reject(error);
-      });
-      child.on("close", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (code !== 0) {
-          reject(new Error(Buffer.concat(err).toString("utf8").trim() || `PowerShell exit ${code}`));
-          return;
-        }
-        resolve(Buffer.concat(out).toString("utf8"));
-      });
-      child.stdin.end(JSON.stringify(payload ?? {}));
-    });
+  dispose(): void {
+    this.primaryWorker?.dispose();
+    this.fallbackWorker?.dispose();
   }
 
   readonly windowManager: PlatformAdapter["windowManager"] = {

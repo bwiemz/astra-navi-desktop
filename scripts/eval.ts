@@ -221,6 +221,7 @@ interface Options {
   fittingTools: boolean;
   /** Run on the processor alone with this many threads; null runs on the graphics card. */
   cpu: number | null;
+  lora: string | null;
   force: boolean;
   overwrite: boolean;
   compare: [string, string] | null;
@@ -251,6 +252,7 @@ function readOptions(args: readonly string[]): Options {
     itsToolsOnly: false,
     fittingTools: false,
     cpu: null,
+    lora: null,
     force: false,
     overwrite: false,
     compare: null,
@@ -299,6 +301,7 @@ function readOptions(args: readonly string[]): Options {
     else if (flag === "--its-tools-only") options.itsToolsOnly = true;
     else if (flag === "--fitting-tools") options.fittingTools = true;
     else if (flag === "--cpu") options.cpu = Math.min(16, Math.floor(count(flag, 1)));
+    else if (flag === "--lora") options.lora = value(flag);
     else if (flag === "--force") options.force = true;
     else if (flag === "--overwrite") options.overwrite = true;
     else if (flag === "--list") options.list = true;
@@ -479,7 +482,11 @@ for (const test of ALL_CASES) {
   ids.add(test.id);
 }
 
-const choice = process.env["AI_CHAN_BRAIN"] ?? "auto";
+if (options.lora !== null && !existsSync(options.lora)) {
+  fail(`LoRA adapter file not found: ${options.lora}`);
+}
+
+const choice = process.env["ASTRA_NAVI_BRAIN"] ?? process.env["AI_CHAN_BRAIN"] ?? "auto";
 const subset =
   options.only.length > 0 ||
   options.cases.length > 0 ||
@@ -521,8 +528,11 @@ const scratch = await mkdtemp(join(tmpdir(), "ai-chan-eval-"));
 // However the run ends, even by an error before it has properly begun, the folder goes.
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 process.env["AI_CHAN_MODELS_DIR"] = models;
+process.env["ASTRA_NAVI_MODELS_DIR"] = models;
 process.env["AI_CHAN_DATA_DIR"] = join(scratch, "data");
+process.env["ASTRA_NAVI_DATA_DIR"] = join(scratch, "data");
 process.env["AI_CHAN_WORKSPACE"] = join(scratch, "workspace");
+process.env["ASTRA_NAVI_WORKSPACE"] = join(scratch, "workspace");
 process.env["AI_CHAN_REHEARSE_DESKTOP"] = "1";
 process.env["AI_CHAN_NO_VIRTUAL_INPUT"] = "1";
 await mkdir(dataDir(), { recursive: true });
@@ -554,11 +564,13 @@ const loading: { started: number; readyAt: number; seconds: number | null; label
   seconds: null,
   label: choice,
 };
+const loraPath = options.lora;
 const engine = new LocalEngine({
   modelsDir: models,
   choice,
   contextSize: config.value.contextSize,
   lean: options.lean,
+  ...(loraPath === null ? {} : { adapterFor: () => loraPath }),
   ...(options.cpu === null ? {} : { processorOnly: { threads: options.cpu } }),
   idleUnloadMs: 0,
   onStatus(status): void {
@@ -649,7 +661,7 @@ const brain: Brain = new Brain({
     hands: new Hands({ script: join(ROOT, "hands", "hands.py") }),
     sight,
     scriptDir: scratchDir(),
-    ownApps: ["ai-chan-desktop"],
+    ownApps: ["astra-navi-desktop", "ai-chan-desktop"],
   },
   phone: true,
   fleet: new Fleet({ dir: fleetDir(), machines: () => PRETEND_MACHINES }),

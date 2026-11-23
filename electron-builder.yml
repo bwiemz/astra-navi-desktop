@@ -1,0 +1,45 @@
+appId: app.astranavi.desktop
+productName: Astra Navi Desktop
+copyright: Copyright © 2026 Astra Navi Contributors (MIT)
+directories:
+  output: dist
+  buildResources: assets
+asar: true
+files:
+  - out/**/*
+  - package.json
+  - "!node_modules/**/*.map"
+extraResources:
+  - from: assets
+    to: assets
+  - from: hands
+    to: hands
+    filter:
+      - "**/*"
+      - "!win-hands-native/obj/**"
+  - from: voice-server
+    to: voice-server
+  - from: browser-bridge
+    to: browser-bridge
+linux:
+  target:
+    - AppImage
+    - deb
+  icon: assets/icon.png
+  category: Utility
+  desktop:
+    entry:
+      Name: Astra Navi Desktop
+      Comment: Local-first AI desktop companion with 3D MMD avatar.
+      StartupWMClass: astra-navi-desktop
+win:
+  target:
+    - nsis
+  icon: assets/icon.png
+  signAndEditExecutable: true
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

@@ -21,7 +21,7 @@ import { MOODS } from "../src/shared/ipc.ts";
 const env: EnvironmentFacts = {
   userName: "sam",
   home: "/home/sam",
-  workspace: "/home/sam/Documents/AI-chan",
+  workspace: "/home/sam/Documents/Astra-Navi",
   osName: "Arch Linux",
   desktop: "KDE (wayland)",
   commands: new Set(["pacman", "pkexec", "ffmpeg", "ffprobe", "soffice"]),
@@ -49,11 +49,12 @@ describe("buildSystemPrompt", () => {
     }
   });
 
-  it("describes this computer and says it is an unofficial fan project", () => {
+  it("describes this computer and introduces Astra Navi as a local AI model", () => {
     const prompt = buildSystemPrompt(env, "(none)");
     expect(prompt).toContain("pkexec pacman -S --needed --noconfirm");
-    expect(prompt).toContain("/home/sam/Documents/AI-chan");
-    expect(prompt).toContain("unofficial");
+    expect(prompt).toContain("/home/sam/Documents/Astra-Navi");
+    expect(prompt).toContain("Astra Navi");
+    expect(prompt).toContain("open AI model");
     expect(prompt).not.toMatch(/sudo [a-z]/);
   });
 

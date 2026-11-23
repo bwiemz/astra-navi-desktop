@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the phone app (phone-app/) into phone-app/build/ai-chan.apk, which the station
+# Builds the phone app (phone-app/) into phone-app/build/astra-navi.apk, which the station
 # then offers to paired phones. Needs the tools fetched by scripts/setup-android.sh.
 #
 # The app is signed with a key made on this computer the first time and kept with her
@@ -8,8 +8,14 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
-tools="${AI_CHAN_ANDROID_TOOLS:-${XDG_DATA_HOME:-${HOME}/.local/share}/ai-chan-android}"
-data="${AI_CHAN_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/ai-chan}"
+xdg_data="${XDG_DATA_HOME:-${HOME}/.local/share}"
+default_tools="${xdg_data}/astra-navi-android"
+[[ ! -d "${default_tools}" && -d "${xdg_data}/ai-chan-android" ]] && default_tools="${xdg_data}/ai-chan-android"
+tools="${ASTRA_NAVI_ANDROID_TOOLS:-${AI_CHAN_ANDROID_TOOLS:-${default_tools}}}"
+
+default_data="${xdg_data}/astra-navi"
+[[ ! -d "${default_data}" && -d "${xdg_data}/ai-chan" ]] && default_data="${xdg_data}/ai-chan"
+data="${ASTRA_NAVI_DATA_DIR:-${AI_CHAN_DATA_DIR:-${default_data}}}"
 bt="${tools}/sdk/build-tools/35.0.0"
 platform="${tools}/sdk/platforms/android-35/android.jar"
 export JAVA_HOME="${tools}/jdk"
@@ -64,14 +70,14 @@ if [[ ! -f "${key}" ]]; then
     head -c 24 /dev/urandom | base64 | tr -d '\n/+=' >"${pass}"
     keytool -genkeypair -keystore "${key}" -storetype PKCS12 -storepass:file "${pass}" \
       -alias aichan -keyalg EC -groupname secp256r1 -validity 10950 \
-      -dname "CN=AI-chan fan app (built on this computer)" >/dev/null 2>&1
+      -dname "CN=Astra Navi companion app (built on this computer)" >/dev/null 2>&1
   )
 fi
 "${bt}/apksigner" sign --ks "${key}" --ks-type PKCS12 --ks-key-alias aichan \
-  --ks-pass "file:${pass}" --out "${out}/ai-chan.apk" "${out}/aligned.apk"
-"${bt}/apksigner" verify "${out}/ai-chan.apk"
+  --ks-pass "file:${pass}" --out "${out}/astra-navi.apk" "${out}/aligned.apk"
+"${bt}/apksigner" verify "${out}/astra-navi.apk"
 
 rm -rf "${out}/gen" "${out}/classes" "${out}/dex" "${out}/res.zip" "${out}/unsigned.apk" \
-  "${out}/aligned.apk" "${out}/ai-chan.apk.idsig"
+  "${out}/aligned.apk" "${out}/astra-navi.apk.idsig"
 printf '%s\n' "${name:-0.1.0}" >"${out}/version"
-echo "Built ${out}/ai-chan.apk ($(du -h "${out}/ai-chan.apk" | cut -f1), version ${name:-0.1.0}, build ${code})"
+echo "Built ${out}/astra-navi.apk ($(du -h "${out}/astra-navi.apk" | cut -f1), version ${name:-0.1.0}, build ${code})"

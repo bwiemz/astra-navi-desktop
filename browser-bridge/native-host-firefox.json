@@ -1,0 +1,9 @@
+{
+  "name": "app.astranavi.dom_bridge",
+  "description": "Astra Navi Desktop local semantic DOM native messaging host",
+  "path": "/usr/local/bin/astra-navi-dom-bridge",
+  "type": "stdio",
+  "allowed_extensions": [
+    "dom-bridge@astranavi.app"
+  ]
+}

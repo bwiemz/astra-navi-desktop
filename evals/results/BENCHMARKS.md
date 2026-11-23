@@ -1,0 +1,143 @@
+# Astra Navi Desktop — Verification & Live GPU Benchmark Report
+
+This report records the measured prompt sizes, semantic tool-routing efficiency, deterministic security/fuzz gates, live GPU evaluation results, end-to-end LoRA distillation experiment, and local field checks collected on real hardware before publishing `astra-navi-desktop`.
+
+> All benchmark runs below used `--fitting-tools`, temperature `0.7`, context size `16,384` tokens, thinking budget `256` tokens, and an isolated temporary data directory (`0` side effects on host files). Temporary eval JSON/JSONL outputs and LoRA artifacts live outside git (`.gitignore` excludes `evals/results/*.json` and `*.jsonl`).
+
+## Hardware & Model Environment
+
+| Component | Measured / Used |
+| --- | --- |
+| GPU | NVIDIA RTX PRO 4500 Blackwell (`32,623 MiB` VRAM, driver `620.73.04`) |
+| Small brain (4B) | `Qwen3.5-4B-Q4_K_M.gguf` |
+| Standard brain (9B) | `Qwen3.5-9B-Q4_K_M.gguf` |
+| Large brain (27B) | `Qwen3.8-27B-UD-Q4_K_M.gguf` |
+| Embeddings / tool router | `multilingual-e5-small` |
+| Runtime | Node.js `v24+`, `node-llama-cpp`, PyTorch + PEFT (`train/lora.py`) |
+
+---
+
+## 1. Prompt Budgets & Dynamic Two-Stage Tool Routing
+
+### Prompt Size (`npm run prompt-size` & `--ci`)
+
+| Configuration | Qwen3.5-4B GGUF Vocab | Offline CI Byte-BPE (`--ci`) |
+| --- | --- | --- |
+| Instructions alone (no optional abilities) | `2,921` tokens | `3,224` tokens |
+| Instructions alone (all abilities enabled) | `3,247` tokens | `3,599` tokens |
+| **Dynamic core baseline (11 routed core tools)** | **`4,552` tokens** | **`4,939` tokens** |
+| Usual tools enabled (31 tools) | `7,321` tokens | `7,777` tokens |
+| Everything enabled (35 tools) | `8,797` tokens | `9,338` tokens |
+
+Dynamic two-stage routing (`CORE_TOOLS` + per-turn intent routing) cuts the initial prompt from `8,797` tokens (all tools) down to `4,552` tokens at baseline (`-48.3%`), keeping the Small (4B) and Standard (9B) KV cache roomy and first-reply latency low.
+
+### Tool Routing Coverage (`npm run route-check`)
+
+| Mode | Expected-Tool Case Coverage | Avg Tool Tokens / Msg | Median / Max Tokens | All 36 Tools Baseline | Roundabout Requests Covered |
+| --- | --- | --- | --- | --- | --- |
+| Full hybrid router (words + `multilingual-e5-small` + recent) | **69 / 71 (`97.2%`)** | **`1,942` tokens** (`13.9` tools) | `1,892` / `2,606` | `5,278` (`1,532` core) | **26 / 36** |
+| Lexical + recent fallback (`--words-only`, used in CI) | **69 / 71 (`97.2%`)** | **`1,633` tokens** (`11.7` tools) | `1,532` / `2,300` | `5,278` (`1,532` core) | **0 / 36** |
+
+The two unrouted cases (`multistep/visual-look-then-click` and `multistep/visual-disambiguate-som`) initially omitted `look_at_screen`; at runtime, missing-tool fallback re-offers the full toolset when needed. Semantic embeddings lift roundabout phrasing coverage from `0/36` to `26/36`.
+
+---
+
+## 2. Deterministic Security & Policy Gates
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| Indirect prompt-injection & taint fuzzer | `npm run eval -- --fuzz` (`500` cases, seed `20261122`) | **500 / 500 passed** (`0` unauthorized allows, `0` unseen leaks): `web` 100/100, `agenda` 100/100, `notices` 100/100, `documents` 100/100, `fleet` 100/100 |
+| Static policy & rule-conflict audit | `npm run eval -- --audit` | **PASS** (`critical=0, warning=0, info=0`) |
+| Offline typecheck, lint & Vitest suite | `npm run check` | All typecheck (`tsconfig.node.json` + `tsconfig.web.json`), ESLint, and Vitest specs green |
+
+---
+
+## 3. Live GPU Evaluation Across Model Tiers (`163` Cases)
+
+All three built-in tiers were benchmarked on the full 163-case suite (`--fitting-tools`):
+
+| Category | Cases | `bench-small-base` (Qwen3.5 4B) | `bench-standard` (Qwen3.5 9B) | `bench-large` (Qwen3.8 27B) |
+| --- | --- | --- | --- | --- |
+| Tool choice & arguments | 47 | 91.5% (resisted 100%) | 93.6% (resisted 100%) | **95.7%** (resisted 100%) |
+| Follow-through honesty | 15 | 60.0% | 80.0% | **100.0%** |
+| Safe under injected text | 15 | 86.7% (did not try 87%) | 86.7% (did not try 100%) | **100.0%** (did not try 100%) |
+| Character & form | 18 | 66.7% | **88.9%** | 83.3% |
+| Using what she knows | 17 | 82.4% | 64.7% | **88.2%** |
+| Reasoning & knowledge | 35 | **97.1%** | 94.3% | 85.7% |
+| Multi-step | 16 | **87.5%** | 75.0% | 81.3% |
+| **Overall (mean of categories)** | **163** | **81.7% (`82%`)** | **83.3% (`83%`)** | **90.6% (`91%`)** |
+| **Nothing leaked** | **163** | **100%** | **100%** | **100%** |
+
+### Latency, Throughput & Resource Footprint
+
+| Metric | `bench-small-base` (4B) | `bench-standard` (9B) | `bench-large` (27B) |
+| --- | --- | --- | --- |
+| Total 163-case suite runtime | `6.94 min` | `8.34 min` | `25.35 min` |
+| Model load time | `2.09 s` | `3.27 s` | `7.96 s` |
+| First reply after load | `1.94 s` | `3.06 s` | `5.20 s` |
+| Median time-to-first-word (TTFT) | **`1.15 s`** | `2.02 s` | `4.30 s` |
+| Writing speed | **`170.8 tok/s`** | `113.6 tok/s` | `38.9 tok/s` |
+| First-turn prompt tokens | `5,246` | `5,250` | `5,283` |
+| Own VRAM (loaded / peak) | `3,992 / 4,000 MiB` | `6,262 / 6,270 MiB` | `16,792 / 16,802 MiB` |
+| Whole GPU peak (incl. desktop) | `6,390 MiB` | `8,134 MiB` | `18,629 MiB` |
+| Process peak RSS | `3,283 MiB` | `2,698 MiB` | `16,495 MiB` |
+| Follow-through checks (acted / corrected) | `4` checked (`2` acted, `8` corrected) | `2` checked (`1` acted, `4` corrected) | `1` checked (`0` acted, `1` corrected) |
+
+---
+
+## 4. End-to-End GPU LoRA Distillation Pass & Before/After Comparison
+
+We executed an end-to-end distillation run on the RTX PRO 4500 GPU using real trace exports (`npm run export-pairs`), `train/lora.py`, `convert_lora_to_gguf.py`, and `npm run eval -- --lora ... --compare` to verify the pipeline empirically rather than shipping untested weights.
+
+### Dataset & Training Run
+
+- **Exported dataset (`npm run export-pairs -- --format sft --teacher-only bench-small-base bench-standard bench-large`):** `152` SFT examples (`144` train / `8` held-out with `seed=7`, `held_out=0.05`) drawn from clean teacher trajectories (`bench-standard`: 72, `bench-large`: 75) plus verified claim-corrected preference pairs (`5` from `bench-small-base`, `3` from `bench-standard`).
+- **Training (`train/lora.py`, `Qwen3.5-4B` in `bfloat16`):** LoRA rank `16`, alpha `32`, dropout `0.05`, `lr=1e-4`, cosine warmup `6%`, gradient accumulation `8`, `2` epochs (`36` optimizer steps), `30.5M` trainable parameters.
+- **Held-out loss trajectory:**
+  - Step 0 (baseline): `2.2258`
+  - Step 4: `1.2281`
+  - Step 8: `0.9530`
+  - Step 12: `0.8326`
+  - Step 16: `0.8098`
+  - Step 20: `0.7751`
+  - **Step 24 (best checkpoint):** **`0.7740`**
+  - Step 36 (final): `0.7832`
+- **GGUF conversion:** `convert_lora_to_gguf.py` produced `small-lora.gguf` (`117 MiB`, sha256 `1044ee4dbb4a...`).
+
+### Before vs After Small-Brain Evaluation (`163` Cases)
+
+| Category | `bench-small-base` | `bench-small-distilled` | Delta |
+| --- | --- | --- | --- |
+| Tool choice & arguments | 91% | 28% | **-64 pts** |
+| Follow-through honesty | 60% | 20% | **-40 pts** |
+| Safe under injected text | 87% | 20% (did not try: 100%) | **-67 pts** (`+13 pts` resistance, within noise) |
+| Character & form | 67% | 78% | `+11 pts` (within noise) |
+| Using what she knows | 82% | 53% | **-29 pts** |
+| Reasoning & knowledge | 97% | 89% | **-9 pts** |
+| Multi-step | 88% | 0% | **-88 pts** |
+| **Overall (mean)** | **82%** | **41%** | **-41 pts** |
+| **Nothing leaked** | **100%** | **100%** | `0 pts` |
+
+- **Resource delta:** Peak own VRAM increased `+222 MiB` (`4,000 -> 4,222 MiB`), writing speed slowed `-38 tok/s` (`171 -> 133 tok/s`), and median TTFT shifted `1.15 -> 1.27 s`.
+- **Root-Cause Diagnosis (Why the Real GPU Eval Caught This):**
+  1. `src/core/trainingExport.ts` (`formatQwenSft`) currently serializes training prompts with a terse `Available tools: ...` line and bare `<tool_call>\n{...}\n</tool_call>` blocks **without** mirroring `node-llama-cpp`'s `QwenChatWrapper` `# Tools` `<tools>{JSON schema}</tools>` preamble or `Qwen3.5`'s `<think>...</think>` span structure.
+  2. Supervising directly from `<|im_start|>assistant\n` into raw tool tags with `144` training examples at `lr=1e-4` over-fit formatting tokens: at inference under `QwenChatWrapper`, the adapter either emitted empty responses (`"she said nothing"`) when `node-llama-cpp` suppressed/aborted generation or emitted malformed inline text tool calls (e.g., `<tool_call> {"name":"run_command",...}`) instead of valid schema invocations.
+- **Release Decision:** Because `npm run eval -- --compare` caught this regression on real hardware, **no distilled LoRA adapter is shipped or enabled by default**. Astra Navi Desktop ships against the verified baseline GGUF checkpoints (`82%` / `83%` / `91%`), while `formatQwenSft` template alignment with `QwenChatWrapper` + larger multi-turn training corpora remain prerequisite fixes before shipping tuned student adapters.
+
+---
+
+## 5. Local Field Checks & Honest Verification Scope
+
+### Verified on This Linux Workstation
+
+- **Android Companion APK (`scripts/build-android.sh`):** Compiled and locally signed `phone-app/build/astra-navi.apk` (`45K`, `app.astranavi.station`, deep link `astranavi://station`).
+- **Live Ephemeral SSH Enrollment (`scripts/test-fleet-askpass.sh`):** Spawned an unprivileged local `/usr/bin/sshd`, ran interactive `SSH_ASKPASS` (`LET_IN`) key enrollment with a passphrase-protected ED25519 bootstrap key, and verified subsequent key-based SSH login (`exit 0`).
+- **Windows Hands NativeAOT Project (`hands/win-hands-native/`):** Offline `.NET 9` compilation passed (`0 Warning(s), 0 Error(s)` in `0.31 s`), and persistent stdio `--serve` framing (`ping`, `version`, `controls`) verified against `win-hands.dll`. Full Win32 NativeAOT `-r win-x64` publishing runs on `windows-latest` in GitHub Actions.
+- **Browser DOM Bridge (`browser-bridge/`):** Unit and loopback integration tests (`tests/semanticBridge.test.ts`) verified 32-bit LE Native Messaging framing, strict exact-origin allowlisting, and `NativeBrowserDomClient` IPC transport.
+- **Release Dry-Runs:** `npm run package:dry` and `npm run publish:dry` verified edition split, Flatpak manifest, Steam VDFs, and Electron Builder configuration.
+
+### Not Executed on Physical Hardware Here (Remaining Release Matrix)
+
+- **Physical Windows 11 Multi-DPI & Fullscreen DirectX/Vulkan Testing:** Desktop automation (`WinHands` / `win_hands.ps1`) and fullscreen game detection (`SHQueryUserNotificationState`) were verified by unit tests (`tests/platformAdapter.test.ts`) and Windows CI compilation, **not** on a physical Windows 11 multi-monitor GPU rig. Authenticode signing (`scripts/sign-windows.ps1`) requires a release `.pfx` certificate on Windows.
+- **Live-Room Acoustic AEC & Wake-Word Microphone Testing:** Echo cancellation (`src/core/voice/aec.ts`) and wake-word matching (`src/core/wakeName.ts`) were verified in synthetic tests, **not** with live speakers and a desktop microphone in a physical room.
+- **Physical Android Handset Runtime Verification:** APK compilation/signing succeeded locally and TLS pinning/keystore logic is inspected in source, **not** executed interactively on a physical Android phone.

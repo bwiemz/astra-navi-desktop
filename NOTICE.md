@@ -2,14 +2,14 @@
 
 ## Codebase & Bundled Character License
 
-- **Core Codebase & Evaluation Suite:** Licensed under the **MIT License** ([LICENSE](LICENSE)). Not affiliated with or endorsed by miHoYo / HoYoverse or any third-party model vendor.
+- **Core Codebase & Evaluation Suite:** Licensed under the **MIT License** ([LICENSE](LICENSE)). Open-core, local-first, and independent.
 - **Bundled Original 3D Character (`Astra Navi`):** Located in [`assets/models/ai-navigator/`](assets/models/ai-navigator/LICENSE.txt) and licensed under **CC-BY-4.0 / MIT**. Astra Navi was procedurally created and rigged from scratch using Blender (`scripts/blender/build_navigator_mmd.py`) with 100% original geometry, textures, and shaders so the application works out of the box without third-party assets.
 
 ## Bring-Your-Own MMD (BYO-MMD) Models
 
-`.gitignore` blocks arbitrary third-party character model binaries (`.pmx`, `.pmd`, `.fbx`, `.vrm`, `.aichan`, `.bpmx`) from being committed to this repository while explicitly allowing the original `assets/models/ai-navigator/ai-navigator.pmx` asset.
+`.gitignore` blocks arbitrary third-party character model binaries (`.pmx`, `.pmd`, `.fbx`, `.vrm`, `.aichan`, `.astranavi`, `.bpmx`) from being committed to this repository while explicitly allowing the original `assets/models/ai-navigator/ai-navigator.pmx` asset.
 
-Users may supply any MMD (`.pmx`) model they are permitted to use and import it locally (`Import character model…` in the tray or `npm run import-model`). Importing packs the user-supplied model and its textures into one authenticated, encrypted local bundle in that user's data folder (`~/.local/share/ai-chan/`):
+Users may supply any MMD (`.pmx`) model they are permitted to use and import it locally (`Import character model…` in the tray or `npm run import-model`). Importing packs the user-supplied model and its textures into one authenticated, encrypted local bundle in that user's data folder (`~/.local/share/astra-navi/`, with automatic fallback for existing `~/.local/share/ai-chan/` installs):
 
 - **Per-machine key derivation:** Derived from a random local secret combined with machine identity and OS account name so packed third-party bundles do not travel across machines.
 - **Per-entry keys & integrity checks:** Entry metadata and file contents are encrypted and authenticated; tampered bundles are rejected.
@@ -38,11 +38,11 @@ The models are downloaded from Hugging Face by each user and are not part of thi
 
 ## Her reach beyond the window
 
-Working inside other programs uses the desktop's own accessibility service (AT-SPI, through python-gobject) and the kernel's virtual input device; neither is part of this repository. The phone link uses KDE Connect as installed by the user. The page she serves to the user's other devices carries the unofficial notice above, contains no character art and never serves the character model: the model stays in its encrypted bundle on the PC. Its certificate is made on the user's computer with OpenSSL.
+Working inside other programs uses the desktop's own accessibility service (AT-SPI on Linux via `python-gobject`, and Win32 / UI Automation via `hands/win-hands-native/` on Windows). The phone link uses KDE Connect as installed by the user. The page served to paired home devices carries the project notice above, contains no character art, and never serves the 3D character model: the model stays in its encrypted bundle on the PC. Its certificate is generated locally with OpenSSL.
 
 Reaching the user's other machines uses OpenSSH as installed on the computer. Her keys for them are made on the user's computer and never leave it.
 
-The Android app is built by each user on their own computer with OpenJDK (Eclipse Temurin) and Google's Android build tools, which are fetched by a script and are not part of this repository; using them means accepting Google's Android SDK licence. The app carries the unofficial notice, contains no character art and no part of the character model, is signed with a key made on the user's computer, and is handed only to devices that user has paired. It is not offered in any app store.
+The Android app (`app.astranavi.station`, built by `scripts/build-android.sh`) is compiled locally on your computer with OpenJDK (Eclipse Temurin) and Google's Android build tools, which are fetched by `scripts/setup-android.sh` (using them means accepting Google's Android SDK license). It contains no character art and no part of the language model, is signed with a key made on your computer, and is handed only to devices you have paired.
 
 ## Where she looks things up
 

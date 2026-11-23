@@ -41,7 +41,7 @@ const SENSITIVE_PATTERNS: readonly RegExp[] = [
   /(credentials|secrets?)\.(json|ya?ml|toml|ini)$/i,
   // Her own settings, memory and records. If she could rewrite these unasked she could
   // give herself permissions, and the settings can hold a search key.
-  /(^|\/)\.local\/share\/ai-chan(\/|$)/,
+  /(^|\/)\.local\/share\/(?:astra-navi|ai-chan)(\/|$)/,
   // Anything placed here runs by itself at login or when a menu entry is clicked.
   /(^|\/)\.config\/(autostart|systemd)(\/|$)/,
   /(^|\/)\.local\/share\/applications(\/|$)/,

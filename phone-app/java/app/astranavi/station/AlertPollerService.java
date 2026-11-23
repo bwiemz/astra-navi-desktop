@@ -1,4 +1,4 @@
-package fan.aichan.station;
+package app.astranavi.station;
 
 import android.Manifest;
 import android.app.Notification;
@@ -89,7 +89,7 @@ public final class AlertPollerService extends JobService {
                                 jobFinished(params, false);
                             }
                         },
-                        "aichan-alert-poll");
+                        "astranavi-alert-poll");
         worker = t;
         t.setDaemon(true);
         t.start();

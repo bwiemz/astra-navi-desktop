@@ -1,4 +1,4 @@
-package fan.aichan.station;
+package app.astranavi.station;
 
 import android.Manifest;
 import android.animation.Animator;
@@ -74,7 +74,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * The whole app: a window onto the page AI-chan's desktop app serves on the home network.
+ * The whole app: a window onto the page Astra Navi's desktop app serves on the home network.
  *
  * It does two things a browser does not. It remembers where she is, so there is no
  * address to type each time. And it trusts exactly one certificate, hers, recognised by
@@ -222,7 +222,7 @@ public final class MainActivity extends Activity {
         endCheck();
         wasAway = true;
         if (web != null) {
-            web.evaluateJavascript("window.aiChanLock && window.aiChanLock()", null);
+            web.evaluateJavascript("window.astraNaviLock && window.astraNaviLock()", null);
         }
         super.onStop();
     }
@@ -231,7 +231,7 @@ public final class MainActivity extends Activity {
     protected void onStart() {
         super.onStart();
         if (wasAway && web != null) {
-            web.evaluateJavascript("window.aiChanShown && window.aiChanShown()", null);
+            web.evaluateJavascript("window.astraNaviShown && window.astraNaviShown()", null);
         }
         wasAway = false;
     }
@@ -290,13 +290,16 @@ public final class MainActivity extends Activity {
     // ---------------------------------------------------------------- the link from her page
 
     /**
-     * Handles aichan://station?at=…&fp=…&code=…, the link her page offers once a browser
+     * Handles astranavi://station?at=…&fp=…&code=…, the link her page offers once a browser
      * is paired. Returns true when the link was taken (or is being asked about), so the
      * caller does not also draw the ordinary screen.
      */
     private boolean takeLink(Intent intent) {
         Uri link = intent == null ? null : intent.getData();
-        if (link == null || !"aichan".equals(link.getScheme()) || !"station".equals(link.getHost())) {
+        String scheme = link == null ? null : link.getScheme();
+        if (link == null
+                || (!"astranavi".equals(scheme) && !"aichan".equals(scheme))
+                || !"station".equals(link.getHost())) {
             return false;
         }
         // The link has been read; it must not be acted on again if the screen is rebuilt.
@@ -452,14 +455,14 @@ public final class MainActivity extends Activity {
         settings.setSupportMultipleWindows(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         // Tells her page it is inside the app, so it does not offer the app again.
-        settings.setUserAgentString(settings.getUserAgentString() + " AIChanApp/1");
+        settings.setUserAgentString(settings.getUserAgentString() + " AstraNaviApp/1");
         // What her page may ask of the phone: to keep a sign-in key behind the phone's own
         // check, and to hand it back after that check. Offered only once her certificate
         // is pinned: before that, whatever answers at the address has not been agreed to
         // be her. Nothing but her page is ever opened in here (see below), and every
         // request is checked again against the page and its certificate when it is made.
         if (prefs.getString(KEY_FINGERPRINT, null) != null) {
-            web.addJavascriptInterface(new Bridge(web, origin), "AiChanApp");
+            web.addJavascriptInterface(new Bridge(web, origin), "AstraNaviApp");
         }
         web.setWebViewClient(new WebViewClient() {
             @Override
@@ -679,7 +682,7 @@ public final class MainActivity extends Activity {
             requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, REQ_RECORD_AUDIO);
             tell(
                     page,
-                    "window.aiChanVoiceError && window.aiChanVoiceError("
+                    "window.astraNaviVoiceError && window.astraNaviVoiceError("
                             + JSONObject.quote("Allow microphone access, then hold again.")
                             + ")");
             return;
@@ -707,7 +710,7 @@ public final class MainActivity extends Activity {
                 recorder.release();
                 tell(
                         page,
-                        "window.aiChanVoiceError && window.aiChanVoiceError("
+                        "window.astraNaviVoiceError && window.astraNaviVoiceError("
                                 + JSONObject.quote("Microphone is not ready.")
                                 + ")");
                 return;
@@ -732,14 +735,14 @@ public final class MainActivity extends Activity {
                                     }
                                 }
                             },
-                            "aichan-voice-rec");
+                            "astranavi-voice-rec");
             voiceThread = t;
             t.start();
         } catch (SecurityException | IllegalStateException | IllegalArgumentException e) {
             cancelVoiceNow();
             tell(
                     page,
-                    "window.aiChanVoiceError && window.aiChanVoiceError("
+                    "window.astraNaviVoiceError && window.astraNaviVoiceError("
                             + JSONObject.quote("Could not start microphone recording.")
                             + ")");
         }
@@ -774,14 +777,14 @@ public final class MainActivity extends Activity {
         if (pcm == null || pcm.size() < 1600) {
             tell(
                     page,
-                    "window.aiChanVoiceError && window.aiChanVoiceError("
+                    "window.astraNaviVoiceError && window.astraNaviVoiceError("
                             + JSONObject.quote("Hold a bit longer while speaking.")
                             + ")");
             return;
         }
         byte[] wav = wrapPcm16MonoWav(pcm.toByteArray());
         String b64 = Base64.encodeToString(wav, Base64.NO_WRAP);
-        tell(page, "window.aiChanVoiceReady && window.aiChanVoiceReady(" + JSONObject.quote(b64) + ")");
+        tell(page, "window.astraNaviVoiceReady && window.astraNaviVoiceReady(" + JSONObject.quote(b64) + ")");
     }
 
     private void cancelVoiceNow() {
@@ -862,7 +865,7 @@ public final class MainActivity extends Activity {
             if (!granted) {
                 tell(
                         voiceTargetPage,
-                        "window.aiChanVoiceError && window.aiChanVoiceError("
+                        "window.astraNaviVoiceError && window.astraNaviVoiceError("
                                 + JSONObject.quote("Microphone permission is needed to record voice notes.")
                                 + ")");
             }
@@ -1024,7 +1027,7 @@ public final class MainActivity extends Activity {
         endCheck();
         final Runnable not = () -> {
             forgetUnlock();
-            tell(page, "window.aiChanKeyKept && window.aiChanKeyKept(false)");
+            tell(page, "window.astraNaviKeyKept && window.astraNaviKeyKept(false)");
         };
         if (key == null || !UNLOCK_KEY.matcher(key).matches() || !hasStrongCheck()) {
             not.run();
@@ -1040,7 +1043,7 @@ public final class MainActivity extends Activity {
                         .putString(KEY_SEALED, Base64.encodeToString(sealed, Base64.NO_WRAP))
                         .putString(KEY_SEAL_START, Base64.encodeToString(ready.getIV(), Base64.NO_WRAP))
                         .apply();
-                tell(page, "window.aiChanKeyKept && window.aiChanKeyKept(true)");
+                tell(page, "window.astraNaviKeyKept && window.astraNaviKeyKept(true)");
             }, not);
         } catch (Exception problem) {
             // No strong check enrolled after all, or the keystore would not make the key.
@@ -1050,7 +1053,7 @@ public final class MainActivity extends Activity {
 
     private void unlockNow(final WebView page, final String origin) {
         endCheck();
-        final Runnable not = () -> tell(page, "window.aiChanUnlockFailed && window.aiChanUnlockFailed()");
+        final Runnable not = () -> tell(page, "window.astraNaviUnlockFailed && window.astraNaviUnlockFailed()");
         String sealed = prefs.getString(KEY_SEALED, null);
         String start = prefs.getString(KEY_SEAL_START, null);
         if (sealed == null || start == null) {
@@ -1072,7 +1075,7 @@ public final class MainActivity extends Activity {
                 // The check took a while: the page is judged again now, as it was when it
                 // asked. Anything else on screen by this time is not handed the key.
                 if (!herPage(page, origin)) throw new IllegalStateException("not her page");
-                tell(page, "window.aiChanUnlocked && window.aiChanUnlocked(" + JSONObject.quote(key) + ")");
+                tell(page, "window.astraNaviUnlocked && window.astraNaviUnlocked(" + JSONObject.quote(key) + ")");
             }, not);
         } catch (InvalidKeyException | UnrecoverableKeyException gone) {
             // A fingerprint or face was added to the phone since (or the screen lock was

@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -27,6 +28,8 @@ import {
   parseUiaControlsJson,
   parseWin32GpuVramJson,
   parseWin32WindowsJson,
+  PersistentWinWorker,
+  resolveNativeWinHandsBinary,
   toVirtualDeskCoords,
   verifyTopWindowBeforeInput,
   WindowsPlatformAdapter,
@@ -419,5 +422,115 @@ describe("PlatformAdapter & Windows/Linux backends", () => {
     expect(script).toContain("SetThreadDesktop");
     expect(script).toContain("CloseDesktop");
     expect(script).toContain("finally {");
+  });
+
+  it("multiplexes requests over PersistentWinWorker, recovers after crashes/timeouts, and prefers native binary", async () => {
+    let spawnCount = 0;
+    const makeFakeProcess = (mode: "normal" | "hang") => {
+      spawnCount += 1;
+      const emitter = new EventEmitter() as EventEmitter & {
+        stdin: PassThrough;
+        stdout: PassThrough;
+        stderr: PassThrough;
+        killed: boolean;
+        exitCode: number | null;
+        kill: () => boolean;
+      };
+      emitter.stdin = new PassThrough();
+      emitter.stdout = new PassThrough();
+      emitter.stderr = new PassThrough();
+      emitter.killed = false;
+      emitter.exitCode = null;
+      emitter.kill = () => {
+        emitter.killed = true;
+        emitter.exitCode = 1;
+        emitter.emit("exit", 1, "SIGTERM");
+        return true;
+      };
+      let buf = "";
+      emitter.stdin.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf8");
+        for (let nl = buf.indexOf("\n"); nl !== -1; nl = buf.indexOf("\n")) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          const req = JSON.parse(line) as { id: string; verb: string };
+          if (req.verb === "crash") {
+            emitter.exitCode = 2;
+            emitter.emit("exit", 2, null);
+            return;
+          }
+          if (mode === "hang" && req.verb === "slow") return;
+          emitter.stdout.write(
+            `${JSON.stringify({ id: req.id, ok: true, data: JSON.stringify({ verb: req.verb, spawnCount }) })}\n`,
+          );
+        }
+      });
+      return emitter;
+    };
+
+    const worker = new PersistentWinWorker({
+      command: "win-hands.exe",
+      args: ["--serve"],
+      requestTimeoutMs: 60,
+      spawnProcess: () => makeFakeProcess("hang") as never,
+    });
+
+    const first = JSON.parse(await worker.call("ping", {})) as { verb: string; spawnCount: number };
+    const second = JSON.parse(await worker.call("layout", {})) as { verb: string; spawnCount: number };
+    expect(first.spawnCount).toBe(1);
+    expect(second.spawnCount).toBe(1);
+
+    await expect(worker.call("crash", {})).rejects.toThrow(/exited unexpectedly/);
+    const recovered = JSON.parse(await worker.call("ping", {})) as { verb: string; spawnCount: number };
+    expect(recovered.spawnCount).toBe(2);
+
+    await expect(worker.call("slow", {})).rejects.toThrow(/timed out/);
+    worker.dispose();
+
+    const dir = await mkdtemp(join(tmpdir(), "astranavi-winbin-"));
+    try {
+      const nativeDir = join(dir, "win-hands-native");
+      const psScript = join(dir, "win_hands.ps1");
+      await writeFile(psScript, "");
+      expect(resolveNativeWinHandsBinary(psScript)).toBeNull();
+      const fakeExe = join(dir, "custom-win-hands.exe");
+      await writeFile(fakeExe, "MZ");
+      expect(resolveNativeWinHandsBinary(psScript, fakeExe)).toBe(fakeExe);
+
+      const commands: string[] = [];
+      const adapter = new WindowsPlatformAdapter({
+        scriptPath: psScript,
+        nativeBinaryPath: fakeExe,
+        spawnProcess: (cmd) => {
+          commands.push(cmd);
+          const proc = makeFakeProcess("normal");
+          proc.stdin.removeAllListeners("data");
+          let b = "";
+          proc.stdin.on("data", (c: Buffer) => {
+            b += c.toString("utf8");
+            for (let nl = b.indexOf("\n"); nl !== -1; nl = b.indexOf("\n")) {
+              const req = JSON.parse(b.slice(0, nl)) as { id: string; verb: string };
+              b = b.slice(nl + 1);
+              if (req.verb === "wasapi-check") {
+                proc.stdout.write(`${JSON.stringify({ id: req.id, ok: true, data: "true" })}\n`);
+              } else {
+                proc.stdout.write(`${JSON.stringify({ id: req.id, ok: true, data: "[]" })}\n`);
+              }
+            }
+          });
+          return proc as never;
+        },
+      });
+      expect(adapter.activeWorkerKind()).toBe("native");
+      expect(await adapter.audioLoopback.isAvailable()).toBe(true);
+      await adapter.accessibilityTree.controls({ pid: 1, title: "App" });
+      expect(commands[0]).toBe(fakeExe);
+      expect(commands[1]).toBe("powershell.exe");
+      adapter.dispose();
+      void nativeDir;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

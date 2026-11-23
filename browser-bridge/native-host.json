@@ -1,7 +1,9 @@
 {
-  "name": "fan.aichan.dom_bridge",
-  "description": "AI-chan Desktop local semantic DOM native messaging host",
-  "path": "/usr/local/bin/ai-chan-dom-bridge",
+  "name": "app.astranavi.dom_bridge",
+  "description": "Astra Navi Desktop local semantic DOM native messaging host",
+  "path": "/usr/local/bin/astra-navi-dom-bridge",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://REPLACE_WITH_LOCAL_EXTENSION_ID/"]
+  "allowed_origins": [
+    "chrome-extension://astranavidombridgeplaceholderid/"
+  ]
 }

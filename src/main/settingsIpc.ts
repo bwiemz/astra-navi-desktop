@@ -1,26 +1,40 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { app, BrowserWindow, ipcMain } from "electron";
 import { describeSource } from "../core/agenda.ts";
+import {
+  checkBootstrapStatus,
+  runBootstrapTask,
+  type BootstrapTask,
+} from "../core/bootstrap.ts";
 import { gameOnCard } from "../core/cardWatch.ts";
 import { daysAboard } from "../core/clock.ts";
 import type { ConfigStore } from "../core/config.ts";
 import type { LocalEngine } from "../core/engine.ts";
+import { benchmarkFirstLaunchHardware } from "../core/hardwareTuner.ts";
 import type { Initiative } from "../core/initiative.ts";
 import { LANGUAGE_CODES, LANGUAGES, type LanguageCode } from "../core/languages.ts";
 import { BRAIN_MODELS } from "../core/models.ts";
 import type { MemoryStore } from "../core/memory.ts";
 import type { MissionBoard } from "../core/missionPlan.ts";
 import type { NoticeWatch } from "../core/notices.ts";
-import { stationDir } from "../core/paths.ts";
+import { dataDir, ordersFile, stationDir } from "../core/paths.ts";
 import type { Reach } from "../core/reach.ts";
+import { auditSecurityRules } from "../core/ruleAudit.ts";
 import type { SearchBudget } from "../core/searchBudget.ts";
-import { excerpt } from "../core/standingOrders.ts";
+import { excerpt, type StandingOrder } from "../core/standingOrders.ts";
 import { StationAccount, whyNotThese } from "../core/stationAccount.ts";
 import { forShow, type ShownTrace, type TraceKeeper } from "../core/trace.ts";
 import type { ConversationArchive } from "../core/archive.ts";
-import type { SettingsPatch, SettingsView } from "../shared/settings.ts";
+import type {
+  BootstrapStatusView,
+  HardwareRecommendationView,
+  PolicyAuditSummaryView,
+  SettingsPatch,
+  SettingsView,
+} from "../shared/settings.ts";
 import { setStartAtLogin } from "./loginStart.ts";
 import { SettingsPatchSchema, StationAccountSchema } from "./settingsSchema.ts";
 
@@ -96,6 +110,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
   let stationAccountAtRest: StationAccount | null = null;
   /** A paired device asked for the sign-in password to be reset, and the user has not answered yet. */
   let resetAsked: { device: string; at: string } | null = null;
+  let lastBootstrapStatus: BootstrapStatusView | undefined;
 
   /** The account as it stands now: the open station's own, or the one read from its folder. */
   function stationAccount(): StationAccount | null {
@@ -251,6 +266,9 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       pingPhone: config.value.devices.pingPhone,
       machines: config.value.fleet.machines.map((machine) => ({ ...machine })),
       canAskPassword,
+      onboardingComplete: config.value.onboardingComplete,
+      advancedSettings: config.value.advancedSettings,
+      ...(lastBootstrapStatus ? { bootstrapStatus: lastBootstrapStatus } : {}),
       tier10: { ...config.value.tier10 },
     };
   }
@@ -376,6 +394,12 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       ...(patch.leanMemory !== undefined ? { leanMemory: patch.leanMemory } : {}),
       ...(patch.fittingTools !== undefined ? { fittingTools: patch.fittingTools } : {}),
       ...(patch.keepTraces !== undefined ? { keepTraces: patch.keepTraces } : {}),
+      ...(patch.onboardingComplete !== undefined
+        ? { onboardingComplete: patch.onboardingComplete }
+        : {}),
+      ...(patch.advancedSettings !== undefined
+        ? { advancedSettings: patch.advancedSettings }
+        : {}),
       ...(patch.tier10 !== undefined
         ? { tier10: { ...config.value.tier10, ...patch.tier10 } }
         : {}),
@@ -473,7 +497,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       show: false,
       autoHideMenuBar: true,
       backgroundColor: "#59c8f5",
-      title: "AI-chan Desktop settings (unofficial fan project)",
+      title: "Astra Navi Desktop settings",
       webPreferences: {
         preload: join(import.meta.dirname, "../preload/settings.cjs"),
         contextIsolation: true,
@@ -508,8 +532,9 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
   }
 
   function registerSettingsIpc(): void {
-    ipcMain.handle("settings:load", (event): SettingsView => {
+    ipcMain.handle("settings:load", async (event): Promise<SettingsView> => {
       if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      lastBootstrapStatus = await checkBootstrapStatus().catch(() => lastBootstrapStatus);
       return settingsView();
     });
     ipcMain.handle("settings:save", async (event, patch: unknown): Promise<SettingsView> => {
@@ -606,6 +631,95 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
               ? deps.showSelfCheck
               : null;
       void show?.().catch((error: unknown) => console.error(error));
+    });
+    ipcMain.handle(
+      "settings:hardware-profile",
+      async (event, force?: unknown): Promise<HardwareRecommendationView> => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const GIB = 1024 ** 3;
+        const { profile, recommendation } = await benchmarkFirstLaunchHardware(
+          join(dataDir(), "hardware-profile.json"),
+          { force: force === true },
+        );
+        return {
+          gpuName: profile.gpuName,
+          totalVramGb: Number((profile.totalVramBytes / GIB).toFixed(1)),
+          freeVramGb: Number((profile.freeVramBytes / GIB).toFixed(1)),
+          systemRamGb: Number((profile.systemRamBytes / GIB).toFixed(1)),
+          cpuThreads: profile.cpuThreads,
+          memoryBandwidthGbps: profile.memoryBandwidthGbps ?? null,
+          recommendedTier: recommendation.tier,
+          quantization: recommendation.quantization,
+          contextSize: recommendation.contextSize,
+          leanMemory: recommendation.leanMemory,
+          reason: recommendation.reason,
+        };
+      },
+    );
+    ipcMain.handle(
+      "settings:preview-voice",
+      async (event, name: unknown): Promise<string | null> => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        if (typeof name !== "string" || !/^[a-z0-9_-]{1,40}$/.test(name)) return null;
+        try {
+          const wav = await readFile(join(app.getAppPath(), "assets", "voice", `${name}.wav`));
+          return `data:audio/wav;base64,${wav.toString("base64")}`;
+        } catch {
+          return null;
+        }
+      },
+    );
+    ipcMain.handle(
+      "settings:download-brain",
+      async (event, tier: unknown): Promise<SettingsView> => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        if (typeof tier !== "string" || (tier !== "auto" && !Object.hasOwn(BRAIN_MODELS, tier))) {
+          throw new Error("Choose a valid brain tier.");
+        }
+        deps.chooseBrain(tier);
+        await config.update({ brain: tier });
+        return settingsView();
+      },
+    );
+    ipcMain.handle(
+      "settings:run-bootstrap",
+      async (
+        event,
+        task: unknown,
+      ): Promise<{ ok: boolean; summary: string[]; status: BootstrapStatusView }> => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const allowed: readonly BootstrapTask[] = ["voice", "ocr", "launcher", "browser-bridge", "all"];
+        if (typeof task !== "string" || !allowed.includes(task as BootstrapTask)) {
+          throw new Error("Unsupported setup task.");
+        }
+        const res = await runBootstrapTask(task as BootstrapTask);
+        lastBootstrapStatus = await checkBootstrapStatus();
+        return { ok: res.ok, summary: res.summary, status: lastBootstrapStatus };
+      },
+    );
+    ipcMain.handle("settings:run-policy-audit", async (event): Promise<PolicyAuditSummaryView> => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      let standingOrders: StandingOrder[] = [];
+      try {
+        const raw = JSON.parse(await readFile(ordersFile(), "utf8")) as {
+          orders?: StandingOrder[];
+        };
+        if (Array.isArray(raw.orders)) standingOrders = raw.orders;
+      } catch {
+        // empty orders file is valid during initial setup
+      }
+      const report = auditSecurityRules({ config: config.value, standingOrders });
+      return {
+        ok: report.ok,
+        counts: report.counts,
+        findings: report.findings.map((f) => ({
+          code: f.code,
+          severity: f.severity,
+          subject: f.subject,
+          message: f.message,
+          remediation: f.remediation,
+        })),
+      };
     });
   }
 

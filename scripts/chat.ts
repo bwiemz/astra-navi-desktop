@@ -275,7 +275,7 @@ const research = new ResearchDesk({
     }),
 });
 
-// Her reach beyond her own window, as the app wires it. "ai-chan-desktop" is the app's own
+// Her reach beyond her own window, as the app wires it. "astra-navi-desktop" is the app's own
 // program name; in the terminal there is no such window, so nothing is ever skipped as hers.
 const reach = new Reach({
   config,
@@ -283,9 +283,9 @@ const reach = new Reach({
   scriptDir: scratchDir(),
   modelsCacheDir: join(modelsDir(), "speech"),
   handsScript: join(import.meta.dirname, "..", "hands", "hands.py"),
-  ownApps: ["ai-chan-desktop"],
+  ownApps: ["astra-navi-desktop", "ai-chan-desktop"],
   stationDir: stationDir(),
-  phoneAppFile: join(import.meta.dirname, "..", "phone-app", "build", "ai-chan.apk"),
+  phoneAppFile: join(import.meta.dirname, "..", "phone-app", "build", "astra-navi.apk"),
   onNotice: (text) =>
     initiative.raise({ kind: "alert", requested: false, outsideText: true, text }),
   onAwayMessage: (text, device) => {

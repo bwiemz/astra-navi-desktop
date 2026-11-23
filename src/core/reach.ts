@@ -40,7 +40,7 @@ export interface ReachDeps {
   /** The app's own windows, by program name. */
   ownApps: readonly string[];
   stationDir: string;
-  /** Where the built phone app is, if it has been built: phone-app/build/ai-chan.apk. */
+  /** Where the built phone app is, if it has been built: phone-app/build/astra-navi.apk. */
   phoneAppFile?: string;
   /** Something she saw while watching is worth telling. */
   onNotice(text: string): void;
@@ -389,16 +389,22 @@ export class Reach {
 
 /** The phone app as built on this computer, or null when it has not been built. */
 export function builtPhoneApp(file: string | undefined): { file: string; version: string } | null {
-  if (!file || !existsSync(file)) return null;
+  if (!file) return null;
+  let resolved = file;
+  if (!existsSync(resolved)) {
+    const legacy = join(dirname(file), "ai-chan.apk");
+    if (!existsSync(legacy)) return null;
+    resolved = legacy;
+  }
   let version = "";
   try {
-    version = readFileSync(join(dirname(file), "version"), "utf8")
+    version = readFileSync(join(dirname(resolved), "version"), "utf8")
       .trim()
       .slice(0, 40);
   } catch {
     // an app built without its version note is still an app
   }
-  return { file, version };
+  return { file: resolved, version };
 }
 
 /** How something she noticed on screen is put to her, to tell in her own words. */

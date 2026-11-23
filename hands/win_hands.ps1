@@ -1,12 +1,17 @@
 param(
-  [Parameter(Mandatory = $true)][string]$Verb
+  [string]$Verb = "",
+  [switch]$Serve
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$stdinText = if ($Verb -in @("wasapi-capture", "notices-monitor")) { "" } else { [Console]::In.ReadToEnd() }
-$payload = if ([string]::IsNullOrWhiteSpace($stdinText)) { @{} } else { $stdinText | ConvertFrom-Json }
+if (-not $Serve -and [string]::IsNullOrWhiteSpace($Verb)) {
+  throw "Usage: win_hands.ps1 -Verb <verb> | -Serve"
+}
+
+$stdinText = if ($Serve -or $Verb -in @("wasapi-capture", "notices-monitor")) { "" } else { [Console]::In.ReadToEnd() }
+$initialPayload = if ([string]::IsNullOrWhiteSpace($stdinText)) { @{} } else { $stdinText | ConvertFrom-Json }
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName System.Drawing
@@ -180,7 +185,8 @@ function Resolve-Vk([string]$KeyName) {
   }
 }
 
-switch ($Verb) {
+function Invoke-BridgeVerb([string]$VerbName, $payload) {
+switch ($VerbName) {
   "game-state" {
     $state = 0
     [void][WinAiBridge]::SHQueryUserNotificationState([ref]$state)
@@ -494,6 +500,28 @@ switch ($Verb) {
     while ($true) { Start-Sleep -Milliseconds 500 }
   }
   default {
-    throw "Unsupported Win32 bridge verb: $Verb"
+    throw "Unsupported Win32 bridge verb: $VerbName"
   }
+}
+}
+
+if ($Serve) {
+  while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $reqId = ""
+    try {
+      $req = $line | ConvertFrom-Json
+      $reqId = if ($null -ne $req.id) { [string]$req.id } else { "" }
+      $v = [string]$req.verb
+      $p = if ($null -ne $req.payload) { $req.payload } else { @{} }
+      $resData = Invoke-BridgeVerb -VerbName $v -payload $p
+      @{ id = $reqId; ok = $true; data = [string]$resData; error = $null } | ConvertTo-Json -Compress
+    } catch {
+      @{ id = $reqId; ok = $false; data = $null; error = [string]$_.Exception.Message } | ConvertTo-Json -Compress
+    }
+    [Console]::Out.Flush()
+  }
+} else {
+  $singleOut = Invoke-BridgeVerb -VerbName $Verb -payload $initialPayload
+  if ($null -ne $singleOut) { [Console]::Out.Write([string]$singleOut) }
 }

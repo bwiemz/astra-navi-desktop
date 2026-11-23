@@ -1,6 +1,6 @@
-# Contributing to AI-chan Desktop
+# Contributing to Astra Navi Desktop
 
-Contributions are warmly welcome — especially **Windows and macOS backends** via `PlatformAdapter`, evaluation cases (`evals/`), security hardening (`tests/`, `src/core/ruleAudit.ts`), UI improvements, and original character tooling.
+Contributions are warmly welcome — especially **Windows and macOS backends** via `PlatformAdapter`, evaluation cases (`evals/`), security hardening (`tests/`, `src/core/ruleAudit.ts`), browser extension companion enhancements (`browser-bridge/`), UI improvements, and original character tooling.
 
 ## Quick Development Setup
 
@@ -23,9 +23,9 @@ npm run eval -- --audit        # Static policy & rule-conflict audit
 If you have a local GGUF model configured or downloaded:
 
 ```sh
-npm run eval                                     # Full suite using auto-selected model
-AI_CHAN_BRAIN=small npm run eval -- --label dev  # Explicit brain tier
-npm run eval -- --cpu 4 --cases tools/timer      # Run subset on CPU
+npm run eval                                           # Full suite using auto-selected model
+ASTRA_NAVI_BRAIN=small npm run eval -- --label dev     # Explicit brain tier
+npm run eval -- --cpu 4 --cases tools/timer            # Run subset on CPU
 ```
 
 See [evals/README.md](evals/README.md) for case authoring, scoring rules, and trace replay (`--replay`).
@@ -70,5 +70,5 @@ npx vitest run tests/customModel.test.ts
 
 ### Intellectual Property Policy
 
-- **Never commit third-party, fan-art, game-ripped, or proprietary MMD models** (`.pmx`, `.pmd`, `.vrm`, `.fbx`, `.aichan`) into this repository. `.gitignore` explicitly blocks character binaries outside the whitelisted original asset `assets/models/ai-navigator/ai-navigator.pmx`.
+- **Never commit third-party, fan-art, game-ripped, or proprietary MMD models** (`.pmx`, `.pmd`, `.vrm`, `.fbx`, `.aichan`, `.astranavi`) into this repository. `.gitignore` explicitly blocks character binaries outside the whitelisted original asset `assets/models/ai-navigator/ai-navigator.pmx`.
 - Users who own or hold fan-use rights to other MMD models can import them locally via **Import character model…** or `npm run import-model`.

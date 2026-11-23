@@ -163,7 +163,7 @@ describe("what notifications said, once she has told it", () => {
       const first = history[0] as { text: string };
       expect(first.text.startsWith("did I miss anything?")).toBe(true);
       expect(first.text.trimEnd().split("\n").at(-1)).toMatch(
-        /^\[form\] Answer as AI-chan, by name/,
+        /^\[form\] Answer as Astra, by name/,
       );
 
       // A turn that read nothing is kept as it is, and is archived as usual.

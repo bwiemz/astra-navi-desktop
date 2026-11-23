@@ -29,7 +29,7 @@ export function stationPage(nonce: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#1b1f3b">
-<title>AI-chan station (unofficial fan project)</title>
+<title>Astra Navi Station</title>
 <style nonce="${safeNonce}">${STATION_STYLE}</style>
 </head>
 <body data-mood="neutral" data-link="off">
@@ -41,8 +41,8 @@ export function stationPage(nonce: string): string {
     </svg>
   </div>
   <div class="name">
-    <h1 class="plate">AI-chan</h1>
-    <p class="fan">Unofficial fan project</p>
+    <h1 class="plate">Astra Navi</h1>
+    <p class="fan">Local-first AI companion</p>
   </div>
   <div class="state">
     <p class="link" id="link" role="status">not paired</p>

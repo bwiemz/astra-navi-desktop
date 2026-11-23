@@ -1,0 +1,33 @@
+app-id: app.astranavi.Desktop
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+base: org.electronjs.Electron2.BaseApp
+base-version: "24.08"
+command: astra-navi-desktop
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --share=network
+  - --filesystem=xdg-documents/Astra-Navi:create
+  - --filesystem=xdg-data/astra-navi:create
+  - --filesystem=xdg-data/ai-chan:ro
+modules:
+  - name: astra-navi-desktop
+    buildsystem: simple
+    build-commands:
+      - install -d /app/lib/astra-navi-desktop
+      - cp -r out assets hands voice-server browser-bridge package.json /app/lib/astra-navi-desktop/
+      - install -Dm644 assets/icon.png /app/share/icons/hicolor/256x256/apps/app.astranavi.Desktop.png
+      - |
+        cat <<'EOF' > /app/bin/astra-navi-desktop
+        #!/usr/bin/env sh
+        exec zypak-wrapper /app/lib/astra-navi-desktop/electron "$@"
+        EOF
+      - chmod +x /app/bin/astra-navi-desktop
+    sources:
+      - type: dir
+        path: ../..

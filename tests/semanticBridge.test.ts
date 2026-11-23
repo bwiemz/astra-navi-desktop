@@ -1,3 +1,7 @@
+import { createServer } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   BrowserDomBridge,
@@ -7,6 +11,8 @@ import {
   encodeLspMessage,
   encodeNativeMessage,
   isBrowserOriginAllowed,
+  NATIVE_HOST_NAME,
+  NativeBrowserDomClient,
   parseKWinTopology,
   parsePipeWireDump,
   PipeWireAudioBridge,
@@ -102,5 +108,78 @@ describe("Semantic bridges: PipeWire, LSP, Browser DOM, KWin", () => {
       ),
     ).toEqual({ desktopCount: 4, currentDesktop: 2, activeActivity: "Work", activities: ["Work", "Gaming"] });
     expect(parseKWinTopology("{invalid")).toBeNull();
+  });
+
+  it("queries NativeBrowserDomClient over local IPC socket and builds cross-platform host manifests", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "astranavi-dom-"));
+    const sock = join(dir, "dom.sock");
+    const server = createServer((conn) => {
+      conn.on("data", (chunk: Buffer) => {
+        const { messages } = decodeNativeMessages(chunk);
+        for (const msg of messages as { id: string; action: string; url?: string }[]) {
+          if (msg.action === "ping") {
+            conn.write(encodeNativeMessage({ id: msg.id, ok: true, data: { alive: true } }));
+          } else {
+            conn.write(
+              encodeNativeMessage({
+                id: msg.id,
+                ok: true,
+                data: {
+                  url: msg.url,
+                  title: "Astra API",
+                  articleText: "Visible text only",
+                  selection: "API",
+                  mediaPlaying: null,
+                },
+              }),
+            );
+          }
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(sock, resolve));
+
+    try {
+      expect(NATIVE_HOST_NAME).toBe("app.astranavi.dom_bridge");
+      const client = new NativeBrowserDomClient({
+        allowlist: () => ["https://docs.example.org"],
+        socketPath: () => sock,
+        timeoutMs: 2000,
+      });
+      expect(await client.ping()).toBe(true);
+      await expect(client.readPage("https://evil.example.net")).rejects.toThrow(/refused/);
+      const page = await client.readPage("https://docs.example.org/spec");
+      expect(page?.title).toBe("Astra API");
+      expect(page?.articleText).toBe("Visible text only");
+
+      const installer = (await import("../browser-bridge/install-host.mjs")) as {
+        installNativeHost(opts: { platform: string; home: string; dryRun: boolean }): Promise<{
+          action: string;
+          manifests: { chromium: { name: string }; firefox: { name: string; allowed_extensions: string[] } };
+          registryKeys: string[];
+          files: string[];
+        }>;
+      };
+      const linuxPlan = await installer.installNativeHost({
+        platform: "linux",
+        home: dir,
+        dryRun: true,
+      });
+      expect(linuxPlan.action).toBe("install");
+      expect(linuxPlan.manifests.chromium.name).toBe(NATIVE_HOST_NAME);
+      expect(linuxPlan.manifests.firefox.allowed_extensions).toContain("dom-bridge@astranavi.app");
+      expect(linuxPlan.files.length).toBe(5);
+
+      const winPlan = await installer.installNativeHost({
+        platform: "win32",
+        home: dir,
+        dryRun: true,
+      });
+      expect(winPlan.registryKeys.some((k) => k.includes("Google\\Chrome"))).toBe(true);
+      expect(winPlan.registryKeys.some((k) => k.includes("Mozilla"))).toBe(true);
+    } finally {
+      server.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

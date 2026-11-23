@@ -11,7 +11,7 @@ import { app } from "electron";
 const AUTOSTART_FILE = join(
   process.env["XDG_CONFIG_HOME"] ?? join(app.getPath("home"), ".config"),
   "autostart",
-  "ai-chan-desktop.desktop",
+  "astra-navi-desktop.desktop",
 );
 
 export async function startsAtLogin(): Promise<boolean> {
@@ -41,10 +41,10 @@ export async function setStartAtLogin(on: boolean): Promise<void> {
     [
       "[Desktop Entry]",
       "Type=Application",
-      "Name=AI-chan Desktop",
-      "Comment=Unofficial fan-made desktop assistant. Not affiliated with miHoYo / HoYoverse.",
+      "Name=Astra Navi Desktop",
+      "Comment=Local-first AI desktop navigator with 3D MMD companion.",
       `Exec=${desktopExecPath(launcher)}`,
-      "Icon=ai-chan-desktop",
+      "Icon=astra-navi-desktop",
       "Terminal=false",
       "X-GNOME-Autostart-enabled=true",
       "",

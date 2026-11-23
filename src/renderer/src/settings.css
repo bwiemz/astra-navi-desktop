@@ -655,3 +655,125 @@ button.quiet {
     padding-left: 9px;
   }
 }
+
+body[data-advanced="false"] .advanced-only {
+  display: none;
+}
+
+.masthead-top {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.masthead-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--paper);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.wizard-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgb(27 31 59 / 58%);
+}
+
+.wizard-overlay[hidden] {
+  display: none;
+}
+
+.wizard-card {
+  width: min(620px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  padding: 20px 22px;
+  background: var(--paper);
+  border: var(--outline);
+  border-radius: 16px;
+  box-shadow: var(--drop);
+}
+
+.wizard-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+  border-bottom: 2px dashed rgb(27 31 59 / 20%);
+  padding-bottom: 8px;
+}
+
+.wizard-head h2 {
+  margin: 0;
+}
+
+.wiz-step h3 {
+  margin: 4px 0 8px;
+}
+
+.wiz-services {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.wiz-service-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1.5px solid rgb(27 31 59 / 25%);
+  border-radius: 10px;
+}
+
+.audit-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 2px solid var(--ink);
+  background: var(--lemon);
+  font-weight: 800;
+  font-size: 13px;
+}
+
+.audit-badge.pass {
+  background: #bdf4c9;
+}
+
+.audit-badge.fail {
+  background: #ffb4c4;
+}
+
+.wizard-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+  padding-top: 10px;
+  border-top: 2px dashed rgb(27 31 59 / 20%);
+}
+
+.wizard-nav {
+  display: flex;
+  gap: 8px;
+}
