@@ -32,15 +32,12 @@ public final class ApprovalActionReceiver extends BroadcastReceiver {
         final int notifyId = intent.getIntExtra(EXTRA_NOTIFY_ID, 0);
 
         final NotificationManager nm = context.getSystemService(NotificationManager.class);
-        if (nm != null && notifyId != 0) {
-            nm.cancel(notifyId);
-        }
-
         final SharedPreferences prefs =
                 context.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE);
         final String address = prefs.getString(MainActivity.KEY_ADDRESS, null);
         final String fingerprint = prefs.getString(MainActivity.KEY_FINGERPRINT, null);
         final String token = prefs.getString(MainActivity.KEY_ALERT_TOKEN, null);
+        final String sessionToken = prefs.getString(MainActivity.KEY_SESSION_TOKEN, null);
         if (address == null || fingerprint == null || token == null || token.isEmpty()) {
             return;
         }
@@ -55,6 +52,10 @@ public final class ApprovalActionReceiver extends BroadcastReceiver {
                                 conn.setRequestMethod("POST");
                                 conn.setDoOutput(true);
                                 conn.setRequestProperty("Authorization", "Bearer " + token);
+                                if (sessionToken != null
+                                        && sessionToken.matches("^[A-Za-z0-9_-]{40,50}$")) {
+                                    conn.setRequestProperty("X-Session", sessionToken);
+                                }
                                 conn.setRequestProperty("Content-Type", "application/json");
                                 byte[] payload =
                                         new JSONObject()
@@ -66,7 +67,22 @@ public final class ApprovalActionReceiver extends BroadcastReceiver {
                                 try (OutputStream out = conn.getOutputStream()) {
                                     out.write(payload);
                                 }
-                                conn.getResponseCode();
+                                int status = conn.getResponseCode();
+                                if (status >= 200 && status < 300) {
+                                    if (nm != null && notifyId != 0) {
+                                        nm.cancel(notifyId);
+                                    }
+                                } else if (status == 401) {
+                                    prefs.edit().remove(MainActivity.KEY_SESSION_TOKEN).apply();
+                                    Intent authIntent =
+                                            new Intent(context, MainActivity.class)
+                                                    .addFlags(
+                                                            Intent.FLAG_ACTIVITY_NEW_TASK
+                                                                    | Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                                                    .putExtra(EXTRA_APPROVAL_ID, approvalId)
+                                                    .putExtra(EXTRA_ALLOW, allow);
+                                    context.startActivity(authIntent);
+                                }
                             } catch (Exception ignored) {
                                 // Best-effort when away from LAN; mission remains safely paused.
                             } finally {

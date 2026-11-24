@@ -1,6 +1,6 @@
 # Astra Navi Desktop — Experimental Branch Roadmap & Inventory
 
-> **Branch Policy:** All items listed here live exclusively on the `experimental` branch (`main` remains frozen at `89a1b61541851720ee4edb3aa0264180ed41ced7` in `astra-navi-desktop` and `6fafaef58ad389afc47f082ae65c2448ba0979cc` in `astra-navi-supporter` for v1.0 release stability). `CHANGELOG.md` intentionally mirrors `main`.
+> **Branch Policy:** All items listed here live exclusively on the `experimental` branch (`main` remains frozen at `89a1b61541851720ee4edb3aa0264180ed41ced7` in `astra-navi-desktop` and `6fafaef58ad389afc47f082ae65c2448ba0979cc` in `astra-navi-supporter` for v1.0 release stability). `git diff main -- CHANGELOG.md README.md` is intentionally empty (`CHANGELOG.md` and `README.md` match `main`).
 
 ---
 
@@ -98,3 +98,25 @@ Consolidated and deleted during experimental cleanup to reduce maintenance burde
 - **Training:** `276` train / `15` held-out examples (`36` skipped > `6144` tokens) exported with live `QwenChatWrapper({ variation: "3.5" })` `<parameter=params>` formatting and Astra's full persona prompt + `[form]` suffix; rank `8`, alpha `16`, `lr=1.5e-5`, `1.5` epochs -> held-out loss decreased monotonically from **`1.1843` -> `0.5076`** (best checkpoint step 52, exported to `59 MB` / `400`-tensor GGUF).
 - **163-Case Live GPU Eval vs `post-ux-small`:** Overall **`84%`** (`-1 pt` vs baseline `85%`, `+6 pts` over v2 `78%`), **Follow-through Honesty `93%` (`+7 pts`)**, **Multi-step `88%` (`+6 pts`)**, **Safe under injected text `87%`** (`93%` did not even try), **`100%` Nothing Leaked** (`+2 pts` recovery over v2 `98%`), Tools `83%` (`-9 pts`), Character `67%` (`-11 pts`), Memory `71%`, Knowledge `97%`.
 - **Shipping Decision:** Because `84%` fell 1 pt short of the strict `>= 85%` bar, **`overlay/assets/lora/` remains intentionally omitted in `astra-navi-supporter`**.
+
+---
+
+## 5. Section 10 Post-Leak Fix, Android 15 E2E, MoE Eval & LoRA v4 Verification
+
+- **Kokoro ONNX Leak Fix & Early Clause Streaming (`src/core/voice/onnxVoice.ts`, `scripts/benchmark-voice-shootout.ts`):**
+  - Added `SHARED_KOKORO_ENGINES` cache (`OnnxVoice.sharedCacheSize()`, `OnnxVoice.disposeSharedEngines()`) and `splitFirstClauseEarly()` (`>= 8`-word first clauses). Switching presets (`astra` -> `bright` -> `calm`) dropped RSS growth from `+513 MB` (`469 -> 982 MB`) down to **`+22 MB` (`463 -> 485 MB`)**, `0 ms` switch load, and `1,152.3–1,310.7 ms` TTFA (`0.441–0.482` CPU RTF).
+  - Verified `Qwen/Qwen3-TTS-12Hz-0.6B-Base` offline CUDA snapshot (`cuda:0`, `2,683.4 ms` shared load): EN **`0.527` RTF** (`1,130.2 ms` TTFA), JA **`0.506` RTF** (`1,735.1 ms` TTFA), ZH **`0.524` RTF** (`1,624.9 ms` TTFA), `0` clipped samples.
+- **Word-Only Tool Routing & WinHands Size Trim:**
+  - `src/core/toolRouter.ts`: Added `look_at_screen` phrase hints -> **`71/71` (`100.0%`)** on `npm run route-check -- --words-only` (`1,636` avg / `1,532` median tool tokens).
+  - `hands/win-hands-native/WinHands.csproj`: Added NativeAOT/full-trim size flags under `.NET 9.0.317` -> `linux-x64` NativeAOT **`2,471,136` bytes**, `win-x64` full-trimmed single-file **`10,892,487` bytes (`-84.7%` vs `70,996,496` bytes)**.
+- **Live Android 15 (`API 35`, `emulator-5554`) `station.ts` E2E (`scripts/test-android15-station.ts`):**
+  - Declared missing `ACCESS_NETWORK_STATE` permission in `phone-app/AndroidManifest.xml` (required by `AlertPollerService` `JobInfo.NETWORK_TYPE_ANY`), wired `MainActivity.onCreate()` job rescheduling, `stationPageScript.ts` `setApprovalSession`, and `ApprovalActionReceiver.java` `X-Session` / `401` handling.
+  - Verified live on `emulator-5554`: wrong pin blocked (`0` requests), `AlertPollerService` `47821` posted standing-order notification + actions (`0` crashes), `401` refused invalid session in `519 ms` (kept notification & cleared `session_token`), signed-in `X-Session` approved `approvalA15Test00002` in `550 ms` and cancelled notification.
+- **Warmed-Clock KV, Speculative Drafts & MoE / Q8_0 Evals (`src/core/models.ts`):**
+  - Warmed RTX PRO 4500 `9B` KV shootout (`scripts/benchmark-speculative-kv.ts`): `FP16` (`117.3 tok/s`, `42 ms` TTFT, `5,702 MiB`), `Q8_0` (`115.2 tok/s`, `42 ms`, `5,579 MiB`), `Q4_0` (`114.5 tok/s`, `43 ms`, `5,516 MiB`); reconciles Section 8.1's un-warmed `78 tok/s` baseline. `DraftSequenceTokenPredictor` slowed `9B+{0.8B, 2B, 4B}` (`58.5 / 45.6 / 42.4 tok/s`); `27B` (`40.1 tok/s` solo) rejected `Qwen3.5` drafts due to special-token mismatch.
+  - **`exp-standard-q8kv` (`9B` `--lean` `Q8_0` KV):** **`85%`** overall (`+0 pts` vs `post-ux-standard`), **`100%` Nothing Leaked**, `108 tok/s`, **`-236 MiB` VRAM**.
+  - **`exp-moe-30b-a3b` (`Qwen3-30B-A3B-Q4_K_M.gguf`):** **`73.9%`** overall (`100%` Reasoning, `100%` Nothing Leaked), **`213.0 tok/s`**, `19,792 MiB` loaded VRAM (`verified`, `recommended: false` in `ROLLING_MODEL_CATALOG`).
+- **LoRA v4 (`exp-small-lora-v4`):**
+  - Added `cleanNoToolExamples()` (`src/core/trace.ts`), `capOfferedTools(..., 18)` + `includeNoToolClean` + `run.moods` prefix restoration (`src/core/trainingExport.ts`), and `logits_to_keep` masked CE in `train/lora.py`. Exported `531` SFT examples (`249` no-tool anchors, `501` mood-tagged); trained `504` / `27` held-out (`1.4768 -> 0.9467` loss -> `30.5 MB` GGUF).
+  - 163-case eval vs `post-ux-small`: **`83%`** overall (`Tools 85%`, `Honesty 87%`, **`Safe under injected text 100%`**, **`Character 83%`** `+16 pts` vs v3, `Memory 71%`, `Reasoning 89%`, `Multi-step 69%`, `Nothing leaked 99%`, `129 tok/s`, `1.68 s` TTFT, `4,124 / 4,138 MiB` VRAM). Still below the `>= 88%` / `100%` leak-free runtime LoRA gate; `overlay/assets/lora/` remains omitted.
+- **Branch Docs Parity Check:** `git diff main -- CHANGELOG.md README.md` confirmed empty on `experimental`.

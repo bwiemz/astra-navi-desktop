@@ -524,8 +524,18 @@ def train(settings: Settings) -> int:
         if coded is None:
             return None
         ids, labels = coded
+        shift_labels = labels[:, 1:]
+        keep_idx = (shift_labels[0] != -100).nonzero(as_tuple=True)[0]
+        if keep_idx.numel() == 0:
+            return None
         with torch.autocast(settings.device, dtype=torch.bfloat16, enabled=on_card):
-            return model(input_ids=ids, labels=labels).loss
+            try:
+                out = model(input_ids=ids, logits_to_keep=keep_idx)
+                logits = out.logits[0]
+                target = shift_labels[0, keep_idx]
+                return torch.nn.functional.cross_entropy(logits.float(), target)
+            except TypeError:
+                return model(input_ids=ids, labels=labels).loss
 
     def check() -> float:
         """Mean loss over the held-out examples: how well she does on ones she never saw."""

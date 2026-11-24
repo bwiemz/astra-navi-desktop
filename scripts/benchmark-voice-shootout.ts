@@ -9,6 +9,8 @@
  * Usage:
  *   node scripts/benchmark-voice-shootout.ts [--cache-dir PATH] [--quant q8|q4]
  */
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -30,10 +32,12 @@ import { parseProsodyScript } from "../src/core/voice/speechText.ts";
 const args = process.argv.slice(2);
 let cacheDir = join(homedir(), ".local/share/ai-chan/models/speech");
 let quantization: KokoroQuantization = "q8";
+let skipLiveQwen3 = false;
 
 for (let i = 0; i < args.length; i += 1) {
   const a = args[i] ?? "";
   if (a === "--cache-dir") cacheDir = args[(i += 1)] ?? cacheDir;
+  else if (a === "--skip-live-qwen3") skipLiveQwen3 = true;
   else if (a === "--quant") {
     const q = args[(i += 1)] ?? "q8";
     if (q === "q8" || q === "q4" || q === "fp32") quantization = q;
@@ -88,82 +92,107 @@ function computeSignalStats(samples: Float32Array): {
   };
 }
 
-async function benchOnnxSamples(): Promise<Record<string, unknown>[]> {
-  const results: Record<string, unknown>[] = [];
-  for (const item of TEST_SAMPLES) {
-    const resolved = resolveOnnxVoicePreset(item.voice, item.language);
-    const backend = new OnnxVoice({
-      cacheDir,
-      voice: item.voice,
-      speed: 1.0,
-      quantization,
-    });
-    try {
-      const tLoad = performance.now();
-      await backend.warm();
-      const loadMs = performance.now() - tLoad;
-      await backend.synthesize("Warmup check.", "en");
+async function benchOnnxSamples(): Promise<{
+  samples: Record<string, unknown>[];
+  rssAfterFirstVoiceMb: number;
+  rssAfterAllVoicesMb: number;
+  rssGrowthAfterFirstVoiceMb: number;
+  sharedCacheSizeDuringRun: number;
+}> {
+  const samples: Record<string, unknown>[] = [];
+  let firstRssMb = 0;
+  let lastRssMb = 0;
+  let cacheSize = 0;
 
-      const t0 = performance.now();
-      let ttfaMs = 0;
-      let totalSamples = 0;
-      let sampleRate = 24_000;
-      let chunkCount = 0;
-      let cueMs = 0;
-      let cueCount = 0;
-      const chunkBuffers: Float32Array[] = [];
+  try {
+    for (const item of TEST_SAMPLES) {
+      const resolved = resolveOnnxVoicePreset(item.voice, item.language);
+      const backend = new OnnxVoice({
+        cacheDir,
+        voice: item.voice,
+        speed: 1.0,
+        quantization,
+      });
+      try {
+        const tLoad = performance.now();
+        await backend.warm();
+        const loadMs = performance.now() - tLoad;
+        await backend.synthesize("Warmup check.", "en");
 
-      for await (const chunk of backend.synthesizeStream(item.text, item.language)) {
-        if (chunkCount === 0) ttfaMs = performance.now() - t0;
-        chunkCount += 1;
-        totalSamples += chunk.samples.length;
-        sampleRate = chunk.sampleRate;
-        chunkBuffers.push(chunk.samples);
-        const tc = performance.now();
-        const cues = extractExpressiveCues(chunk.samples, chunk.sampleRate, 20);
-        cueMs += performance.now() - tc;
-        cueCount += cues.length;
+        const t0 = performance.now();
+        let ttfaMs = 0;
+        let totalSamples = 0;
+        let sampleRate = 24_000;
+        let chunkCount = 0;
+        let cueMs = 0;
+        let cueCount = 0;
+        const chunkBuffers: Float32Array[] = [];
+
+        for await (const chunk of backend.synthesizeStream(item.text, item.language)) {
+          if (chunkCount === 0) ttfaMs = performance.now() - t0;
+          chunkCount += 1;
+          totalSamples += chunk.samples.length;
+          sampleRate = chunk.sampleRate;
+          chunkBuffers.push(chunk.samples);
+          const tc = performance.now();
+          const cues = extractExpressiveCues(chunk.samples, chunk.sampleRate, 20);
+          cueMs += performance.now() - tc;
+          cueCount += cues.length;
+        }
+        const synthMs = performance.now() - t0;
+        const merged = new Float32Array(totalSamples);
+        let cursor = 0;
+        for (const b of chunkBuffers) {
+          merged.set(b, cursor);
+          cursor += b.length;
+        }
+        const audioMs = (totalSamples / Math.max(1, sampleRate)) * 1000;
+        const signal = computeSignalStats(merged);
+        const rssMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+        if (firstRssMb === 0) firstRssMb = rssMb;
+        lastRssMb = rssMb;
+        cacheSize = Math.max(cacheSize, OnnxVoice.sharedCacheSize());
+        samples.push({
+          preset: item.voice,
+          language: item.language,
+          kokoroVoice: resolved.kokoroVoice,
+          quantization,
+          ok: true,
+          loadMs: Number(loadMs.toFixed(1)),
+          ttfaMs: Number(ttfaMs.toFixed(1)),
+          synthMs: Number(synthMs.toFixed(1)),
+          audioDurationMs: Number(audioMs.toFixed(1)),
+          rtf: Number((synthMs / Math.max(1, audioMs)).toFixed(3)),
+          clausesStreamed: chunkCount,
+          cueFrames: cueCount,
+          cueMsPerSec: Number((audioMs > 0 ? cueMs / (audioMs / 1000) : 0).toFixed(3)),
+          rssMb,
+          signal,
+        });
+      } catch (error) {
+        samples.push({
+          preset: item.voice,
+          language: item.language,
+          kokoroVoice: resolved.kokoroVoice,
+          quantization,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        await backend.dispose();
       }
-      const synthMs = performance.now() - t0;
-      const merged = new Float32Array(totalSamples);
-      let cursor = 0;
-      for (const b of chunkBuffers) {
-        merged.set(b, cursor);
-        cursor += b.length;
-      }
-      const audioMs = (totalSamples / Math.max(1, sampleRate)) * 1000;
-      const signal = computeSignalStats(merged);
-      results.push({
-        preset: item.voice,
-        language: item.language,
-        kokoroVoice: resolved.kokoroVoice,
-        quantization,
-        ok: true,
-        loadMs: Number(loadMs.toFixed(1)),
-        ttfaMs: Number(ttfaMs.toFixed(1)),
-        synthMs: Number(synthMs.toFixed(1)),
-        audioDurationMs: Number(audioMs.toFixed(1)),
-        rtf: Number((synthMs / Math.max(1, audioMs)).toFixed(3)),
-        clausesStreamed: chunkCount,
-        cueFrames: cueCount,
-        cueMsPerSec: Number((audioMs > 0 ? cueMs / (audioMs / 1000) : 0).toFixed(3)),
-        rssMb: Math.round(process.memoryUsage().rss / (1024 * 1024)),
-        signal,
-      });
-    } catch (error) {
-      results.push({
-        preset: item.voice,
-        language: item.language,
-        kokoroVoice: resolved.kokoroVoice,
-        quantization,
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      await backend.dispose();
     }
+  } finally {
+    await OnnxVoice.disposeSharedEngines();
   }
-  return results;
+
+  return {
+    samples,
+    rssAfterFirstVoiceMb: firstRssMb,
+    rssAfterAllVoicesMb: lastRssMb,
+    rssGrowthAfterFirstVoiceMb: Math.max(0, lastRssMb - firstRssMb),
+    sharedCacheSizeDuringRun: cacheSize,
+  };
 }
 
 async function benchQwen3StreamingTransport(): Promise<Record<string, unknown>> {
@@ -228,9 +257,200 @@ async function benchQwen3StreamingTransport(): Promise<Record<string, unknown>> 
   }
 }
 
+async function benchLiveQwen3Tts(): Promise<Record<string, unknown>> {
+  const aiChanDir = join(homedir(), ".local", "share", "ai-chan");
+  const pyBin = join(aiChanDir, "voice-env", "bin", "python");
+  const hfHome = join(aiChanDir, "models", "voice-hf");
+  const cachedModelDir = join(hfHome, "hub", "models--Qwen--Qwen3-TTS-12Hz-0.6B-Base");
+  const snapshotsDir = join(cachedModelDir, "snapshots");
+  const refWav = join(process.cwd(), "assets", "voice", "perky.wav");
+  const refTxt = join(process.cwd(), "assets", "voice", "perky.txt");
+
+  if (
+    skipLiveQwen3 ||
+    !existsSync(pyBin) ||
+    !existsSync(snapshotsDir) ||
+    !existsSync(refWav) ||
+    !existsSync(refTxt)
+  ) {
+    return { skipped: true, reason: skipLiveQwen3 ? "--skip-live-qwen3" : "model or voice-env absent" };
+  }
+
+  const pyScript = `
+import json, sys, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import numpy as np, torch
+from qwen_tts import Qwen3TTSModel
+
+t0 = time.perf_counter()
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+snapshots = sorted([p for p in Path(sys.argv[3]).iterdir() if p.is_dir()])
+if not snapshots:
+    raise FileNotFoundError(f"No snapshot dir under {sys.argv[3]}")
+model = Qwen3TTSModel.from_pretrained(str(snapshots[-1]), device_map=device, dtype=dtype, local_files_only=True)
+voice = model.create_voice_clone_prompt(
+    ref_audio=sys.argv[1],
+    ref_text=Path(sys.argv[2]).read_text(encoding="utf-8").strip(),
+)
+load_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+LANG_MAP = {"en": "English", "ja": "Japanese", "zh": "Chinese"}
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self):
+        if self.path == "/health":
+            body = json.dumps({"ok": True, "device": device, "loadMs": load_ms}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404); self.end_headers()
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        req = json.loads(self.rfile.read(length) or b"{}")
+        lang = LANG_MAP.get(str(req.get("language", "en")), "Auto")
+        with torch.inference_mode():
+            wavs, sr = model.generate_voice_clone(
+                text=str(req.get("text", "")),
+                language=lang,
+                voice_clone_prompt=voice,
+            )
+        pcm = np.clip(np.asarray(wavs[0], dtype=np.float32).reshape(-1), -1.0, 1.0)
+        pcm_bytes = (pcm * 32767.0).astype("<i2").tobytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("X-Sample-Rate", str(int(sr)))
+        self.send_header("Content-Length", str(len(pcm_bytes)))
+        self.end_headers()
+        step = 4096
+        for off in range(0, len(pcm_bytes), step):
+            self.wfile.write(pcm_bytes[off:off+step])
+            self.wfile.flush()
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+print("QWEN3_READY:" + json.dumps({"ready": True, "port": srv.server_address[1], "device": device, "loadMs": load_ms}), flush=True)
+srv.serve_forever()
+`;
+
+  const child = spawn(pyBin, ["-u", "-c", pyScript, refWav, refTxt, snapshotsDir], {
+    env: { ...process.env, HF_HOME: hfHome, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  try {
+    const info = await new Promise<{ port: number; device: string; loadMs: number }>((resolveReady, rejectReady) => {
+      let buf = "";
+      let stderr = "";
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          rejectReady(new Error(`Qwen3-TTS server timed out: ${stderr}`));
+        }
+      }, 120_000);
+      child.stderr.on("data", (d: Buffer) => {
+        stderr += d.toString("utf8");
+      });
+      child.stdout.on("data", (d: Buffer) => {
+        buf += d.toString("utf8");
+        let nl = buf.indexOf("\n");
+        while (nl >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (line.startsWith("QWEN3_READY:")) {
+            clearTimeout(timer);
+            settled = true;
+            try {
+              resolveReady(
+                JSON.parse(line.slice("QWEN3_READY:".length)) as {
+                  port: number;
+                  device: string;
+                  loadMs: number;
+                },
+              );
+            } catch (err) {
+              rejectReady(err);
+            }
+            return;
+          }
+          nl = buf.indexOf("\n");
+        }
+      });
+      child.on("exit", (code) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          rejectReady(new Error(`Qwen3-TTS server exited (${code}): ${stderr}`));
+        }
+      });
+    });
+
+    const backend = new Qwen3StreamingTtsBackend({
+      endpointUrl: `http://127.0.0.1:${info.port}`,
+      tier: "qwen3-tts-0.6b",
+      sampleRate: 24_000,
+    });
+    await backend.warm();
+    // Warmup GPU kernels
+    await backend.synthesize("Warmup check.", "en");
+
+    const prompts: { language: LanguageCode; text: string }[] = [
+      { language: "en", text: "Systems nominal and ready for launch." },
+      { language: "ja", text: "システムは正常です。いつでも開始できます。" },
+      { language: "zh", text: "系统状态正常，随时可以开始。" },
+    ];
+    const runs: Record<string, unknown>[] = [];
+    for (const p of prompts) {
+      const t0 = performance.now();
+      let ttfaMs = 0;
+      let chunks = 0;
+      const chunkBuffers: Float32Array[] = [];
+      let totalSamples = 0;
+      for await (const chunk of backend.synthesizeStream(p.text, p.language)) {
+        if (chunks === 0) ttfaMs = performance.now() - t0;
+        chunks += 1;
+        totalSamples += chunk.samples.length;
+        chunkBuffers.push(chunk.samples);
+      }
+      const synthMs = performance.now() - t0;
+      const merged = new Float32Array(totalSamples);
+      let cursor = 0;
+      for (const b of chunkBuffers) {
+        merged.set(b, cursor);
+        cursor += b.length;
+      }
+      const audioMs = (totalSamples / 24_000) * 1000;
+      runs.push({
+        language: p.language,
+        chunksStreamed: chunks,
+        ttfaMs: Number(ttfaMs.toFixed(1)),
+        synthMs: Number(synthMs.toFixed(1)),
+        audioDurationMs: Number(audioMs.toFixed(1)),
+        rtf: Number((synthMs / Math.max(1, audioMs)).toFixed(3)),
+        signal: computeSignalStats(merged),
+      });
+    }
+    await backend.dispose();
+    return {
+      skipped: false,
+      model: "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+      device: info.device,
+      loadMs: info.loadMs,
+      runs,
+    };
+  } finally {
+    child.kill("SIGTERM");
+  }
+}
+
 async function main(): Promise<void> {
   const cpuShootout = await benchOnnxSamples();
   const streamingTransport = await benchQwen3StreamingTransport();
+  const liveQwen3Tts = await benchLiveQwen3Tts();
   const prosody = parseProsodyScript(
     "All checks passed! [pause 300ms] [whisper] Standing by. [sigh]",
     { lateNight: true },
@@ -251,6 +471,7 @@ async function main(): Promise<void> {
         routingCheck,
         cpuShootout,
         streamingTransport,
+        liveQwen3Tts,
         prosodyDemo: {
           speakText: prosody.speakText,
           gainScale: prosody.gainScale,

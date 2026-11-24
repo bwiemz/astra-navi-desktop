@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { env } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
 import type { ExpressiveCueFrame } from "../../shared/visemes.ts";
@@ -69,10 +70,23 @@ export const ONNX_VOICE_PRESETS: Record<string, OnnxVoicePreset> = {
 };
 
 export interface KokoroLikeEngine {
+  model?: { dispose?: () => Promise<void> | void };
+  dispose?: () => Promise<void> | void;
   generate(
     text: string,
     options: { voice: string; speed?: number },
   ): Promise<{ audio: Float32Array; sampling_rate: number }>;
+}
+
+const SHARED_KOKORO_ENGINES = new Map<string, Promise<KokoroLikeEngine>>();
+
+async function disposeEngineInstance(engine: KokoroLikeEngine): Promise<void> {
+  if (typeof engine.dispose === "function") {
+    await Promise.resolve(engine.dispose());
+  }
+  if (typeof engine.model?.dispose === "function") {
+    await Promise.resolve(engine.model.dispose());
+  }
 }
 
 /** Resolves an Astra voice design name or custom raw Kokoro voice ID to an ONNX voice profile. */
@@ -92,6 +106,30 @@ export function resolveOnnxVoicePreset(
   };
 }
 
+function splitFirstClauseEarly(clause: string): string[] {
+  const words = clause.split(/\s+/).filter(Boolean);
+  if (words.length < 8) return [clause];
+
+  const minSplit = 3;
+  const maxSplit = Math.min(7, words.length - 1);
+  // Prefer an early comma / dash pause boundary between words 3 and 7.
+  for (let i = minSplit - 1; i < maxSplit; i += 1) {
+    const w = words[i] ?? "";
+    if (/[,—–]$/.test(w) || w === "—" || w === "–") {
+      return [words.slice(0, i + 1).join(" "), words.slice(i + 1).join(" ")].filter(Boolean);
+    }
+  }
+  // Next prefer splitting just before a coordinating conjunction between words 4 and 7.
+  for (let i = minSplit; i < maxSplit; i += 1) {
+    const w = (words[i] ?? "").toLowerCase();
+    if (w === "and" || w === "but" || w === "so" || w === "while" || w === "because") {
+      return [words.slice(0, i).join(" "), words.slice(i).join(" ")].filter(Boolean);
+    }
+  }
+  // Fallback: flush after 6 words so first audio arrives rapidly without starving later context.
+  return [words.slice(0, 6).join(" "), words.slice(6).join(" ")].filter(Boolean);
+}
+
 /** Splits input text along sentence/clause boundaries for low-latency CPU audio streaming. */
 export function splitStreamingClauses(text: string): string[] {
   const clean = text.replace(/\s+/g, " ").trim();
@@ -100,24 +138,47 @@ export function splitStreamingClauses(text: string): string[] {
     .split(/(?<=[.!?;:。！？])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
-  return raw.length > 0 ? raw : [clean];
+  if (raw.length === 0) return [clean];
+  const first = raw[0];
+  if (!first) return raw;
+  return [...splitFirstClauseEarly(first), ...raw.slice(1)];
 }
 
 /**
  * Embedded Zero-Python Multi-Voice ONNX TTS Backend (`kokoro-js`).
  *
- * Lightweight CPU streaming winner: runs quantized ONNX Runtime inference (`0 MB` VRAM)
- * with clause-chunked audio streaming and expressive prosody/viseme cue extraction.
+ * Lightweight CPU streaming winner: shares one cached ONNX Runtime session per
+ * `(cacheDir, quantization)` across all voice presets (`0 MB` VRAM) and swaps
+ * voice embeddings without allocating duplicate ~255 MB ORT sessions.
  */
 export class OnnxVoice implements VoiceBackend {
   readonly label: string;
   private readonly cacheDir: string;
+  private readonly cacheKey: string;
   private readonly voice: string;
   private readonly speed: number;
   private readonly quantization: KokoroQuantization;
+  private readonly usesSharedEngine: boolean;
   private readonly loadEngine: (cacheDir: string) => Promise<KokoroLikeEngine>;
   private engine: Promise<KokoroLikeEngine> | null = null;
   private synthesizing = false;
+
+  static sharedCacheSize(): number {
+    return SHARED_KOKORO_ENGINES.size;
+  }
+
+  static async disposeSharedEngines(): Promise<void> {
+    const pendingList = [...SHARED_KOKORO_ENGINES.values()];
+    SHARED_KOKORO_ENGINES.clear();
+    for (const pending of pendingList) {
+      try {
+        const instance = await pending;
+        await disposeEngineInstance(instance);
+      } catch {
+        // Ignore teardown errors from failed loads.
+      }
+    }
+  }
 
   constructor(options: {
     cacheDir: string;
@@ -125,11 +186,14 @@ export class OnnxVoice implements VoiceBackend {
     speed: number;
     quantization?: KokoroQuantization;
     loadEngine?: (cacheDir: string) => Promise<KokoroLikeEngine>;
+    shareSession?: boolean;
   }) {
     this.cacheDir = options.cacheDir;
     this.voice = options.voice;
     this.speed = options.speed;
     this.quantization = options.quantization ?? "q8";
+    this.cacheKey = `${resolve(options.cacheDir)}::${this.quantization}`;
+    this.usesSharedEngine = options.shareSession ?? options.loadEngine === undefined;
     this.label = `embedded ONNX voice (${this.quantization})`;
     const quant = this.quantization;
     this.loadEngine =
@@ -218,9 +282,17 @@ export class OnnxVoice implements VoiceBackend {
     }
   }
 
-  rest(): Promise<void> {
+  async rest(): Promise<void> {
+    const pending = this.engine;
     this.engine = null;
-    return Promise.resolve();
+    if (!this.usesSharedEngine && pending) {
+      try {
+        const instance = await pending;
+        await disposeEngineInstance(instance);
+      } catch {
+        // Ignore teardown errors from failed custom loaders.
+      }
+    }
   }
 
   restIfIdle(): Promise<void> {
@@ -233,6 +305,22 @@ export class OnnxVoice implements VoiceBackend {
   }
 
   private getEngine(): Promise<KokoroLikeEngine> {
+    if (this.usesSharedEngine) {
+      let shared = SHARED_KOKORO_ENGINES.get(this.cacheKey);
+      if (!shared) {
+        shared = this.loadEngine(this.cacheDir);
+        SHARED_KOKORO_ENGINES.set(this.cacheKey, shared);
+        const created = shared;
+        created.catch(() => {
+          if (SHARED_KOKORO_ENGINES.get(this.cacheKey) === created) {
+            SHARED_KOKORO_ENGINES.delete(this.cacheKey);
+          }
+        });
+      }
+      this.engine = shared;
+      return shared;
+    }
+
     if (!this.engine) {
       const pending = this.loadEngine(this.cacheDir);
       this.engine = pending;

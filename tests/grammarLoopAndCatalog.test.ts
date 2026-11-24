@@ -101,10 +101,16 @@ describe("Pillar 3 & 4: Strict Grammar-Constrained Tool Decoding, Loop Guards, a
   it("provides vetted rolling model presets and Ed25519 signed catalog verification", () => {
     expect(ROLLING_MODEL_CATALOG.length).toBeGreaterThanOrEqual(6);
     const vetted = getVettedPresets();
-    expect(vetted.map((v) => v.presetId)).toEqual(["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b"]);
+    expect(vetted.map((v) => v.presetId)).toEqual([
+      "qwen3.5-4b",
+      "qwen3.5-9b",
+      "qwen3.8-27b",
+      "qwen3-30b-a3b-moe",
+    ]);
 
     const moe = findCatalogEntry("qwen3-30b-a3b-moe");
-    expect(moe?.benchmarkStatus).toBe("pending_gpu");
+    expect(moe?.benchmarkStatus).toBe("verified");
+    expect(moe?.recommended).toBe(false);
     expect(moe?.model.architecture).toBe("moe");
 
     const resolvedPreset = resolvePresetChoice("qwen3.5-9b", "/models", null);

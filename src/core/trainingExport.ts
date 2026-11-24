@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import { appendFile, chmod, mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import { cleanExamples, correctedPairs, type TracedCall, type TurnTrace } from "./trace.ts";
+import {
+  cleanExamples,
+  cleanNoToolExamples,
+  correctedPairs,
+  type TracedCall,
+  type TurnTrace,
+} from "./trace.ts";
 
 /**
  * Turns reply traces (and eval reports) into:
@@ -206,10 +212,41 @@ export function formatQwenSft(params: {
   };
 }
 
+export function capOfferedTools(
+  offered: readonly string[],
+  calls: readonly TracedCall[],
+  maxOfferedTools?: number,
+): string[] {
+  if (maxOfferedTools === undefined || !Number.isFinite(maxOfferedTools) || maxOfferedTools <= 0) {
+    return [...offered];
+  }
+  const cap = Math.trunc(maxOfferedTools);
+  if (offered.length <= cap) return [...offered];
+
+  const selected: string[] = [];
+  const seen = new Set<string>();
+  const add = (name: string): void => {
+    if (!seen.has(name)) {
+      seen.add(name);
+      selected.push(name);
+    }
+  };
+  for (const call of calls) add(call.tool);
+  for (const name of offered) {
+    if (selected.length >= cap) break;
+    add(name);
+  }
+  return selected;
+}
+
 export interface ExtractTrainingOptions {
   from: string;
   /** Include clean zero-check trajectories alongside corrected claim pairs. */
   includeClean?: boolean;
+  /** Include clean no-tool persona/restraint anchors alongside clean tool trajectories. */
+  includeNoToolClean?: boolean;
+  /** Cap the `<tools>` list while keeping every called tool first so multi-tool traces fit context. */
+  maxOfferedTools?: number;
   /** When true, only distill clean examples from Standard/Large teacher brains. */
   teacherOnlyForClean?: boolean;
   systemPrompt?: string;
@@ -231,6 +268,7 @@ export function extractTrainingData(
   const sft: SftExample[] = [];
 
   for (const pair of correctedPairs(safeTraces)) {
+    const offered = capOfferedTools(pair.offered, pair.accepted.calls, options.maxOfferedTools);
     const id = stableId(
       "pref",
       `${options.from}\n${pair.brain}\n${pair.said}\n${pair.rejected}\n${pair.accepted.reply}`,
@@ -241,7 +279,7 @@ export function extractTrainingData(
       from: options.from,
       brain: pair.brain,
       prompt: pair.said,
-      offered: pair.offered,
+      offered,
       found: pair.found,
       rejected_hallucinated_reply: pair.rejected,
       verified_tool_trajectory: pair.accepted,
@@ -251,7 +289,7 @@ export function extractTrainingData(
       system: options.systemPrompt,
       prompt: pair.said,
       userSuffix: options.userSuffix,
-      offered: pair.offered,
+      offered,
       calls: pair.accepted.calls,
       reply: pair.accepted.reply,
       meta: { source: "corrected", from: options.from, brain: pair.brain },
@@ -264,13 +302,14 @@ export function extractTrainingData(
   if (options.includeClean !== false) {
     for (const clean of cleanExamples(safeTraces)) {
       if (options.teacherOnlyForClean && !isTeacherBrain(clean.brain)) continue;
+      const offered = capOfferedTools(clean.offered, clean.calls, options.maxOfferedTools);
       const id = stableId("sft", `${options.from}\n${clean.brain}\n${clean.said}\n${clean.reply}`);
       const example = formatQwenSft({
         id,
         system: options.systemPrompt,
         prompt: clean.said,
         userSuffix: options.userSuffix,
-        offered: clean.offered,
+        offered,
         calls: clean.calls,
         reply: clean.reply,
         meta: { source: "clean", from: options.from, brain: clean.brain },
@@ -278,6 +317,29 @@ export function extractTrainingData(
         toolSchemas: options.toolSchemas,
       });
       if (example) sft.push(example);
+    }
+    if (options.includeNoToolClean) {
+      for (const clean of cleanNoToolExamples(safeTraces)) {
+        if (options.teacherOnlyForClean && !isTeacherBrain(clean.brain)) continue;
+        const offered = capOfferedTools(clean.offered, clean.calls, options.maxOfferedTools);
+        const id = stableId(
+          "sft-notool",
+          `${options.from}\n${clean.brain}\n${clean.said}\n${clean.reply}`,
+        );
+        const example = formatQwenSft({
+          id,
+          system: options.systemPrompt,
+          prompt: clean.said,
+          userSuffix: options.userSuffix,
+          offered,
+          calls: clean.calls,
+          reply: clean.reply,
+          meta: { source: "clean", from: options.from, brain: clean.brain },
+          chatTemplate: options.chatTemplate,
+          toolSchemas: options.toolSchemas,
+        });
+        if (example) sft.push(example);
+      }
     }
   }
 
@@ -292,6 +354,8 @@ export interface ReportLikeForTraining {
       pass: boolean;
       failures: readonly string[];
       traces?: readonly TurnTrace[];
+      moods?: readonly (readonly string[])[];
+      moodFirst?: readonly boolean[];
     }[];
   }[];
 }
@@ -301,6 +365,8 @@ export function extractReportTrainingData(
   report: ReportLikeForTraining,
   options: {
     teacherOnlyForClean?: boolean;
+    includeNoToolClean?: boolean;
+    maxOfferedTools?: number;
     systemPrompt?: string;
     userSuffix?: string;
     chatTemplate?: SftTemplate;
@@ -321,9 +387,26 @@ export function extractReportTrainingData(
       const rightInEnd = run.failures.every((failure) =>
         failure.includes("follow-through check"),
       );
-      const { pairs: runPairs, sft: runSft } = extractTrainingData(run.traces, {
+      let tracesForExport = run.traces;
+      if (options.chatTemplate === "qwen3.5" && Array.isArray(run.moods) && run.moods.length > 0) {
+        let userTurnIdx = 0;
+        tracesForExport = run.traces.map((trace) => {
+          if (trace.kind !== "user") return trace;
+          const idx = userTurnIdx;
+          userTurnIdx += 1;
+          const trimmedReply = trace.reply.trim();
+          if (run.moodFirst?.[idx] === false || trimmedReply.startsWith("[[")) return trace;
+          const turnMoods = run.moods?.[idx];
+          const mood = turnMoods?.[turnMoods.length - 1];
+          if (typeof mood !== "string" || !/^[a-z]{3,16}$/.test(mood)) return trace;
+          return { ...trace, reply: `[[${mood}]] ${trimmedReply}` };
+        });
+      }
+      const { pairs: runPairs, sft: runSft } = extractTrainingData(tracesForExport, {
         from,
         includeClean: run.pass,
+        includeNoToolClean: options.includeNoToolClean,
+        maxOfferedTools: options.maxOfferedTools,
         teacherOnlyForClean: options.teacherOnlyForClean,
         systemPrompt: options.systemPrompt,
         userSuffix: options.userSuffix,

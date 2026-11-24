@@ -461,4 +461,83 @@ describe("Qwen3.5 SFT template & specialist domain routing", () => {
     expect(tokStats.estimatedPromptTokens).toBeGreaterThan(100);
     expect(tokStats.tokensSaved).toBeGreaterThan(3000);
   });
+
+  it("extracts no-tool persona anchors, restores mood prefixes on Qwen3.5 reports, and caps offered tools", async () => {
+    const { capOfferedTools } = await import("../src/core/trainingExport.ts");
+    const { cleanNoToolExamples } = await import("../src/core/trace.ts");
+
+    const noToolClean = makeTrace({
+      said: "How are you feeling today?",
+      offered: Array.from({ length: 24 }, (_, idx) => `tool_${idx}`),
+      calls: [],
+      reply: "Astra is feeling great today, Captain.",
+    });
+    const noToolWithheld = makeTrace({
+      said: "Notification check",
+      withheld: true,
+      calls: [],
+      reply: "Skipped notification.",
+    });
+    const noToolChecked = makeTrace({
+      said: "Check something",
+      calls: [],
+      checks: [{ found: "claimed", did: "again" }],
+      reply: "Done.",
+    });
+    const toolTurn = makeTrace({
+      said: "Run a quick check",
+      offered: ["a", "b", "c", "target_tool", "d", "e"],
+      calls: [makeCall({ tool: "target_tool" })],
+      reply: "Checked target_tool.",
+    });
+
+    expect(cleanNoToolExamples([noToolClean, noToolWithheld, noToolChecked, toolTurn])).toHaveLength(1);
+    expect(capOfferedTools(["a", "b", "c", "target_tool", "d", "e"], [makeCall({ tool: "target_tool" })], 3)).toEqual([
+      "target_tool",
+      "a",
+      "b",
+    ]);
+
+    const { sft } = extractTrainingData([noToolClean, noToolWithheld, toolTurn], {
+      from: "test:unit",
+      includeClean: true,
+      includeNoToolClean: true,
+      maxOfferedTools: 4,
+      teacherOnlyForClean: true,
+    });
+    expect(sft).toHaveLength(2);
+    const anchored = sft.find((item) => item.id.startsWith("sft-notool-"));
+    const routed = sft.find((item) => !item.id.startsWith("sft-notool-"));
+    expect(anchored?.text).toContain("Astra is feeling great today, Captain.");
+    expect(anchored?.text).toContain("Available tools: tool_0, tool_1, tool_2, tool_3.");
+    expect(routed?.text).toContain("Available tools: target_tool, a, b, c.");
+
+    const report: ReportLikeForTraining = {
+      label: "std",
+      cases: [
+        {
+          id: "character/greeting",
+          runs: [
+            {
+              pass: true,
+              failures: [],
+              moods: [["thinking", "happy"]],
+              moodFirst: [true],
+              traces: [noToolClean],
+            },
+          ],
+        },
+      ],
+    };
+    const reportExtracted = extractReportTrainingData(report, {
+      chatTemplate: "qwen3.5",
+      includeNoToolClean: true,
+      maxOfferedTools: 4,
+      teacherOnlyForClean: true,
+    });
+    expect(reportExtracted.sft).toHaveLength(1);
+    expect(reportExtracted.sft[0]?.text).toContain(
+      "<|im_start|>assistant\n[[happy]] Astra is feeling great today, Captain.<|im_end|>",
+    );
+  });
 });

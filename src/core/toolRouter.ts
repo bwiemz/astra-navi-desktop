@@ -163,10 +163,11 @@ export const HINTS: Readonly<Record<string, Hint>> = {
   },
   [TOOLS.lookAtScreen]: {
     words:
-      /\b(?:screen|on screen|looking at|this error|this window|what am i|see this|read this|earlier)\b|画面|スクリーン|屏幕|画面上/i,
+      /\b(?:look_at_screen|screen|on screen|looking at|look at (?:the|this|that|my)|this error|this window|what am i|see this|read this|earlier)\b|画面|スクリーン|屏幕|画面上/i,
     sayings: [
       "what's on my screen",
       "look at this error",
+      "look at the window to see its menu bar",
       "what does this dialog say",
       "what was I doing earlier",
       "画面を見て",

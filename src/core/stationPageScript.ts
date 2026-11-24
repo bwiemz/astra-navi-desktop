@@ -699,6 +699,7 @@ export const STATION_SCRIPT = String.raw`
     keep(OUTBOX_KEY, null);
     renderOutbox();
     try { if (app && typeof app.setAlertPolling === "function") app.setAlertPolling(false, ""); } catch (e) { /* ignore */ }
+    try { if (app && typeof app.setApprovalSession === "function") app.setApprovalSession(""); } catch (e) { /* ignore */ }
     keep(TOKEN_KEY, null);
     dropStream();
     clearTimeout(retryTimer);
@@ -903,6 +904,7 @@ export const STATION_SCRIPT = String.raw`
 
   function signedIn(given) {
     session = String(given);
+    try { if (app && typeof app.setApprovalSession === "function") app.setApprovalSession(session); } catch (e) { /* ignore */ }
     saidActiveAt = Date.now();
     signPassword.value = "";
     signProblem.textContent = "";
@@ -916,6 +918,7 @@ export const STATION_SCRIPT = String.raw`
   // The questions go with it: they are for whoever is signed in, and are sent again then.
   function signedOut(words) {
     session = null;
+    try { if (app && typeof app.setApprovalSession === "function") app.setApprovalSession(""); } catch (e) { /* ignore */ }
     cancelVoiceCapture();
     dropCards();
     renderPinned(null);

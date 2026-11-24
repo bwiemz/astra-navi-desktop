@@ -7,6 +7,8 @@
     package="app.astranavi.station">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Required by JobScheduler jobs with NETWORK_TYPE_ANY for background standing-order polling. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- For letting this phone back in to her by its own fingerprint or face check. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- For hold-to-talk voice notes sent straight to local Whisper transcription. -->

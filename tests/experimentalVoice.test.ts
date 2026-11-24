@@ -134,4 +134,78 @@ describe("Zero-Python CPU Clause Streaming & Multilingual Streaming Backends", (
     expect(capturedBody).toContain("reference_voice");
     expect(capturedBody).toContain("qwen3-tts-0.6b");
   });
+
+  it("reuses a single shared ONNX session across presets, disposes cleanly, and splits long first clauses early", async () => {
+    await OnnxVoice.disposeSharedEngines();
+    let loads = 0;
+    let disposed = 0;
+    const sampleRate = 24_000;
+    const tone = new Float32Array(1200);
+    for (let i = 0; i < tone.length; i += 1) {
+      tone[i] = 0.25 * Math.sin((2 * Math.PI * 220 * i) / sampleRate);
+    }
+
+    const sharedLoader = async () => {
+      loads += 1;
+      return {
+        model: {
+          dispose: async () => {
+            disposed += 1;
+          },
+        },
+        generate: async () => ({ audio: tone, sampling_rate: sampleRate }),
+      };
+    };
+
+    const astra = new OnnxVoice({
+      cacheDir: "/tmp/shared-speech-test",
+      voice: "astra",
+      speed: 1.0,
+      loadEngine: sharedLoader,
+      shareSession: true,
+    });
+    const bright = new OnnxVoice({
+      cacheDir: "/tmp/shared-speech-test",
+      voice: "bright",
+      speed: 1.0,
+      loadEngine: sharedLoader,
+      shareSession: true,
+    });
+    const calm = new OnnxVoice({
+      cacheDir: "/tmp/shared-speech-test",
+      voice: "calm",
+      speed: 1.0,
+      loadEngine: sharedLoader,
+      shareSession: true,
+    });
+
+    await astra.synthesize("Ready now.", "en");
+    await bright.synthesize("All checks clear.", "en");
+    await calm.synthesize("Monitoring nominal.", "en");
+    expect(loads).toBe(1);
+    expect(OnnxVoice.sharedCacheSize()).toBe(1);
+
+    await OnnxVoice.disposeSharedEngines();
+    expect(disposed).toBe(1);
+    expect(OnnxVoice.sharedCacheSize()).toBe(0);
+
+    const commaClauses = splitStreamingClauses(
+      "Standing orders verified carefully, and zero critical security findings remain on the host.",
+    );
+    expect(commaClauses.length).toBeGreaterThanOrEqual(2);
+    expect((commaClauses[0] ?? "").split(/\s+/).length).toBeLessThanOrEqual(7);
+
+    const conjClauses = splitStreamingClauses(
+      "Standing orders verified and zero critical security findings remain.",
+    );
+    expect(conjClauses).toEqual([
+      "Standing orders verified",
+      "and zero critical security findings remain.",
+    ]);
+
+    const forcedClauses = splitStreamingClauses(
+      "Calibration sequence completed across every node with zero timeouts reported today.",
+    );
+    expect((forcedClauses[0] ?? "").split(/\s+/).length).toBeLessThanOrEqual(6);
+  });
 });

@@ -29,7 +29,12 @@ import { createNoticeTools } from "../src/core/noticeTools.ts";
 import { buildSystemPrompt, EVERY_ABILITY, FORM_TYPED } from "../src/core/persona.ts";
 import { createPhoneTools } from "../src/core/phoneTools.ts";
 import { createShipTools } from "../src/core/shipTools.ts";
-import { cleanExamples, correctedPairs, type TurnTrace } from "../src/core/trace.ts";
+import {
+  cleanExamples,
+  cleanNoToolExamples,
+  correctedPairs,
+  type TurnTrace,
+} from "../src/core/trace.ts";
 import {
   extractReportTrainingData,
   extractTrainingData,
@@ -86,6 +91,8 @@ let chatTemplate: SftTemplate = "qwen3";
 let domainFilter: "all" | SpecialistDomain = "all";
 let deduplicate = false;
 let teacherOnly = false;
+let includeNoTool = false;
+let maxOffered: number | undefined;
 const reports: string[] = [];
 const traceFiles: string[] = [];
 for (let index = 0; index < args.length; index += 1) {
@@ -118,8 +125,18 @@ for (let index = 0; index < args.length; index += 1) {
     deduplicate = true;
   } else if (arg === "--dedup") {
     deduplicate = true;
-  } else if (arg === "--teacher-only") teacherOnly = true;
-  else if (arg === "--traces") traceFiles.push(args[(index += 1)] ?? "");
+  } else if (arg === "--teacher-only") {
+    teacherOnly = true;
+  } else if (arg === "--include-no-tool") {
+    includeNoTool = true;
+  } else if (arg === "--max-offered") {
+    const raw = Number(args[(index += 1)] ?? "");
+    if (!Number.isInteger(raw) || raw <= 0) {
+      console.error("--max-offered must be a positive integer.");
+      process.exit(1);
+    }
+    maxOffered = raw;
+  } else if (arg === "--traces") traceFiles.push(args[(index += 1)] ?? "");
   else if (arg.startsWith("--")) {
     console.error(`Unknown option ${arg}.`);
     process.exit(1);
@@ -142,8 +159,14 @@ const pairs: PreferencePair[] = [];
 const sft: SftExample[] = [];
 const takeRaw = (traces: readonly TurnTrace[], from: string, onlyPassed: boolean): void => {
   for (const pair of correctedPairs(traces)) rawLines.push({ kind: "corrected", from, ...pair });
-  if (onlyPassed)
+  if (onlyPassed) {
     for (const example of cleanExamples(traces)) rawLines.push({ kind: "clean", from, ...example });
+    if (includeNoTool) {
+      for (const example of cleanNoToolExamples(traces)) {
+        rawLines.push({ kind: "clean", from, ...example });
+      }
+    }
+  }
 };
 
 let without = 0;
@@ -151,6 +174,8 @@ for (const name of reports) {
   const report = await loadReport(name);
   const extracted = extractReportTrainingData(report, {
     teacherOnlyForClean: teacherOnly,
+    includeNoToolClean: includeNoTool,
+    maxOfferedTools: maxOffered,
     systemPrompt: sftSystemPrompt,
     userSuffix: sftUserSuffix,
     chatTemplate,
@@ -177,6 +202,11 @@ for (const name of reports) {
         for (const example of cleanExamples(run.traces)) {
           rawLines.push({ kind: "clean", from, ...example });
         }
+        if (includeNoTool) {
+          for (const example of cleanNoToolExamples(run.traces)) {
+            rawLines.push({ kind: "clean", from, ...example });
+          }
+        }
       }
     }
   }
@@ -196,6 +226,8 @@ for (const file of traceFiles) {
   const extracted = extractTrainingData(traces, {
     from: file,
     includeClean: true,
+    includeNoToolClean: includeNoTool,
+    maxOfferedTools: maxOffered,
     teacherOnlyForClean: teacherOnly,
     systemPrompt: sftSystemPrompt,
     userSuffix: sftUserSuffix,

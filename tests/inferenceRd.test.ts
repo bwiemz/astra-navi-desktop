@@ -42,7 +42,7 @@ describe("Post-v1 Inference & ML R&D (Track 1)", () => {
       contextSize: 16_384,
       kvCachePrecision: "f8_e4m3",
       flashAttention: true,
-      draftModelPath: "/models/qwen3.5-1.7b.gguf",
+      draftModelPath: "/models/qwen3.5-2b.gguf",
       moeCacheSizeMb: 8192,
       moeCacheCpuShare: 0.75,
     });
@@ -52,14 +52,14 @@ describe("Post-v1 Inference & ML R&D (Track 1)", () => {
     expect(args).toContain("-fa");
     expect(args).toContain("on");
     expect(args).toContain("-md");
-    expect(args).toContain("/models/qwen3.5-1.7b.gguf");
+    expect(args).toContain("/models/qwen3.5-2b.gguf");
   });
 
   it("enforces empirical <=25% draft VRAM ratio cap in selectSpeculativeDraft and tuner recommendations", () => {
     // 4B tiny target must never pair with a draft
     expect(selectSpeculativeDraft(BRAIN_MODELS.small, 8)).toBeNull();
 
-    // 9B standard target (7 GB) allows 1.7B draft (1.45 GB <= 1.75 GB = 25% of 7 GB)
+    // 9B standard target (7 GB) allows 2B draft (1.55 GB <= 1.75 GB = 25% of 7 GB)
     const draft9b = selectSpeculativeDraft(BRAIN_MODELS.standard, 8);
     expect(draft9b).not.toBeNull();
     expect(draft9b?.vramGb ?? 99).toBeLessThanOrEqual(BRAIN_MODELS.standard.vramGb * 0.25);
@@ -79,7 +79,7 @@ describe("Post-v1 Inference & ML R&D (Track 1)", () => {
       memoryBandwidthGbps: 620,
     });
     expect(rec20Gb.kvCachePrecision).toBe("f8_e4m3");
-    expect(rec20Gb.speculativeDraft?.draftId).toBe("qwen3.5-1.7b");
+    expect(rec20Gb.speculativeDraft?.draftId).toBe("qwen3.5-2b");
 
     const rec96Gb = recommendHardwareTier({
       gpuName: "RTX PRO 6000",

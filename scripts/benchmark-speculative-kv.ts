@@ -14,6 +14,8 @@ import {
   GgmlType,
   getLlama,
   LlamaChatSession,
+  type LlamaContext,
+  type LlamaModel,
 } from "node-llama-cpp";
 import { modelsDir } from "../src/core/paths.ts";
 
@@ -77,17 +79,55 @@ async function benchKvMode(
   };
 }
 
+async function warmGpuClocks(modelPath: string): Promise<void> {
+  const llama = await getLlama();
+  const model = await llama.loadModel({ modelPath });
+  const ctx = await model.createContext({ contextSize: 2048, flashAttention: true });
+  try {
+    const seq = ctx.getSequence();
+    const session = new LlamaChatSession({ contextSequence: seq });
+    await session.prompt(PROMPT, { maxTokens: 64, temperature: 0 });
+  } finally {
+    await ctx.dispose().catch(() => undefined);
+    await model.dispose().catch(() => undefined);
+  }
+}
+
 async function benchSpeculative(
   targetPath: string,
   draftPath: string,
+  pairLabel: string,
+  kvType?: GgmlType,
 ): Promise<Record<string, unknown>> {
   const llama = await getLlama();
-  const targetModel = await llama.loadModel({ modelPath: targetPath });
-  const draftModel = await llama.loadModel({ modelPath: draftPath });
-  const targetCtx = await targetModel.createContext({ contextSize: 4096, flashAttention: true });
-  const draftCtx = await draftModel.createContext({ contextSize: 4096, flashAttention: true });
+  let targetModel: LlamaModel | null = null;
+  let draftModel: LlamaModel | null = null;
+  let targetCtx: LlamaContext | null = null;
+  let draftCtx: LlamaContext | null = null;
 
   try {
+    targetModel = await llama.loadModel({ modelPath: targetPath });
+    draftModel = await llama.loadModel({ modelPath: draftPath });
+    targetCtx = await targetModel.createContext({
+      contextSize: 4096,
+      flashAttention: true,
+      ...(kvType !== undefined
+        ? {
+            experimentalKvCacheKeyType: kvType,
+            experimentalKvCacheValueType: kvType,
+          }
+        : {}),
+    });
+    draftCtx = await draftModel.createContext({
+      contextSize: 4096,
+      flashAttention: true,
+      ...(kvType !== undefined
+        ? {
+            experimentalKvCacheKeyType: kvType,
+            experimentalKvCacheValueType: kvType,
+          }
+        : {}),
+    });
     const targetSeq = targetCtx.getSequence({
       tokenPredictor: new DraftSequenceTokenPredictor(draftCtx.getSequence(), {
         minTokens: 1,
@@ -112,6 +152,7 @@ async function benchSpeculative(
     const counted = tokenCount > 0 ? tokenCount : targetModel.tokenize(reply).length;
     const decodeMs = firstTokenAt > 0 ? Math.max(1, performance.now() - firstTokenAt) : totalMs;
     return {
+      pair: pairLabel,
       supported: true,
       tokens: counted,
       ttftMs: firstTokenAt > 0 ? Math.round(firstTokenAt - t0) : Math.round(totalMs),
@@ -119,20 +160,24 @@ async function benchSpeculative(
     };
   } catch (error) {
     return {
+      pair: pairLabel,
       supported: false,
       reason: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    await draftCtx.dispose().catch(() => undefined);
-    await targetCtx.dispose().catch(() => undefined);
-    await draftModel.dispose().catch(() => undefined);
-    await targetModel.dispose().catch(() => undefined);
+    await draftCtx?.dispose().catch(() => undefined);
+    await targetCtx?.dispose().catch(() => undefined);
+    await draftModel?.dispose().catch(() => undefined);
+    await targetModel?.dispose().catch(() => undefined);
   }
 }
 
 async function main(): Promise<void> {
   const dir = modelsDir();
   const target9b = join(dir, "Qwen3.5-9B-Q4_K_M.gguf");
+  const target27b = join(dir, "Qwen3.8-27B-UD-Q4_K_M.gguf");
+  const draft08b = join(dir, "Qwen3.5-0.8B-Q4_K_M.gguf");
+  const draft2b = join(dir, "Qwen3.5-2B-Q4_K_M.gguf");
   const draft4b = join(dir, "Qwen3.5-4B-Q4_K_M.gguf");
 
   if (!existsSync(target9b)) {
@@ -140,17 +185,44 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  await warmGpuClocks(target9b);
+
   const kvResults = [
     await benchKvMode(target9b, "9B FP16 KV"),
     await benchKvMode(target9b, "9B Q8_0 KV (lean)", GgmlType.Q8_0),
     await benchKvMode(target9b, "9B Q4_0 KV (ultra-lean)", GgmlType.Q4_0),
   ];
 
-  const speculativeResult = existsSync(draft4b)
-    ? await benchSpeculative(target9b, draft4b)
-    : { supported: false, reason: "Draft GGUF missing." };
+  const speculativePairs: Array<{ target: string; draft: string; label: string; kv?: GgmlType }> = [
+    { target: target9b, draft: draft08b, label: "9B + 0.8B draft" },
+    { target: target9b, draft: draft2b, label: "9B + 2B draft" },
+    { target: target9b, draft: draft4b, label: "9B + 4B draft (control)" },
+    { target: target27b, draft: draft2b, label: "27B + 2B draft", kv: GgmlType.Q8_0 },
+    { target: target27b, draft: draft4b, label: "27B + 4B draft", kv: GgmlType.Q8_0 },
+  ];
 
-  console.log(JSON.stringify({ kvResults, speculativeResult }, null, 2));
+  const baseline27b = existsSync(target27b)
+    ? await benchKvMode(target27b, "27B Q8_0 KV (baseline)", GgmlType.Q8_0).catch((error: unknown) => ({
+        mode: "27B Q8_0 KV (baseline)",
+        supported: false,
+        reason: error instanceof Error ? error.message : String(error),
+      }))
+    : { mode: "27B Q8_0 KV (baseline)", supported: false, reason: "27B GGUF missing." };
+
+  const speculativeResults: Record<string, unknown>[] = [];
+  for (const spec of speculativePairs) {
+    if (!existsSync(spec.target) || !existsSync(spec.draft)) {
+      speculativeResults.push({
+        pair: spec.label,
+        supported: false,
+        reason: `Missing GGUF (${!existsSync(spec.target) ? spec.target : spec.draft})`,
+      });
+      continue;
+    }
+    speculativeResults.push(await benchSpeculative(spec.target, spec.draft, spec.label, spec.kv));
+  }
+
+  console.log(JSON.stringify({ kvResults, baseline27b, speculativeResults }, null, 2));
 }
 
 main().catch((err: unknown) => {

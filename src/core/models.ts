@@ -14,7 +14,7 @@ export type ModelQuantization = "IQ4_XS" | "Q4_K_M" | "Q5_K_M" | "Q6_K" | "Q8_0"
 export type KvCachePrecision = "f16" | "f8_e4m3" | "q8_0" | "q4_0" | "tq4" | "tq3";
 
 export interface SpeculativeDraftModel {
-  id: "qwen3.5-0.8b" | "qwen3.5-1.7b" | "qwen3.5-4b";
+  id: "qwen3.5-0.8b" | "qwen3.5-2b" | "qwen3.5-4b";
   family: "qwen3.5";
   fileName: string;
   vramGb: number;
@@ -32,12 +32,12 @@ export const DRAFT_MODELS: readonly SpeculativeDraftModel[] = [
     expectedSpeedup: 1.85,
   },
   {
-    id: "qwen3.5-1.7b",
+    id: "qwen3.5-2b",
     family: "qwen3.5",
-    fileName: "Qwen3.5-1.7B-Q4_K_M.gguf",
-    vramGb: 1.45,
+    fileName: "Qwen3.5-2B-Q4_K_M.gguf",
+    vramGb: 1.55,
     maxTargetParamsB: 32,
-    expectedSpeedup: 2.25,
+    expectedSpeedup: 2.15,
   },
   {
     id: "qwen3.5-4b",
@@ -367,8 +367,8 @@ export interface ModelBenchmarkMetrics {
   toolChoicePercent: number;
   followThroughPercent: number;
   injectionSafetyPercent: number;
-  fuzzPassed: number;
-  fuzzTotal: number;
+  fuzzPassed?: number;
+  fuzzTotal?: number;
   medianTtftSec: number;
   tokensPerSec: number;
   measuredOn: string;
@@ -471,13 +471,13 @@ export const ROLLING_MODEL_CATALOG: readonly RollingModelEntry[] = [
     family: "Qwen3-MoE",
     releaseTag: "2026.11",
     recommended: false,
-    benchmarkStatus: "pending_gpu",
+    benchmarkStatus: "verified",
     model: {
       id: "large",
       label: "Large MoE (Qwen3 30B-A3B)",
       fileName: "Qwen3-30B-A3B-Q4_K_M.gguf",
       url: "https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf",
-      sizeBytes: 18_600_000_000,
+      sizeBytes: 18_556_686_912,
       vramGb: 20,
       architecture: "moe",
       quantization: "Q4_K_M",
@@ -485,7 +485,19 @@ export const ROLLING_MODEL_CATALOG: readonly RollingModelEntry[] = [
       totalParamsB: 30,
       activeParamsB: 3,
     },
-    notes: "3B-active Mixture-of-Experts preset for 24 GB GPUs & 36+ GB Apple Silicon; awaiting full 163-case GPU run.",
+    benchmarks: {
+      suite: "163-case core",
+      casesTotal: 163,
+      overallScorePercent: 73.9,
+      toolChoicePercent: 78.7,
+      followThroughPercent: 66.7,
+      injectionSafetyPercent: 80.0,
+      medianTtftSec: 2.13,
+      tokensPerSec: 213.0,
+      measuredOn: "NVIDIA RTX PRO 4500 Blackwell (32,623 MiB VRAM)",
+      measuredAt: "2026-11-24",
+    },
+    notes: "3B-active Mixture-of-Experts preset: ultra-fast 213 tok/s generation & 100% Reasoning/Nothing Leaked, but 73.9% agentic score trails dense 27B (90.6%).",
   },
   {
     presetId: "qwen3.5-72b",

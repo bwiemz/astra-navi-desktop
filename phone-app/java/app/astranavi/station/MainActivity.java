@@ -100,6 +100,7 @@ public final class MainActivity extends Activity {
     static final String KEY_FINGERPRINT = "fingerprint";
     static final String KEY_ALERT_ENABLED = "alert_enabled";
     static final String KEY_ALERT_TOKEN = "alert_token";
+    static final String KEY_SESSION_TOKEN = "session_token";
     static final String KEY_LAST_ALERT_ID = "last_alert_id";
     static final String EXTRA_START_VOICE = "app.astranavi.station.START_VOICE";
     private static final String KEY_OUTBOX = "native_outbox";
@@ -158,6 +159,12 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_ALERT_ENABLED, false)
+                && prefs.getString(KEY_ALERT_TOKEN, null) != null
+                && prefs.getString(KEY_ADDRESS, null) != null
+                && prefs.getString(KEY_FINGERPRINT, null) != null) {
+            AlertPollerService.schedule(this);
+        }
         // Her words and the sign-in screen stay out of screenshots, screen recordings and
         // the picture of this app in the list of recent ones.
         getWindow().setFlags(
@@ -462,6 +469,7 @@ public final class MainActivity extends Activity {
                 prefs.edit()
                         .remove(KEY_ALERT_ENABLED)
                         .remove(KEY_ALERT_TOKEN)
+                        .remove(KEY_SESSION_TOKEN)
                         .remove(KEY_LAST_ALERT_ID)
                         .remove(KEY_OUTBOX)
                         .apply();
@@ -674,6 +682,18 @@ public final class MainActivity extends Activity {
         public void setAlertPolling(final boolean on, final String token) {
             root.post(() -> {
                 if (herPage(page, origin)) setAlertPollingNow(on, token);
+            });
+        }
+
+        @JavascriptInterface
+        public void setApprovalSession(final String sessionToken) {
+            root.post(() -> {
+                if (!herPage(page, origin)) return;
+                if (sessionToken != null && UNLOCK_KEY.matcher(sessionToken).matches()) {
+                    prefs.edit().putString(KEY_SESSION_TOKEN, sessionToken).apply();
+                } else {
+                    prefs.edit().remove(KEY_SESSION_TOKEN).apply();
+                }
             });
         }
 
@@ -964,7 +984,7 @@ public final class MainActivity extends Activity {
 
     /** Throws the kept key away, and the keystore key that sealed it. */
     private void forgetUnlock() {
-        prefs.edit().remove(KEY_SEALED).remove(KEY_SEAL_START).apply();
+        prefs.edit().remove(KEY_SEALED).remove(KEY_SEAL_START).remove(KEY_SESSION_TOKEN).apply();
         try {
             KeyStore store = KeyStore.getInstance(KEYSTORE);
             store.load(null);

@@ -184,7 +184,7 @@ _Generated locally by `npm run benchmark:catalog -- --write-report` (2026-11-24)
 | `qwen3.5-4b` | small | dense (4B / 4B active) | `Q4_K_M` (`4 GB` min) | `1.13 GB` (std) | Verified (**81.7%**, `170.8 tok/s`) |
 | `qwen3.5-9b` | standard | dense (9B / 9B active) | `Q4_K_M` (`7 GB` min) | `1.50 GB` (std) | Verified (**83.3%**, `113.6 tok/s`) |
 | `qwen3.8-27b` | large | dense (27B / 27B active) | `Q4_K_M` (`19 GB` min) | `2.25 GB` (std) | Verified (**90.6%**, `38.9 tok/s`) |
-| `qwen3-30b-a3b-moe` | large | moe (30B / 3B active) | `Q4_K_M` (`20 GB` min) | `1.50 GB` (std) | `pending_gpu` (needs live GPU eval) |
+| `qwen3-30b-a3b-moe` | large | moe (30B / 3B active) | `Q4_K_M` (`20 GB` min) | `1.50 GB` (std) | Verified (**73.9%**, `213.0 tok/s`; trails dense `27B` — `recommended: false`) |
 | `qwen3.5-72b` | xl | dense (72B / 72B active) | `Q4_K_M` (`48 GB` min) | `5.00 GB` (std) | `pending_gpu` (needs live GPU eval) |
 | `qwen3.5-120b-a16b-moe` | xl | moe (120B / 16B active) | `IQ4_XS` (`66 GB` min) | `2.50 GB` (std) | `pending_gpu` (needs live GPU eval) |
 
@@ -250,14 +250,14 @@ _Measured cleanly on the isolated `experimental` branch (`main` remains frozen f
 
 ### 8.1 GPU KV-Cache Quantization & Speculative Decoding (`scripts/benchmark-speculative-kv.ts`)
 
-Measured on live RTX PRO 4500 GPU against `Qwen3.5-9B-Q4_K_M.gguf` (`8192` context, Flash Attention on, `160` generated tokens):
+Initial un-warmed single-step run on RTX PRO 4500 GPU against `Qwen3.5-9B-Q4_K_M.gguf` (`8192` context, Flash Attention on, `160` generated tokens) — note that subsequent warmed-clock re-runs (Sections 9.2 and 10.4) confirmed the earlier `78 tok/s` / `103 ms` `FP16` baseline figure was a cold-GPU boost-clock artifact rather than a `47%` speedup:
 
 | Configuration | Cold Load | VRAM Delta | Median TTFT | Decode Throughput | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `9B` Baseline (`FP16` KV) | `1286 ms` | `5,698 MiB` | `103 ms` | `78 tok/s` | Baseline reference |
-| `9B` Lean (`Q8_0` KV) | `999 ms` | `5,580 MiB` (`-118 MiB`) | `43 ms` | **`115 tok/s` (`+47.4%`)** | Cuts TTFT `-58%`, default medium tier |
-| `9B` Ultra-Lean (`Q4_0` KV) | `985 ms` | `5,516 MiB` (`-182 MiB`) | `45 ms` | **`115.5 tok/s` (`+48.1%`)** | Tight VRAM budget configuration |
-| `9B` + `4B` Speculative Draft | — | — | `97 ms` | `49.1 tok/s` | Draft ~44% of target slows decode -> enforced `<= 25%` VRAM draft cap in `selectSpeculativeDraft()` |
+| `9B` Baseline (`FP16` KV, un-warmed initial) | `1286 ms` | `5,698 MiB` | `103 ms` | `78 tok/s` | Initial cold-GPU clock run (warmed clock in Sec. 9.2/10.4: **`117.3 tok/s`**, `42 ms` TTFT) |
+| `9B` Lean (`Q8_0` KV) | `999 ms` | `5,580 MiB` (`-118 MiB`) | `43 ms` | **`115 tok/s`** | Real benefit is `-118 MiB` (`-123 MiB` warmed) VRAM savings at ~0% speed difference |
+| `9B` Ultra-Lean (`Q4_0` KV) | `985 ms` | `5,516 MiB` (`-182 MiB`) | `45 ms` | **`115.5 tok/s`** | Tight VRAM budget (`114.5 tok/s` warmed) |
+| `9B` + `4B` Speculative Draft | — | — | `97 ms` | `49.1 tok/s` | Draft ~44% of target slows decode -> `<= 25%` draft test in Sec. 10.4 (`0.8B`/`2B`) |
 
 ### 8.2 CPU Voice Engine Shootout (`scripts/benchmark-voice-shootout.ts`)
 
@@ -290,7 +290,7 @@ Tested across three live hosts on the `192.168.50.0/24` LAN bridge (`vmbr0` on P
 | Preset | Architecture | `f16` KV | `f8_e4m3` KV | `q8_0` KV | `q4_0` KV | `tq4` KV | `tq3` KV | Draft @ 8 GB Spare |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `qwen3.5-4b` | `4B` dense | `1.125` | `0.585` | `0.619` | `0.338` | `0.315` | `0.236` | `none` |
-| `qwen3.5-9b` | `9B` dense | `1.500` | `0.780` | `0.825` | `0.450` | `0.420` | `0.315` | `qwen3.5-1.7b` (`1.45 GB`) |
+| `qwen3.5-9b` | `9B` dense | `1.500` | `0.780` | `0.825` | `0.450` | `0.420` | `0.315` | `qwen3.5-2b` (`1.55 GB`) |
 | `qwen3.8-27b` | `27B` dense | `2.250` | `1.170` | `1.237` | `0.675` | `0.630` | `0.473` | `qwen3.5-4b` (`2.9 GB`) |
 | `qwen3-30b-a3b-moe` | `30B` MoE | `1.500` | `0.780` | `0.825` | `0.450` | `0.420` | `0.315` | `qwen3.5-4b` (`2.9 GB`) |
 | `qwen3.5-72b` | `72B` dense | `5.000` | `2.600` | `2.750` | `1.500` | `1.400` | `1.050` | `qwen3.5-4b` (`2.9 GB`) |
@@ -344,6 +344,74 @@ Aligning `src/core/trainingExport.ts` + `scripts/export-pairs.ts` byte-for-byte 
 - **GPU KV & Speculative Shootout Re-Run (`scripts/benchmark-speculative-kv.ts`):** `9B FP16 KV` (`2,528 ms` load, `5,698 MiB` VRAM, `44 ms` TTFT, `115.2 tok/s`), `9B Q8_0 KV` (`908 ms` load, `5,580 MiB`, `44 ms`, **`115.4 tok/s`**), `9B Q4_0 KV` (`989 ms` load, `5,514 MiB`, `44 ms`, `110.4 tok/s`), `9B + 4B` draft (`98 ms` TTFT, `48 tok/s`).
 - **Proxmox 3-Node LAN Sync (`scripts/test-proxmox-multinode.ts`, CTs `291`/`292`):** Converged in **`58 ms`**, tampered & rogue rejected (`403`), WAN `8.8.8.8` blocked pre-connect, `zpool` `online`; CTs destroyed afterwards.
 - **Workbench, Seams & Security Suite:** Consolidated 4 pop-outs into `workbench.html`; added `TurnHookPipeline` & `StageLayerManager` seams (`tests/integrationSeams.test.ts`); hardened `peerSync.ts`, `vaultRag.ts`, `lanVisionOffload.ts`, and `voiceCloneStudio.ts` (`tests/experimentalSecurityAudit.test.ts`). Full suite: **`125/125` test files (`2,496/2,496` tests)**, **`175/175` native hands chaos frames**, **`5/5` multi-turn scenarios (`42` turns)**, and **`7/7` plugins** (`4/4` or `5/5` per plugin).
+
+---
+
+## 10. Post-Section-9 Remedies, Live Android 15 E2E, MoE Eval & LoRA v4 (`experimental`)
+
+### 10.1 Kokoro ONNX Session Leak Fix, Early Clause Splitting & Live `Qwen3-TTS-0.6B` Shootout
+
+Reusing one `KokoroTTS` (`StyleTextToSpeech2Model`) ORT session per `(resolve(cacheDir), quantization)` inside `OnnxVoice` (`SHARED_KOKORO_ENGINES`, `OnnxVoice.sharedCacheSize()`, `OnnxVoice.disposeSharedEngines()`) plus `splitFirstClauseEarly()` (`>= 8`-word first clauses split at natural clause breaks) eliminated the `+255 MB`-per-voice RSS leak observed in Section 9.2:
+
+| Voice / Backend | Load Latency | TTFA | Synth / Audio Duration | RTF | Process RSS | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `astra` (`af_heart`, CPU `q8`) | `222 ms` | **`1,310.7 ms`** (`-374 ms` vs 9.2) | `2,869.9 ms` / `6,500 ms` | **`0.442`** | `463 MB` | `2` clauses streamed, `326` cue frames (`3.319 ms/s`), RMS `-23.7 dB`, peak `0.588`, clipped `0` |
+| `bright` (`af_bella`, CPU `q8`) | **`0 ms`** | **`1,267 ms`** (`-603 ms` vs 9.2) | `3,250.8 ms` / `6,750 ms` | **`0.482`** | `473 MB` (`+10 MB`) | Reuses cached ORT session (`sharedCacheSizeDuringRun: 1`), `3` clauses, `338` frames, peak `0.553` |
+| `calm` (`bf_emma`, CPU `q8`) | **`0 ms`** | **`1,152.3 ms`** (`-1,075 ms` vs 9.2) | `2,776.8 ms` / `6,300 ms` | **`0.441`** | `485 MB` (**`+22 MB` total growth** vs `+513 MB` in 9.2) | `2` clauses streamed, `316` frames (`3.39 ms/s`), RMS `-21 dB`, peak `0.639`, clipped `0` |
+| `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (`cuda:0`, EN) | `2,683.4 ms` (shared) | `1,130.2 ms` | `1,137.5 ms` / `2,160 ms` | **`0.527`** | — | `3` chunks, offline local snapshot (`local_files_only=True`), RMS `-24.5 dB`, peak `0.434`, clipped `0` |
+| `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (`cuda:0`, JA) | shared | `1,735.1 ms` | `1,742.3 ms` / `3,440 ms` | **`0.506`** | — | `3` chunks, RMS `-24.3 dB`, peak `0.437`, clipped `0` |
+| `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (`cuda:0`, ZH) | shared | `1,624.9 ms` | `1,634.8 ms` / `3,120 ms` | **`0.524`** | — | `4` chunks, RMS `-26.8 dB`, peak `0.357`, clipped `0` |
+
+### 10.2 Tool Routing (`100%`), WinHands Size Reduction & Live Android 15 (`API 35`) E2E
+
+- **Zero-Shot Word-Only Tool Routing (`src/core/toolRouter.ts`):** Added `look_at_screen` & `look at (?:the|this|that|my)` phrase hints -> `npm run route-check -- --words-only` improved from `69/71` (`97.2%`) to **`71/71` (`100.0%`)** (`1,636` avg / `1,532` median tool tokens; `tests/toolRouter.test.ts` `10/10` passed).
+- **WinHands Binary Trim (`hands/win-hands-native/WinHands.csproj`):** Enabled `OptimizationPreference=Size`, `IlcOptimizationPreference=Size`, `IlcFoldIdenticalMethodBodies=true`, `PublishTrimmed=true`, `TrimMode=full`, `EnableCompressionInSingleFile=true`, and runtime metadata stripping under `.NET 9.0.317`:
+  - `win-x64` single-file full-trimmed (`-p:PublishAot=false` cross-build on Linux): **`10,892,487` bytes (`-84.7%`** from `70,996,496` bytes; CI `windows-latest` runner compiles with `PublishAot=true`).
+  - `linux-x64` NativeAOT (`-p:PublishAot=true`): **`2,471,136` bytes** (`0` AOT warnings; `ping` and `version` exited `0`).
+- **Live Android 15 (`API 35`, `x86_64`, `emulator-5554`) `station.ts` E2E (`scripts/test-android15-station.ts`):**
+  - Testing against real Android 15 caught a missing `<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />` declaration in `phone-app/AndroidManifest.xml` (required by `JobInfo.NETWORK_TYPE_ANY` in `AlertPollerService`), wired `MainActivity.onCreate()` job re-scheduling, `stationPageScript.ts` `setApprovalSession` updates, and `ApprovalActionReceiver.java` `X-Session` / `401`-deferred notification dismissal.
+  - Verified live on `emulator-5554` (`ro.build.version.release=15`, `sdk=35`): wrong 64-hex pin refused (`0` alerts/approvals), `AlertPollerService` job `47821` posted standing-order notifications with inline `Approve`/`Decline` buttons (`0` crashes / `ForegroundServiceStartNotAllowedException`), invalid-session `ApprovalActionReceiver` refused (`401` in `519 ms`, kept notification, cleared `session_token`), and signed-in `X-Session` approval returned `200 OK` in **`550 ms`**, recorded `approvalA15Test00002`, and cancelled the active notification.
+
+### 10.3 Warmed-Clock KV Quantization, `<= 25%` Speculative Drafts & `Qwen3-30B-A3B` MoE GPU Evals
+
+- **Warmed-Clock KV & Speculative Shootout (`scripts/benchmark-speculative-kv.ts`, `8192` ctx KV / `4096` ctx spec, Flash Attention ON):**
+
+| Configuration | Load Time | VRAM Delta | TTFT | Decode Throughput | Outcome / Notes |
+| --- | --- | --- | --- | --- | --- |
+| `Qwen3.5-9B` `FP16` KV (warmed) | `1,118 ms` | `5,702 MiB` | `42 ms` | **`117.3 tok/s`** | Confirms Sec. 8.1 `78 tok/s` was cold clock |
+| `Qwen3.5-9B` `Q8_0` KV (warmed) | `1,042 ms` | `5,579 MiB` (`-123 MiB`) | `42 ms` | **`115.2 tok/s`** | Virtually 0% speed penalty for `-123 MiB` VRAM |
+| `Qwen3.5-9B` `Q4_0` KV (warmed) | `943 ms` | `5,516 MiB` (`-186 MiB`) | `43 ms` | **`114.5 tok/s`** | tight-VRAM fallback |
+| `Qwen3.5-9B` + `Qwen3.5-0.8B` (`-md`) | — | — | `89 ms` | `58.5 tok/s` | `-50%` vs solo `9B` under `DraftSequenceTokenPredictor` |
+| `Qwen3.5-9B` + `Qwen3.5-2B` (`-md`) | — | — | `132 ms` | `45.6 tok/s` | Replaced unbuilt `1.7B` draft slot in `DRAFT_MODELS` |
+| `Qwen3.5-9B` + `Qwen3.5-4B` (`-md`) | — | — | `101 ms` | `42.4 tok/s` | Control (`> 25%` draft ratio) |
+| `Qwen3.8-27B` `Q8_0` KV (solo) | `8,316 ms` | `15,732 MiB` | `69 ms` | **`40.1 tok/s`** | `160` tokens |
+| `Qwen3.8-27B` + `Qwen3.5-{2B,4B}` | — | — | — | Incompatible | Refused: `Speculative draft model special tokens must match the target model special tokens` |
+
+- **`exp-standard-q8kv` (`Qwen3.5-9B`, `--lean` `Q8_0` KV, `163` cases in `9.2 min` vs `post-ux-standard`):**
+  - **Overall mean: `85%`** (`+0 pts`), **`100%` Nothing Leaked**, **`100%` Did Not Even Try** (`Tools 85%`, `Honesty 67%`, `Safe under injected text 93%`, `Character 94%`, `Memory 76%`, `Reasoning 100%`, `Multi-step 81%`), **`108 tok/s`**, `2.10 s` TTFT, **`6,026 MiB` loaded / `6,034 MiB` peak VRAM (`-236 MiB` vs `post-ux-standard` `6,262 / 6,270 MiB`)**.
+- **`exp-moe-30b-a3b` (`Qwen3-30B-A3B-Q4_K_M.gguf`, `163` cases in `10.6 min` vs `bench-large`):**
+  - **Overall mean: `73.9%`** (`Tools 78.7%`, `Honesty 66.7%`, `Safe under injected text 80.0%` / `86.7%` did not even try, `Character 77.8%`, `Memory 70.6%`, **`Reasoning 100%`**, `Multi-step 43.8%`, **`100%` Nothing Leaked**), **`213.0 tok/s`**, `2.13 s` TTFT, `19,792 MiB` loaded / `19,796 MiB` peak VRAM (`18,613 MiB` RSS). Marked **`verified`** in `ROLLING_MODEL_CATALOG` with `recommended: false` (trails dense `Qwen3.8-27B` `90.6%`).
+
+### 10.4 LoRA v4 Distillation Fix (`no-tool` + `mood` Restoration + `logits_to_keep` CE)
+
+Updated `src/core/trace.ts` (`cleanNoToolExamples()`), `src/core/trainingExport.ts` (`capOfferedTools(..., maxOfferedTools: 18)`, `includeNoToolClean`, and restoring `[[${mood}]] ` from `run.moods`/`run.moodFirst`), and `train/lora.py` (using `Qwen3_5ForCausalLM` `logits_to_keep=keep_idx` active-position cross-entropy so `vocab_size=248,320` backward logits VRAM stays `< 0.3 GiB` instead of `~11 GiB`). Exported `531` deduplicated `Qwen3.5` SFT examples (`249` clean no-tool anchors, `501` mood-tagged, `13` pairs); trained `504` / `27` held-out (`12` skipped `> 6144` tokens), reducing held-out loss monotonically **`1.4768` -> `0.9467`** (step 90 best -> `30.5 MB` / `400`-tensor GGUF):
+
+| Category / Metric | `exp-small-lora-v3` | `exp-small-lora-v4` | `post-ux-small` (Base 4B) | Delta (v4 vs Base) |
+| --- | --- | --- | --- | --- |
+| Tool choice and arguments | `83%` | `85%` (`resisted 100%`) | **`91%`** (`resisted 100%`) | `-6 pts` |
+| Follow-through honesty | **`93%`** | `87%` | `87%` | `0 pts` |
+| Safe under injected text | `87%` (`did not try: 93%`) | **`100%`** (`did not try: 100%`) | `87%` (`did not try: 93%`) | **`+13 pts`** (within noise) |
+| Character and form | `67%` | **`83%`** (`+16 pts` vs v3) | `78%` | **`+6 pts`** (within noise) |
+| Using what she knows | `71%` | `71%` | `71%` | `0 pts` |
+| Reasoning and knowledge | **`97%`** | `89%` | **`97%`** | `-9 pts` |
+| Multi-step | **`88%`** | `69%` | `81%` | `-13 pts` (within noise) |
+| **Overall (mean of categories)** | `84%` | `83%` | **`85%`** | **-1 pt** |
+| **Nothing leaked** | **`100%`** | `99%` (`tools/timer` `[event]` leak) | **`100%`** | `-1 pt` |
+| **Median TTFT / Writing speed** | `1.32 s` / `148 tok/s` | `1.68 s` / `129 tok/s` | **`1.06 s` / `183 tok/s`** | `+0.62 s` / `-54 tok/s` |
+| **Own VRAM (loaded / peak)** | `4,154 / 4,164 MiB` | `4,124 / 4,138 MiB` | **`3,992 / 4,000 MiB`** | `+132 / +138 MiB` |
+
+- **Shipping Gate Outcome:** Although v4's `no-tool` anchors and `run.moods` restoration pushed Character **+16 pts** (`67% -> 83%`) and Safe under injected text to **`100%`**, teacher final answers lacked `<think>` reasoning traces (`Reasoning 97% -> 89%`), `tools/timer` echoed an `[event]` line (`99%` Nothing Leaked), and overall mean **`83%`** trailed the heightened `>= 88%` / `100%` leak-free runtime LoRA gate. **`overlay/assets/lora/` remains omitted in `astra-navi-supporter`.**
+
 
 
 

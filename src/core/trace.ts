@@ -176,6 +176,31 @@ export function cleanExamples(traces: readonly TurnTrace[]): CleanExample[] {
     }));
 }
 
+/**
+ * User exchanges with zero tool calls, zero checks, and no immediate retry —
+ * supplying persona and tool-restraint anchors for small-brain SFT (`TurnTrace.reply`
+ * is stored after mood tags are stripped).
+ */
+export function cleanNoToolExamples(traces: readonly TurnTrace[]): CleanExample[] {
+  return traces
+    .filter(
+      (trace, index) =>
+        trace.kind === "user" &&
+        !trace.withheld &&
+        trace.checks.length === 0 &&
+        trace.calls.length === 0 &&
+        trace.reply.trim() !== "" &&
+        traces[index + 1]?.kind !== "again",
+    )
+    .map((trace) => ({
+      brain: trace.brain,
+      said: trace.said,
+      offered: trace.offered,
+      calls: trace.calls,
+      reply: trace.reply,
+    }));
+}
+
 /** The last few traces, newest last, for the page that shows them. Nothing is written to disk. */
 export class TraceKeeper {
   private readonly kept: TurnTrace[] = [];
