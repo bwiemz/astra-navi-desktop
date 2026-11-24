@@ -11,6 +11,53 @@ import { z } from "zod";
  */
 export type ModelQuantization = "IQ4_XS" | "Q4_K_M" | "Q5_K_M" | "Q6_K" | "Q8_0";
 
+export type KvCachePrecision = "f16" | "f8_e4m3" | "q8_0" | "q4_0" | "tq4" | "tq3";
+
+export interface SpeculativeDraftModel {
+  id: "qwen3.5-0.8b" | "qwen3.5-1.7b" | "qwen3.5-4b";
+  family: "qwen3.5";
+  fileName: string;
+  vramGb: number;
+  maxTargetParamsB: number;
+  expectedSpeedup: number;
+}
+
+export const DRAFT_MODELS: readonly SpeculativeDraftModel[] = [
+  {
+    id: "qwen3.5-0.8b",
+    family: "qwen3.5",
+    fileName: "Qwen3.5-0.8B-Q4_K_M.gguf",
+    vramGb: 0.75,
+    maxTargetParamsB: 14,
+    expectedSpeedup: 1.85,
+  },
+  {
+    id: "qwen3.5-1.7b",
+    family: "qwen3.5",
+    fileName: "Qwen3.5-1.7B-Q4_K_M.gguf",
+    vramGb: 1.45,
+    maxTargetParamsB: 32,
+    expectedSpeedup: 2.25,
+  },
+  {
+    id: "qwen3.5-4b",
+    family: "qwen3.5",
+    fileName: "Qwen3.5-4B-Q4_K_M.gguf",
+    vramGb: 2.9,
+    maxTargetParamsB: 120,
+    expectedSpeedup: 2.4,
+  },
+];
+
+const KV_PRECISION_FACTOR: Record<KvCachePrecision, number> = {
+  f16: 1.0,
+  q8_0: 0.55,
+  f8_e4m3: 0.52,
+  q4_0: 0.3,
+  tq4: 0.28,
+  tq3: 0.21,
+};
+
 export interface BrainModel {
   id: "small" | "standard" | "large" | "xl";
   label: string;
@@ -117,15 +164,78 @@ const QUANT_PRECISION_ORDER: readonly ModelQuantization[] = [
   "IQ4_XS",
 ];
 
-/** Estimates working KV-cache memory in bytes for a model, context length, and lean Q8_0 cache setting. */
+/** Estimates working KV-cache memory in bytes for a model, context length, and precision/lean setting. */
 export function estimateKvCacheBytes(
   model: BrainModel,
   contextSize: number,
   lean: boolean,
+  precision?: KvCachePrecision,
 ): number {
   const safeCtx = Math.max(512, Math.trunc(contextSize));
   const perTok = model.kvBytesPerToken ?? 98_304;
-  return Math.round(perTok * safeCtx * (lean ? 0.55 : 1));
+  const resolved: KvCachePrecision = precision ?? (lean ? "q8_0" : "f16");
+  return Math.round(perTok * safeCtx * KV_PRECISION_FACTOR[resolved]);
+}
+
+/** Auto-pairs a same-family tiny draft model when spare VRAM allows speculative decoding (`-md`). */
+export function selectSpeculativeDraft(
+  targetModel: Pick<BrainModel, "id" | "totalParamsB" | "activeParamsB" | "vramGb">,
+  spareVramGb: number,
+): SpeculativeDraftModel | null {
+  const paramsB = targetModel.totalParamsB ?? 4;
+  if (paramsB < 8 || !Number.isFinite(spareVramGb)) return null;
+  const usableSpare = spareVramGb - 1.5;
+  // Empirically, drafts >25% of target VRAM (e.g. 4B on 9B) slow decode; cap draft ratio cleanly.
+  const maxDraftVram = targetModel.vramGb * 0.25;
+  if (usableSpare <= 0.75) return null;
+  const candidates = DRAFT_MODELS.filter(
+    (d) =>
+      d.vramGb <= usableSpare &&
+      d.vramGb <= maxDraftVram &&
+      paramsB <= d.maxTargetParamsB * 2.5,
+  ).sort((a, b) => b.expectedSpeedup - a.expectedSpeedup);
+  return candidates[0] ?? null;
+}
+
+export interface LlamaCpp10LaunchConfig {
+  modelPath: string;
+  contextSize: number;
+  draftModelPath?: string | null;
+  kvCachePrecision?: "f16" | "f8_e4m3" | "q8_0" | "q4_0";
+  moeCacheSizeMb?: number;
+  moeCacheCpuShare?: number;
+  flashAttention?: boolean;
+}
+
+/** Builds llama.cpp 1.0.0 CLI/server flags (`-md`, `-ctk`/`-ctv`, `--moe-cache-*`). */
+export function buildLlamaCpp10Args(cfg: LlamaCpp10LaunchConfig): string[] {
+  const args: string[] = [
+    "-m",
+    cfg.modelPath,
+    "-c",
+    String(Math.max(512, Math.trunc(cfg.contextSize))),
+  ];
+  if (cfg.flashAttention !== false) {
+    args.push("-fa", "on");
+  }
+  if (cfg.draftModelPath) {
+    args.push("-md", cfg.draftModelPath);
+  }
+  const kvType = cfg.kvCachePrecision ?? "f16";
+  if (kvType !== "f16") {
+    args.push("-ctk", kvType, "-ctv", kvType);
+  }
+  if (typeof cfg.moeCacheSizeMb === "number" && cfg.moeCacheSizeMb > 0) {
+    args.push("--moe-cache-size", String(Math.round(cfg.moeCacheSizeMb)));
+  }
+  if (
+    typeof cfg.moeCacheCpuShare === "number" &&
+    cfg.moeCacheCpuShare > 0 &&
+    cfg.moeCacheCpuShare <= 1
+  ) {
+    args.push("--moe-cache-cpu-share", cfg.moeCacheCpuShare.toFixed(2));
+  }
+  return args;
 }
 
 /**

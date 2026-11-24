@@ -137,6 +137,13 @@ const LAYOUT: readonly string[] = [
     updated_at TEXT NOT NULL
   );
   `,
+  // 4: tamper-evident SHA-256 hash chain columns on actions audit log.
+  `
+  ALTER TABLE actions ADD COLUMN seq INTEGER;
+  ALTER TABLE actions ADD COLUMN prev_hash TEXT;
+  ALTER TABLE actions ADD COLUMN entry_hash TEXT;
+  ALTER TABLE actions ADD COLUMN approval_sig TEXT;
+  `,
 ];
 
 /** The newest layout this version knows. A database from a later version is not opened. */

@@ -170,9 +170,19 @@ export function formatQwenSft(params: {
     append("<|im_start|>assistant\n");
     const start = cursor;
     if (template === "qwen3.5") {
-      const parsedArgs = JSON.stringify(parseJsonInput(call.input));
+      const argObj = parseJsonInput(call.input);
+      const entries = Object.entries(argObj).filter(([k]) => k !== "raw");
+      const paramBlocks =
+        entries.length > 0
+          ? entries
+              .map(([k, v]) => {
+                const rendered = typeof v === "string" ? v : JSON.stringify(v);
+                return `<parameter=${k}>\n${rendered}\n</parameter>`;
+              })
+              .join("\n")
+          : `<parameter=params>\n${JSON.stringify(argObj)}\n</parameter>`;
       append(
-        `<think>\n\n</think>\n\n<tool_call>\n<function=${call.tool}>\n<parameter=params>\n${parsedArgs}\n</parameter>\n</function>\n</tool_call><|im_end|>`,
+        `<think>\n\n</think>\n\n<tool_call>\n<function=${call.tool}>\n${paramBlocks}\n</function>\n</tool_call><|im_end|>`,
       );
     } else {
       const payload = JSON.stringify({

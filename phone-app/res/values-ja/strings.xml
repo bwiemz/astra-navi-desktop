@@ -38,4 +38,9 @@
     <string name="alerts_channel_name">定例監視アラート</string>
     <string name="alerts_channel_desc">PC で設定した監視条件が満たされたときの通知。</string>
     <string name="alerts_fallback_title">監視アラート</string>
+    <string name="widget_talk_label">Astra Navi 音声</string>
+    <string name="widget_talk_button">話す</string>
+    <string name="tile_ptt_label">Astra と話す</string>
+    <string name="action_approve">承認</string>
+    <string name="action_decline">拒否</string>
 </resources>

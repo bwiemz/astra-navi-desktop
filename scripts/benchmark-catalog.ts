@@ -13,9 +13,15 @@ import {
   validateToolArguments,
 } from "../src/core/grammarGuard.ts";
 import {
+  recommendHardwareTier,
+  type HardwareProfile,
+} from "../src/core/hardwareTuner.ts";
+import {
   estimateKvCacheBytes,
   ROLLING_MODEL_CATALOG,
   selectQuantizationForBudget,
+  selectSpeculativeDraft,
+  type KvCachePrecision,
 } from "../src/core/models.ts";
 import type { ChatSessionModelFunctions } from "node-llama-cpp";
 
@@ -267,6 +273,64 @@ function buildSection6Markdown(
 async function main(): Promise<void> {
   const writeReport = process.argv.includes("--write-report");
   const jsonOut = process.argv.includes("--json");
+  const matrixMode = process.argv.includes("--matrix");
+
+  if (matrixMode) {
+    const GIB = 1024 ** 3;
+    const precisions: readonly KvCachePrecision[] = ["f16", "f8_e4m3", "q8_0", "q4_0", "tq4", "tq3"];
+    const matrixRows = ROLLING_MODEL_CATALOG.map((entry) => {
+      const kvGb: Record<string, string> = {};
+      for (const p of precisions) {
+        kvGb[p] = (estimateKvCacheBytes(entry.model, 16_384, false, p) / GIB).toFixed(3);
+      }
+      const draft8Gb = selectSpeculativeDraft(entry.model, 8);
+      return {
+        presetId: entry.presetId,
+        tier: entry.tier,
+        architecture: entry.model.architecture ?? "dense",
+        totalParamsB: entry.model.totalParamsB ?? null,
+        vramGb: entry.model.vramGb,
+        kv16kGb: kvGb,
+        speculativeDraftWith8GbSpare: draft8Gb ? `${draft8Gb.id} (${draft8Gb.vramGb} GB)` : "none",
+      };
+    });
+
+    const hardwareTiers: HardwareProfile[] = [
+      { gpuName: "RTX 3060 12GB", totalVramBytes: 12 * GIB, freeVramBytes: 11 * GIB, systemRamBytes: 32 * GIB, cpuThreads: 12, activeGameOrRender: false, memoryBandwidthGbps: 360 },
+      { gpuName: "RTX PRO 4500 20GB", totalVramBytes: 20 * GIB, freeVramBytes: 19 * GIB, systemRamBytes: 64 * GIB, cpuThreads: 16, activeGameOrRender: false, memoryBandwidthGbps: 620 },
+      { gpuName: "Workstation 96GB + 192GB RAM", totalVramBytes: 96 * GIB, freeVramBytes: 94 * GIB, systemRamBytes: 192 * GIB, cpuThreads: 32, activeGameOrRender: false, memoryBandwidthGbps: 1200 },
+    ];
+    const recommendations = hardwareTiers.map((hw) => {
+      const rec = recommendHardwareTier(hw);
+      return {
+        gpu: hw.gpuName,
+        tier: rec.tier,
+        architecture: rec.architecture,
+        quant: rec.quantization,
+        kvPrecision: rec.kvCachePrecision ?? (rec.leanMemory ? "q8_0" : "f16"),
+        speculativeDraft: rec.speculativeDraft?.draftId ?? "none",
+        moeHostCacheMb: rec.moeHostCache?.cacheSizeMb ?? 0,
+      };
+    });
+
+    if (jsonOut) {
+      console.log(JSON.stringify({ matrixRows, recommendations }, null, 2));
+    } else {
+      console.log("=== Model Regression Matrix (16k KV Cache Footprints in GB & Draft Pairing) ===");
+      for (const r of matrixRows) {
+        console.log(
+          `${r.presetId.padEnd(22)} | ${String(r.totalParamsB ?? "?").padStart(4)}B (${r.architecture.padEnd(5)}) | f16=${r.kv16kGb["f16"]} f8=${r.kv16kGb["f8_e4m3"]} q8=${r.kv16kGb["q8_0"]} q4=${r.kv16kGb["q4_0"]} tq4=${r.kv16kGb["tq4"]} tq3=${r.kv16kGb["tq3"]} GB | draft@8G=${r.speculativeDraftWith8GbSpare}`,
+        );
+      }
+      console.log("=== Hardware Profile Tier Recommendations ===");
+      for (const rec of recommendations) {
+        console.log(
+          `${(rec.gpu ?? "").padEnd(28)} -> tier=${rec.tier} (${rec.architecture}, ${rec.quant}, kv=${rec.kvPrecision}, draft=${rec.speculativeDraft}, moeHostCache=${rec.moeHostCacheMb} MB)`,
+        );
+      }
+    }
+    return;
+  }
 
   const fuzzCases = generateFuzzCases({ count: 500, seed: FUZZ_SEED });
   const fuzz = await runDeterministicFuzzGate(fuzzCases);

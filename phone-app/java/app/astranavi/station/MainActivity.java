@@ -101,6 +101,7 @@ public final class MainActivity extends Activity {
     static final String KEY_ALERT_ENABLED = "alert_enabled";
     static final String KEY_ALERT_TOKEN = "alert_token";
     static final String KEY_LAST_ALERT_ID = "last_alert_id";
+    static final String EXTRA_START_VOICE = "app.astranavi.station.START_VOICE";
     private static final String KEY_OUTBOX = "native_outbox";
     private static final Pattern DEVICE_TOKEN = Pattern.compile("^[A-Za-z0-9_-]{20,100}$");
     private static final int MAX_OUTBOX = 20;
@@ -149,6 +150,7 @@ public final class MainActivity extends Activity {
     private volatile boolean voiceActive;
     private ByteArrayOutputStream voicePcm;
     private WebView voiceTargetPage;
+    private boolean pendingVoiceStart;
     private NsdManager nsdManager;
     private NsdManager.DiscoveryListener nsdDiscovery;
 
@@ -166,6 +168,7 @@ public final class MainActivity extends Activity {
         root.setBackgroundColor(getColor(R.color.page));
         setContentView(root);
         paintBars();
+        noteVoiceIntent(getIntent());
         if (!takeLink(getIntent())) render();
     }
 
@@ -191,7 +194,21 @@ public final class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        takeLink(intent);
+        noteVoiceIntent(intent);
+        if (!takeLink(intent) && pendingVoiceStart && web != null) {
+            String pinned = prefs.getString(KEY_FINGERPRINT, null);
+            if (pinned != null) {
+                pendingVoiceStart = false;
+                startVoiceNow(web);
+            }
+        }
+    }
+
+    private void noteVoiceIntent(Intent intent) {
+        if (intent != null && intent.getBooleanExtra(EXTRA_START_VOICE, false)) {
+            intent.removeExtra(EXTRA_START_VOICE);
+            pendingVoiceStart = true;
+        }
     }
 
     /**
@@ -540,6 +557,13 @@ public final class MainActivity extends Activity {
                     });
                 } else if (!pinned.equals(served)) {
                     root.post(() -> notHer(view, at));
+                } else if (pendingVoiceStart) {
+                    root.post(() -> {
+                        if (alive() && view == web && pendingVoiceStart) {
+                            pendingVoiceStart = false;
+                            startVoiceNow(view);
+                        }
+                    });
                 }
             }
 

@@ -5,6 +5,7 @@ import { join, posix, resolve } from "node:path";
 import type { PolicyContext } from "./permissions.ts";
 import { canonical, isBroadPath, isInside, isPrivatePath, isSensitivePath } from "./riskRules.ts";
 import { runCommand, type CommandResult } from "./shell.ts";
+import { evaluatePlanConsensus, type PlanCandidate, type PlanConsensusResult } from "./planConsensus.ts";
 import { compareText } from "./textDiff.ts";
 
 /**
@@ -530,6 +531,14 @@ export function renderDryRunSummary(result: CausalDryRunResult): string {
     }
   }
   return lines.join("\n").slice(0, 8000);
+}
+
+/** Checks candidate plan consensus prior to surfacing a destructive dry-run confirmation card. */
+export function verifyConsensusBeforeDryRun(
+  candidates: readonly PlanCandidate[],
+  minAgreement = 1.0,
+): PlanConsensusResult {
+  return evaluatePlanConsensus(candidates, minAgreement);
 }
 
 /** Builds a fixed-arg headless `kwin_wayland` virtual session launch plan for GUI dry-runs. */

@@ -7,8 +7,11 @@ import {
   BRAIN_MODELS,
   MOE_WORKSTATION_MODELS,
   selectQuantizationForBudget,
+  selectSpeculativeDraft,
   type BrainModel,
+  type KvCachePrecision,
   type ModelQuantization,
+  type SpeculativeDraftModel,
 } from "./models.ts";
 import { parseMacOsSysctlMemory } from "./platform/macos.ts";
 
@@ -40,6 +43,17 @@ export interface TierRecommendation {
   architecture: "dense" | "moe";
   estimatedVramGb: number;
   kvCacheGb: number;
+  kvCachePrecision?: KvCachePrecision;
+  speculativeDraft?: {
+    draftId: SpeculativeDraftModel["id"];
+    fileName: string;
+    extraVramGb: number;
+    expectedSpeedup: number;
+  } | null;
+  moeHostCache?: {
+    cacheSizeMb: number;
+    cpuShare: number;
+  } | null;
   stepDownFrom?: BrainModel["id"];
   reason: string;
 }
@@ -184,6 +198,21 @@ export function recommendHardwareTier(
   );
   const estimatedVramGb = Number((quantFit.weightGb + quantFit.kvGb).toFixed(2));
   const kvCacheGb = Number(quantFit.kvGb.toFixed(2));
+  const spareVramGb = hasDiscreteGpu ? Math.max(0, effectiveGb - estimatedVramGb) : 0;
+  const kvCachePrecision: KvCachePrecision =
+    leanMemory || (hasDiscreteGpu && effectiveGb >= 10 && effectiveGb <= 18) ? "f8_e4m3" : "f16";
+  const draft =
+    hasDiscreteGpu && !profile.activeGameOrRender
+      ? selectSpeculativeDraft(selectedModel, spareVramGb)
+      : null;
+  const systemRamGb = profile.systemRamBytes / GIB;
+  const moeHostCache =
+    architecture === "moe" && systemRamGb >= 32
+      ? {
+          cacheSizeMb: Math.min(32_768, Math.round(systemRamGb * 0.25 * 1024)),
+          cpuShare: Number(Math.max(0.25, Math.min(0.85, 1 - spareVramGb / 32)).toFixed(2)),
+        }
+      : null;
 
   const stepDownFrom =
     preferred !== "auto" && preferred !== chosen ? preferred : undefined;
@@ -203,6 +232,16 @@ export function recommendHardwareTier(
     architecture,
     estimatedVramGb,
     kvCacheGb,
+    kvCachePrecision,
+    speculativeDraft: draft
+      ? {
+          draftId: draft.id,
+          fileName: draft.fileName,
+          extraVramGb: draft.vramGb,
+          expectedSpeedup: draft.expectedSpeedup,
+        }
+      : null,
+    moeHostCache,
     ...(stepDownFrom ? { stepDownFrom } : {}),
     reason,
   };

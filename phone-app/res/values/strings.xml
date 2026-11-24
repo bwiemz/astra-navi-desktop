@@ -38,4 +38,9 @@
     <string name="alerts_channel_name">Standing-order alerts</string>
     <string name="alerts_channel_desc">Notifications when a standing order condition triggers on your desktop.</string>
     <string name="alerts_fallback_title">Standing order alert</string>
+    <string name="widget_talk_label">Astra Navi Voice</string>
+    <string name="widget_talk_button">Talk</string>
+    <string name="tile_ptt_label">Talk to Astra</string>
+    <string name="action_approve">Approve</string>
+    <string name="action_decline">Decline</string>
 </resources>

@@ -1,4 +1,5 @@
 import type { ChatHistoryItem, ChatModelResponse } from "node-llama-cpp";
+import { estimateLongHorizonMissionKv, type KvQuantBits } from "./kvCompression.ts";
 
 /**
  * Keeping a long conversation small.
@@ -344,5 +345,35 @@ export async function compact(
     did: "summarised",
     tokensBefore: before,
     tokensAfter: sizeOf(folded),
+  };
+}
+
+/**
+ * Plans long-horizon multi-week mission KV retention by pairing compacted token counts with
+ * 3-bit / 4-bit orthogonal Walsh-Hadamard KV compression estimates.
+ */
+export function planMissionKvRetention(
+  items: readonly ChatHistoryItem[],
+  options: { kvBytesPerToken?: number; bits?: KvQuantBits; vramBudgetMb?: number } = {},
+): {
+  estimatedTokens: number;
+  fp16Mb: number;
+  compressedMb: number;
+  compressionRatio: number;
+  fitsVramBudget: boolean;
+} {
+  const approxTokens = Math.max(1, Math.ceil(historyText(items).length / 4));
+  const est = estimateLongHorizonMissionKv({
+    totalTokens: approxTokens,
+    kvBytesPerToken: options.kvBytesPerToken ?? 98_304,
+    bits: options.bits ?? 4,
+  });
+  const budgetMb = options.vramBudgetMb ?? 2048;
+  return {
+    estimatedTokens: approxTokens,
+    fp16Mb: est.fp16Mb,
+    compressedMb: est.compressedMb,
+    compressionRatio: est.compressionRatio,
+    fitsVramBudget: est.compressedMb <= budgetMb,
   };
 }

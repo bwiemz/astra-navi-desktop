@@ -1,5 +1,6 @@
 import type { ChatSessionModelFunctions } from "node-llama-cpp";
 import type { Embedder } from "./embedder.ts";
+export { SemanticCommandCache, type SemanticCacheLookupResult } from "./semanticCache.ts";
 import {
   canonicalizeArgs,
   compileJsonSchemaToGbnf,

@@ -1,8 +1,13 @@
+import type { Gesture } from "../../shared/gestures.ts";
+import type { ExpressiveCueFrame } from "../../shared/visemes.ts";
+
 /**
  * Turns what the assistant wrote into what she should say: no markup, no code, nothing
  * that sounds wrong read aloud. Also cuts streamed text into sentences, so speech can
  * start before the reply is finished.
  */
+
+const PROSODY_MARKER_RE = /\[(pause\s+\d+(?:ms|s)|sigh|whisper|emphasis|quiet)\]/gi;
 
 /** Makes one piece of reply text speakable. Returns "" when nothing in it should be spoken. */
 export function cleanForSpeech(text: string): string {
@@ -12,6 +17,7 @@ export function cleanForSpeech(text: string): string {
       .replace(/```[\s\S]*?(```|$)/g, " ")
       .replace(/`([^`]*)`/g, "$1")
       .replace(/\[\[[a-z]{3,12}\]\]/gi, " ")
+      .replace(PROSODY_MARKER_RE, " ")
       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1")
       .replace(/https?:\/\/\S+/g, " a link ")
       .replace(/^\s*(?:[-*•]|\d+[.)])\s+/gm, "")
@@ -23,6 +29,118 @@ export function cleanForSpeech(text: string): string {
       .replace(/\s+/g, " ")
       .trim()
   );
+}
+
+export interface ProsodyPlan {
+  speakText: string;
+  gainScale: number;
+  pausesMs: number[];
+  gestureHints: Gesture[];
+  cues: ExpressiveCueFrame[];
+}
+
+/**
+ * Parses expressive vocal directives (`[pause 400ms]`, `[sigh]`, `[whisper]`, `[emphasis]`,
+ * `[quiet]`, plus `lateNight` attenuation) into clean spoken text + synchronized avatar cues.
+ */
+export function parseProsodyScript(
+  text: string,
+  options: { lateNight?: boolean; baseDurationMs?: number } = {},
+): ProsodyPlan {
+  const pausesMs: number[] = [];
+  const gestureSet = new Set<Gesture>();
+  const cues: ExpressiveCueFrame[] = [];
+  let gainScale = options.lateNight ? 0.55 : 1.0;
+
+  const speakText = cleanForSpeech(text);
+  const totalMs = Math.max(400, options.baseDurationMs ?? speakText.length * 55);
+
+  let match: RegExpExecArray | null;
+  const tagScanner = new RegExp(PROSODY_MARKER_RE.source, "gi");
+  while ((match = tagScanner.exec(text)) !== null) {
+    const token = (match[1] ?? "").toLowerCase().trim();
+    const frac = text.length > 0 ? match.index / text.length : 0;
+    const timeMs = Math.round(frac * totalMs);
+
+    if (token.startsWith("pause")) {
+      const msMatch = /(\d+)(ms|s)/i.exec(token);
+      const rawVal = msMatch?.[1] ? Number.parseInt(msMatch[1], 10) : 350;
+      const ms = msMatch?.[2]?.toLowerCase() === "s" ? rawVal * 1000 : rawVal;
+      const clampedMs = Math.max(100, Math.min(2500, ms));
+      pausesMs.push(clampedMs);
+      cues.push({
+        timeMs,
+        durationMs: clampedMs,
+        rmsEnergy: 0,
+        pitchHz: 0,
+        pitchNorm: 0,
+        emphasis: 0,
+        pause: true,
+        laugh: 0,
+        eyebrowRaise: 0.1,
+        headTiltDeg: 3,
+        nodDrive: 0,
+        postureEnergy: 0.85,
+      });
+    } else if (token === "sigh") {
+      gainScale = Math.min(gainScale, 0.72);
+      gestureSet.add("perk");
+      cues.push({
+        timeMs,
+        durationMs: 420,
+        rmsEnergy: 0.04,
+        pitchHz: 155,
+        pitchNorm: 0.2,
+        emphasis: 0.15,
+        pause: false,
+        laugh: 0,
+        eyebrowRaise: 0.25,
+        headTiltDeg: -6,
+        nodDrive: 0.15,
+        postureEnergy: 0.78,
+      });
+    } else if (token === "whisper" || token === "quiet") {
+      gainScale = Math.min(gainScale, token === "whisper" ? 0.48 : 0.62);
+      cues.push({
+        timeMs,
+        durationMs: 500,
+        rmsEnergy: 0.025,
+        pitchHz: 165,
+        pitchNorm: 0.24,
+        emphasis: 0.2,
+        pause: false,
+        laugh: 0,
+        eyebrowRaise: 0.35,
+        headTiltDeg: 5,
+        nodDrive: 0.1,
+        postureEnergy: 0.8,
+      });
+    } else if (token === "emphasis") {
+      gestureSet.add("nod");
+      cues.push({
+        timeMs,
+        durationMs: 320,
+        rmsEnergy: 0.14,
+        pitchHz: 255,
+        pitchNorm: 0.52,
+        emphasis: 0.9,
+        pause: false,
+        laugh: 0,
+        eyebrowRaise: 0.75,
+        headTiltDeg: 4,
+        nodDrive: 0.72,
+        postureEnergy: 1.28,
+      });
+    }
+  }
+
+  return {
+    speakText,
+    gainScale: Number(gainScale.toFixed(2)),
+    pausesMs,
+    gestureHints: [...gestureSet],
+    cues,
+  };
 }
 
 /** Abbreviations whose full stop does not end a sentence. */

@@ -1,0 +1,86 @@
+{
+  "id": "home-assistant-mqtt",
+  "name": "Home Assistant & LAN MQTT Bridge",
+  "version": "1.0.0",
+  "author": "Astra Navi Contributors",
+  "description": "Optional LAN-only Home Assistant entity inspector and MQTT event bridge with explicit confirmation for physical device actions.",
+  "defaultEnabled": false,
+  "bridgeKind": "home_assistant",
+  "bridges": [
+    "home_assistant"
+  ],
+  "entry": "index.ts",
+  "permissions": [
+    "read_workspace",
+    "register_tool"
+  ],
+  "tools": [
+    {
+      "name": "plugin:ha.list_entities",
+      "description": "List cached LAN Home Assistant entity states.",
+      "requiredScope": "read_workspace",
+      "readOnly": true,
+      "endpointHost": "192.168.50.10"
+    },
+    {
+      "name": "plugin:ha.sensor_state",
+      "description": "Read one Home Assistant sensor entity state.",
+      "requiredScope": "read_workspace",
+      "readOnly": true,
+      "endpointHost": "192.168.50.10"
+    },
+    {
+      "name": "plugin:ha.call_service",
+      "description": "Trigger an approved Home Assistant domain.service call.",
+      "requiredScope": "register_tool",
+      "readOnly": false,
+      "endpointHost": "192.168.50.10"
+    }
+  ],
+  "evalCases": [
+    {
+      "name": "list entities allowed read-only on LAN",
+      "tool": "plugin:ha.list_entities",
+      "args": {
+        "host": "192.168.50.10"
+      },
+      "expectDecision": "allow"
+    },
+    {
+      "name": "sensor state allowed read-only",
+      "tool": "plugin:ha.sensor_state",
+      "args": {
+        "entityId": "sensor.studio_temp"
+      },
+      "expectDecision": "allow"
+    },
+    {
+      "name": "list entities escalates to ask after outside text",
+      "tool": "plugin:ha.list_entities",
+      "args": {},
+      "readOutsideText": true,
+      "expectDecision": "ask"
+    },
+    {
+      "name": "call service requires confirmation",
+      "tool": "plugin:ha.call_service",
+      "args": {
+        "service": "light.turn_off",
+        "entityId": "light.desk"
+      },
+      "expectDecision": "ask"
+    },
+    {
+      "name": "hands-off blocks Home Assistant service calls",
+      "tool": "plugin:ha.call_service",
+      "args": {
+        "service": "light.turn_off",
+        "entityId": "light.desk"
+      },
+      "handsOff": true,
+      "expectDecision": "blocked"
+    }
+  ],
+  "sha256": "e01d9de950a7dc40746f534c1128780a28f62e387586936832c88587dc36f049",
+  "evalCasesCount": 5
+}

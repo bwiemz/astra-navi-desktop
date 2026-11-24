@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'"
+    />
+    <title>Astra Navi — Turn X-Ray &amp; Provenance Inspector</title>
+  </head>
+  <body>
+    <header class="st-header">
+      <div>
+        <h1>Turn X-Ray &amp; Memory Provenance Inspector</h1>
+        <p id="xray-subtitle" class="st-subtitle">Loading turn traces…</p>
+      </div>
+      <div class="st-actions">
+        <span id="xray-status" class="st-status" role="status" aria-live="polite">Ready</span>
+        <button id="xray-refresh" type="button" class="btn-primary">Refresh X-Ray</button>
+      </div>
+    </header>
+
+    <nav class="st-tabs" role="tablist">
+      <button type="button" class="st-tab active" data-tab="turns" aria-selected="true">
+        Latency Waterfall &amp; Token Budget
+      </button>
+      <button type="button" class="st-tab" data-tab="provenance" aria-selected="false">
+        Memory Provenance &amp; Conflict Auditor
+      </button>
+    </nav>
+
+    <main class="xray-main">
+      <section id="panel-turns" class="xray-layout"></section>
+      <section id="panel-provenance" class="xray-provenance" hidden></section>
+    </main>
+
+    <script type="module" src="./src/turn-xray/main.ts"></script>
+  </body>
+</html>

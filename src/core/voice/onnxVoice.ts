@@ -178,3 +178,48 @@ export class OnnxVoice implements VoiceBackend {
     return this.engine;
   }
 }
+
+export interface VoiceShootoutEntry {
+  id: "kokoro-82m" | "chatterbox-nano" | "qwen3-tts-0.6b" | "llama-cpp-speech";
+  license: "Apache-2.0" | "MIT";
+  pythonRequired: false;
+  languages: readonly LanguageCode[];
+  approxFootprintMb: number;
+  strengths: string;
+}
+
+/** Reference catalog for zero-Python local TTS backends evaluated behind `VoiceBackend`. */
+export const ONNX_SHOOTOUT_CATALOG: readonly VoiceShootoutEntry[] = [
+  {
+    id: "kokoro-82m",
+    license: "Apache-2.0",
+    pythonRequired: false,
+    languages: ["en", "ja", "zh"],
+    approxFootprintMb: 88,
+    strengths: "In-process quantized CPU ONNX via kokoro-js (0 MB VRAM, ~0.58 RTF).",
+  },
+  {
+    id: "chatterbox-nano",
+    license: "MIT",
+    pythonRequired: false,
+    languages: ["en"],
+    approxFootprintMb: 180,
+    strengths: "Expressive exaggeration control and compact reference cloning.",
+  },
+  {
+    id: "qwen3-tts-0.6b",
+    license: "Apache-2.0",
+    pythonRequired: false,
+    languages: ["en", "ja", "zh"],
+    approxFootprintMb: 620,
+    strengths: "Native EN/JA/ZH code-switching streaming + 3s zero-shot clone.",
+  },
+  {
+    id: "llama-cpp-speech",
+    license: "MIT",
+    pythonRequired: false,
+    languages: ["en", "ja", "zh"],
+    approxFootprintMb: 120,
+    strengths: "Unified local llama.cpp 1.0.0 `/v1/audio/speech` server binary.",
+  },
+];

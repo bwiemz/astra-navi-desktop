@@ -1,4 +1,8 @@
 import { spawn as startProcess } from "node:child_process";
+import {
+  AcousticEventClassifier,
+  type AcousticClassification,
+} from "./acousticEvents.ts";
 import type { PlatformAdapter } from "./platform/adapter.ts";
 
 /**
@@ -125,6 +129,14 @@ export class ShipEars {
     out.set(this.ring.subarray(start, start + untilEnd), 0);
     if (untilEnd < count) out.set(this.ring.subarray(0, count - untilEnd), untilEnd);
     return out;
+  }
+
+  /** Classifies recent PC loopback audio strictly in RAM (call/match chime/music/alarm/silence). */
+  async classifyRecent(
+    seconds = 3,
+    classifier = new AcousticEventClassifier(),
+  ): Promise<AcousticClassification> {
+    return await classifier.classify(this.recent(seconds), SHIP_EARS_RATE);
   }
 
   /** How loud a stretch of sound is on average (root mean square, 0 to about 1). */

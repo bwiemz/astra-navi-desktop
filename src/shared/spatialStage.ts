@@ -779,3 +779,161 @@ export class PresenceNotificationGate {
     return this.queue.splice(0, this.queue.length);
   }
 }
+
+// --- Screen-Edge Sampling, Webcam Parallax & Holographic Desk Props ----
+
+/** Samples pixels strictly along outer monitor border bands to tint rim/fill light naturally. */
+export function sampleEdgeAmbientColor(
+  pixels: Uint8Array,
+  width: number,
+  height: number,
+  channels: 3 | 4 = 4,
+  borderFraction = 0.12,
+): [number, number, number] {
+  if (width <= 0 || height <= 0 || pixels.length < width * height * channels) {
+    return [0.5, 0.5, 0.5];
+  }
+  const marginX = Math.max(1, Math.round(width * Math.max(0.02, Math.min(0.45, borderFraction))));
+  const marginY = Math.max(1, Math.round(height * Math.max(0.02, Math.min(0.45, borderFraction))));
+  let rSum = 0;
+  let gSum = 0;
+  let bSum = 0;
+  let count = 0;
+  for (let y = 0; y < height; y += 1) {
+    const onYEdge = y < marginY || y >= height - marginY;
+    for (let x = 0; x < width; x += 1) {
+      if (!onYEdge && x >= marginX && x < width - marginX) continue;
+      const idx = (y * width + x) * channels;
+      rSum += pixels[idx] ?? 0;
+      gSum += pixels[idx + 1] ?? 0;
+      bSum += pixels[idx + 2] ?? 0;
+      count += 1;
+    }
+  }
+  if (count === 0) return [0.5, 0.5, 0.5];
+  return [
+    Math.min(1, Math.max(0, Number((rSum / (count * 255)).toFixed(4)))),
+    Math.min(1, Math.max(0, Number((gSum / (count * 255)).toFixed(4)))),
+    Math.min(1, Math.max(0, Number((bSum / (count * 255)).toFixed(4)))),
+  ];
+}
+
+/** Shifts camera parallax gently in response to local webcam head-lean position `[-1, 1]`. */
+export function computeWebcamParallaxOffset(
+  gazeTarget: { x: number; y: number } | null,
+  strength = 0.08,
+): { offsetX: number; offsetY: number; yawDeg: number } {
+  if (!gazeTarget) return { offsetX: 0, offsetY: 0, yawDeg: 0 };
+  const gx = Math.max(-1, Math.min(1, Number.isFinite(gazeTarget.x) ? gazeTarget.x : 0));
+  const gy = Math.max(-1, Math.min(1, Number.isFinite(gazeTarget.y) ? gazeTarget.y : 0));
+  const s = Math.max(0, Math.min(0.25, strength));
+  return {
+    offsetX: Number((gx * s).toFixed(4)),
+    offsetY: Number((gy * s * 0.6).toFixed(4)),
+    yawDeg: Number((gx * 8.5).toFixed(2)),
+  };
+}
+
+export interface TimerRingPropState {
+  visible: boolean;
+  progress: number;
+  remainingSec: number;
+  colorHex: string;
+  pulse: number;
+}
+
+export function computeTimerRingProp(input: {
+  enabled: boolean;
+  totalSec: number;
+  remainingSec: number;
+}): TimerRingPropState {
+  if (!input.enabled || input.totalSec <= 0 || input.remainingSec <= 0) {
+    return { visible: false, progress: 0, remainingSec: 0, colorHex: "#38bdf8", pulse: 0 };
+  }
+  const clampedRem = Math.max(0, Math.min(input.totalSec, input.remainingSec));
+  const progress = clampedRem / input.totalSec;
+  const urgent = clampedRem <= 15;
+  return {
+    visible: true,
+    progress: Number(progress.toFixed(4)),
+    remainingSec: Math.ceil(clampedRem),
+    colorHex: urgent ? "#f59e0b" : "#38bdf8",
+    pulse: urgent ? 1 : 0.2,
+  };
+}
+
+export interface AudioVisualizerPropState {
+  visible: boolean;
+  bars: number[];
+  peak: number;
+}
+
+export function computeAudioVisualizerProp(input: {
+  enabled: boolean;
+  samples: ArrayLike<number>;
+  barCount?: number;
+}): AudioVisualizerPropState {
+  const count = Math.max(4, Math.min(24, input.barCount ?? 8));
+  if (!input.enabled || input.samples.length === 0) {
+    return { visible: false, bars: new Array<number>(count).fill(0), peak: 0 };
+  }
+  const bars: number[] = [];
+  const step = Math.max(1, Math.floor(input.samples.length / count));
+  let peak = 0;
+  for (let b = 0; b < count; b += 1) {
+    const start = b * step;
+    const end = b === count - 1 ? input.samples.length : Math.min(input.samples.length, start + step);
+    let sq = 0;
+    for (let i = start; i < end; i += 1) {
+      const s = input.samples[i] ?? 0;
+      sq += s * s;
+    }
+    const rms = Math.min(1, Math.sqrt(sq / Math.max(1, end - start)) * 2.5);
+    const val = Number(rms.toFixed(3));
+    if (val > peak) peak = val;
+    bars.push(val);
+  }
+  return { visible: peak > 0.01, bars, peak };
+}
+
+export interface ThermalCrystalPropState {
+  visible: boolean;
+  colorHex: string;
+  vramFillRatio: number;
+  glowIntensity: number;
+  status: "cool" | "warm" | "hot";
+}
+
+export function computeThermalCrystalProp(input: {
+  enabled: boolean;
+  gpu: {
+    tempC: number | null;
+    vramUsedMb: number | null;
+    vramTotalMb: number | null;
+    throttled: boolean;
+  };
+}): ThermalCrystalPropState {
+  if (!input.enabled) {
+    return {
+      visible: false,
+      colorHex: "#38bdf8",
+      vramFillRatio: 0,
+      glowIntensity: 0,
+      status: "cool",
+    };
+  }
+  const temp = input.gpu.tempC ?? 45;
+  const vramRatio =
+    input.gpu.vramTotalMb && input.gpu.vramTotalMb > 0 && input.gpu.vramUsedMb !== null
+      ? Math.max(0, Math.min(1, input.gpu.vramUsedMb / input.gpu.vramTotalMb))
+      : 0;
+  const hot = input.gpu.throttled || temp >= 82;
+  const warm = !hot && (temp >= 68 || vramRatio >= 0.85);
+  return {
+    visible: true,
+    colorHex: hot ? "#ef4444" : warm ? "#f59e0b" : "#38bdf8",
+    vramFillRatio: Number(vramRatio.toFixed(3)),
+    glowIntensity: hot ? 1.0 : warm ? 0.65 : 0.35,
+    status: hot ? "hot" : warm ? "warm" : "cool",
+  };
+}

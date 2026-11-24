@@ -38,4 +38,9 @@
     <string name="alerts_channel_name">常驻监控提醒</string>
     <string name="alerts_channel_desc">当电脑端的常驻监控条件触发时推送通知。</string>
     <string name="alerts_fallback_title">监控提醒</string>
+    <string name="widget_talk_label">Astra Navi 语音</string>
+    <string name="widget_talk_button">对话</string>
+    <string name="tile_ptt_label">与 Astra 对话</string>
+    <string name="action_approve">允许</string>
+    <string name="action_decline">拒绝</string>
 </resources>

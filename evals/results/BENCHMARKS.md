@@ -241,3 +241,58 @@ Measured on CPU-only (zero Python subprocess, `0 MB` GPU VRAM) with cached `onnx
 | **Real-Time Factor (RTF)** | **`0.581`** (faster than real-time on CPU) |
 | Expressive cue extraction (`20 ms` hops) | **`3.322 ms` / sec of audio** (`409` cue frames) |
 | Process RSS memory | `481 MB` |
+
+---
+
+## 8. Post-v1 7-Track R&D Benchmarks & Multi-Node Verification (`experimental`)
+
+_Measured cleanly on the isolated `experimental` branch (`main` remains frozen for v1 release)._
+
+### 8.1 GPU KV-Cache Quantization & Speculative Decoding (`scripts/benchmark-speculative-kv.ts`)
+
+Measured on live RTX PRO 4500 GPU against `Qwen3.5-9B-Q4_K_M.gguf` (`8192` context, Flash Attention on, `160` generated tokens):
+
+| Configuration | Cold Load | VRAM Delta | Median TTFT | Decode Throughput | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `9B` Baseline (`FP16` KV) | `1286 ms` | `5,698 MiB` | `103 ms` | `78 tok/s` | Baseline reference |
+| `9B` Lean (`Q8_0` KV) | `999 ms` | `5,580 MiB` (`-118 MiB`) | `43 ms` | **`115 tok/s` (`+47.4%`)** | Cuts TTFT `-58%`, default medium tier |
+| `9B` Ultra-Lean (`Q4_0` KV) | `985 ms` | `5,516 MiB` (`-182 MiB`) | `45 ms` | **`115.5 tok/s` (`+48.1%`)** | Tight VRAM budget configuration |
+| `9B` + `4B` Speculative Draft | — | — | `97 ms` | `49.1 tok/s` | Draft ~44% of target slows decode -> enforced `<= 25%` VRAM draft cap in `selectSpeculativeDraft()` |
+
+### 8.2 CPU Voice Engine Shootout (`scripts/benchmark-voice-shootout.ts`)
+
+Measured on CPU-only (`0 MB` VRAM):
+
+| Voice Preset / Engine | Load Latency | Synthesis Time | Audio Duration | Real-Time Factor (RTF) |
+| --- | --- | --- | --- | --- |
+| `astra` (`af_heart` `q8`, `1.00x`) | `260.9 ms` | `2,917.2 ms` | `5,625 ms` | **`0.519`** |
+| `bright` (`af_bella` `q8`, `1.06x`) | `216.1 ms` | `2,475.4 ms` | `5,900 ms` | **`0.420`** |
+
+- **Prosody Script & Native Contracts:** `parseProsodyScript` (`[emphasis] All checks passed! [pause 300ms] [whisper] Standing by. [sigh]` -> `speakText: "All checks passed! Standing by."`, `gainScale: 0.55`, `2` cues), `LlamaCppSpeechBackend` (`/v1/audio/speech`, SSRF-gated LAN-only), and `ChatterboxNanoVoice` (`1200` samples @ clamped exaggeration `1.0`) verified.
+
+### 8.3 Live 3-Node Proxmox LAN Encrypted Sync & Homelab Verification (`scripts/test-proxmox-multinode.ts`)
+
+Tested across three live hosts on the `192.168.50.0/24` LAN bridge (`vmbr0` on Proxmox host `claude@192.168.50.14` with two ephemeral Debian 13 LXC peers `CT 291` at `192.168.50.75` and `CT 292` at `192.168.50.95` paired to the local desktop workstation):
+
+- **3-Node AES-256-GCM + Ed25519 LWW CRDT Convergence:** Workstation <-> `CT 291` <-> `CT 292` converged conflicting settings/notes, tombstones, and telemetry keys in **`61 ms`**.
+- **Tamper, Forgery & WAN SSRF Resistance:** Bit-flipped AES-GCM ciphertext and untrusted sender signatures returned HTTP **`403`** across real LAN sockets; public IP `8.8.8.8` blocked before opening a socket (`isPrivateLanHost`).
+- **Sanitized Session Handoff:** `sk-live-...`, `ghp_...`, and raw `screenCapture` fields were stripped/redacted (`[redacted-secret]`) prior to arriving on `CT 292`.
+- **Live Proxmox Host Telemetry (`plugins/homelab-ops`):** Read-only `sudo zpool status -x` parsed as **`online`** (`heavyJobAllowed: true`, `outsideText: true`). Both ephemeral test containers (`291`, `292`) were stopped and destroyed after verification with all pre-existing VMs/CTs untouched.
+
+### 8.4 Chaos Fuzzing, Multi-Turn Simulator, Android Build & Model Regression Matrix
+
+- **Native Hands Chaos Fuzzer (`scripts/fuzz-native-hands.ts`):** **`175/175` chaos frames** (`150` persistent stream + `25` isolated binary/invalid-UTF-8/truncated EOF) against compiled `hands/linux-hands-native/target/release/linux-hands` -> `175` structured responses, **`0` crashes**, **`0` non-zero exits**, plus `hands/win-hands-native/Program.cs` static audit **PASS**.
+- **Multi-Turn Synthetic User Simulator (`scripts/run-multiturn-eval.ts`):** **`5/5` scenarios passed (`42` turns)** covering mid-stream fact contradictions, cross-turn outside-text taint escalation, self-consistency plan consensus vs. hands-off, semantic cache numeric slot guards, and away-mode sensor/secret isolation.
+- **Signed Opt-In Plugin Pack (`npm run eval -- --plugin`):** `local-vault-rag`, `lan-game-copilot`, `homelab-ops`, `home-assistant-mqtt`, and `creative-pipeline` — **all `5` plugins passed `5/5` bundled eval cases (`25/25`)**.
+- **Android Companion APK (`scripts/build-android.sh`):** Built `phone-app/build/astra-navi.apk` (`64K`, `version 0.1.0`, `build 29924884`, `javac --release 17 -Xlint:all -Werror`, Android API 35) with homescreen Voice Widget, Quick Settings Push-to-Talk Tile, and non-exported inline notification approval actions.
+- **Model Regression Matrix (`scripts/benchmark-catalog.ts --matrix`, 16k context KV in GB):**
+
+| Preset | Architecture | `f16` KV | `f8_e4m3` KV | `q8_0` KV | `q4_0` KV | `tq4` KV | `tq3` KV | Draft @ 8 GB Spare |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `qwen3.5-4b` | `4B` dense | `1.125` | `0.585` | `0.619` | `0.338` | `0.315` | `0.236` | `none` |
+| `qwen3.5-9b` | `9B` dense | `1.500` | `0.780` | `0.825` | `0.450` | `0.420` | `0.315` | `qwen3.5-1.7b` (`1.45 GB`) |
+| `qwen3.8-27b` | `27B` dense | `2.250` | `1.170` | `1.237` | `0.675` | `0.630` | `0.473` | `qwen3.5-4b` (`2.9 GB`) |
+| `qwen3-30b-a3b-moe` | `30B` MoE | `1.500` | `0.780` | `0.825` | `0.450` | `0.420` | `0.315` | `qwen3.5-4b` (`2.9 GB`) |
+| `qwen3.5-72b` | `72B` dense | `5.000` | `2.600` | `2.750` | `1.500` | `1.400` | `1.050` | `qwen3.5-4b` (`2.9 GB`) |
+| `qwen3.5-120b-a16b-moe` | `120B` MoE | `2.500` | `1.300` | `1.375` | `0.750` | `0.700` | `0.525` | `qwen3.5-4b` (`2.9 GB`) |
+

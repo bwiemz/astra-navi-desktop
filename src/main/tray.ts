@@ -59,6 +59,9 @@ export interface TrayDeps {
   showWindow(focusInput: boolean): void;
   openSettings(): void;
   openMissionControl?: () => void;
+  openAvatarStudio?: () => void;
+  openTurnXray?: () => void;
+  openPolicyComposer?: () => void;
   sendToWindow(channel: string, payload?: unknown): void;
   chooseBrain(choice: string): void;
   chooseLanguage(language: LanguageCode): void;
@@ -116,6 +119,24 @@ export function createTrayMenu(deps: TrayDeps): TrayMenu {
         { label: "Settings…", click: deps.openSettings },
         ...(deps.openMissionControl
           ? [{ label: "Mission Control…", click: deps.openMissionControl }]
+          : []),
+        ...(deps.openAvatarStudio || deps.openTurnXray || deps.openPolicyComposer
+          ? [
+              {
+                label: "Studio & Diagnostics",
+                submenu: [
+                  ...(deps.openAvatarStudio
+                    ? [{ label: "Avatar & Stage Studio…", click: deps.openAvatarStudio }]
+                    : []),
+                  ...(deps.openTurnXray
+                    ? [{ label: "Turn X-Ray & Provenance…", click: deps.openTurnXray }]
+                    : []),
+                  ...(deps.openPolicyComposer
+                    ? [{ label: "Policy & Standing-Order Composer…", click: deps.openPolicyComposer }]
+                    : []),
+                ],
+              },
+            ]
           : []),
         {
           label: "Show or hide",

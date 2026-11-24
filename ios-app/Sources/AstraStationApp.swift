@@ -6,8 +6,10 @@ public struct AstraStationApp: App {
     @StateObject private var discovery = StationDiscovery()
     @AppStorage("astra_station_url") private var stationUrlString = ""
     @AppStorage("astra_station_cert_sha256") private var stationCertSha256 = ""
+    @AppStorage("astra_station_token") private var stationToken = ""
     @State private var unlocked = false
     @State private var authError = ""
+    private let outbox = OfflineOutboxQueue()
 
     public init() {}
 
@@ -25,7 +27,14 @@ public struct AstraStationApp: App {
                     pairingSetupView
                 }
             }
-            .onAppear { discovery.start() }
+            .onAppear {
+                discovery.start()
+                Task {
+                    if let url = URL(string: stationUrlString), !stationCertSha256.isEmpty {
+                        _ = await outbox.flush(to: url, bearerToken: stationToken)
+                    }
+                }
+            }
             .onDisappear { discovery.stop() }
         }
     }

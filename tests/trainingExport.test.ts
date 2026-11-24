@@ -442,8 +442,8 @@ describe("Qwen3.5 SFT template & specialist domain routing", () => {
     });
     expect(ex).not.toBeNull();
     if (!ex) throw new Error("expected Qwen3.5 SFT example");
-    expect(ex.text).toContain("<think>\n\n</think>\n\n<tool_call>\n<function=ship_status>\n<parameter=params>\n");
-    expect(ex.text).toContain('{"detail":"full"}');
+    expect(ex.text).toContain("<think>\n\n</think>\n\n<tool_call>\n<function=ship_status>\n<parameter=detail>\n");
+    expect(ex.text).toContain("full");
     expect(ex.text).toContain("</parameter>\n</function>\n</tool_call><|im_end|>");
     expect(ex.spans).toHaveLength(2);
     for (const [start, end] of ex.spans) {

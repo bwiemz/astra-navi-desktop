@@ -14,6 +14,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
 import java.io.BufferedReader;
@@ -189,16 +190,57 @@ public final class AlertPollerService extends JobService {
                                     0,
                                     open,
                                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-                    Notification note =
+                    int notifyId = (id.hashCode() & 0x7fffffff) + 1000;
+                    Notification.Builder builder =
                             new Notification.Builder(this, CHANNEL_ID)
                                     .setSmallIcon(R.mipmap.ic_launcher)
                                     .setContentTitle(title)
                                     .setContentText(text)
                                     .setStyle(new Notification.BigTextStyle().bigText(text))
                                     .setContentIntent(pi)
-                                    .setAutoCancel(true)
-                                    .build();
-                    nm.notify((id.hashCode() & 0x7fffffff) + 1000, note);
+                                    .setAutoCancel(true);
+                    String approvalId = entry.optString("approvalId", "").trim();
+                    if (!approvalId.isEmpty() && approvalId.matches("^[A-Za-z0-9_-]{16,40}$")) {
+                        Intent approveIntent =
+                                new Intent(this, ApprovalActionReceiver.class)
+                                        .setAction(ApprovalActionReceiver.ACTION_RESPOND)
+                                        .putExtra(ApprovalActionReceiver.EXTRA_APPROVAL_ID, approvalId)
+                                        .putExtra(ApprovalActionReceiver.EXTRA_ALLOW, true)
+                                        .putExtra(ApprovalActionReceiver.EXTRA_NOTIFY_ID, notifyId);
+                        PendingIntent approvePi =
+                                PendingIntent.getBroadcast(
+                                        this,
+                                        notifyId * 2,
+                                        approveIntent,
+                                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+                        Intent declineIntent =
+                                new Intent(this, ApprovalActionReceiver.class)
+                                        .setAction(ApprovalActionReceiver.ACTION_RESPOND)
+                                        .putExtra(ApprovalActionReceiver.EXTRA_APPROVAL_ID, approvalId)
+                                        .putExtra(ApprovalActionReceiver.EXTRA_ALLOW, false)
+                                        .putExtra(ApprovalActionReceiver.EXTRA_NOTIFY_ID, notifyId);
+                        PendingIntent declinePi =
+                                PendingIntent.getBroadcast(
+                                        this,
+                                        notifyId * 2 + 1,
+                                        declineIntent,
+                                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+                        builder.addAction(
+                                new Notification.Action.Builder(
+                                                Icon.createWithResource(this, R.mipmap.ic_launcher),
+                                                getString(R.string.action_approve),
+                                                approvePi)
+                                        .build());
+                        builder.addAction(
+                                new Notification.Action.Builder(
+                                                Icon.createWithResource(this, R.mipmap.ic_launcher),
+                                                getString(R.string.action_decline),
+                                                declinePi)
+                                        .build());
+                    }
+                    nm.notify(notifyId, builder.build());
                 }
             }
             if (newestId != null && !newestId.isEmpty()) {
