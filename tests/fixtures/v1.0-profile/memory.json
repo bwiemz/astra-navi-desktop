@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "memories": [
+    {
+      "id": "v10mem01",
+      "kind": "fact",
+      "text": "Home NAS lives on proxmox host at 192.168.50.3.",
+      "points": [],
+      "tags": [
+        "nas",
+        "proxmox"
+      ],
+      "createdAt": "2026-10-05T09:15:00.000Z",
+      "updatedAt": "2026-10-05T09:15:00.000Z",
+      "hits": 3
+    },
+    {
+      "id": "v10mem02",
+      "kind": "preference",
+      "text": "Prefer metric Celsius temperatures in hardware status reports.",
+      "points": [],
+      "tags": [
+        "units"
+      ],
+      "createdAt": "2026-10-06T14:20:00.000Z",
+      "updatedAt": "2026-10-06T14:20:00.000Z",
+      "hits": 1
+    }
+  ]
+}

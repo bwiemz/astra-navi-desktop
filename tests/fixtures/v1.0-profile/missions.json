@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "missions": [
+    {
+      "id": "m-1a2b3c",
+      "title": "v1.0 Weekly Maintenance",
+      "goal": "Check workspace uptime and disk",
+      "createdAt": "2026-11-10T08:00:00.000Z",
+      "state": "blocked",
+      "note": "Paused during v1.0 maintenance window.",
+      "yieldToGames": true,
+      "finishedAt": null,
+      "notBefore": null,
+      "steps": [
+        {
+          "title": "Read uptime",
+          "where": "here",
+          "whereName": "this PC",
+          "command": "uptime",
+          "state": "done",
+          "retries": 1,
+          "tried": 1,
+          "output": "up 4 days",
+          "approved": null,
+          "finishedAt": "2026-11-10T08:00:05.000Z"
+        },
+        {
+          "title": "Read disk free",
+          "where": "here",
+          "whereName": "this PC",
+          "command": "df -h",
+          "state": "waiting",
+          "retries": 1,
+          "tried": 0,
+          "output": "",
+          "approved": null,
+          "finishedAt": null
+        }
+      ],
+      "thread": [
+        {
+          "id": "t-v10001",
+          "at": "2026-11-10T08:00:00.000Z",
+          "by": {
+            "from": "mission"
+          },
+          "kind": "state",
+          "text": "Mission created on v1.0."
+        }
+      ]
+    }
+  ]
+}

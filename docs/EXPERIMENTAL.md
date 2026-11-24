@@ -11,7 +11,7 @@ Every experimental addition relative to `main` is assigned to an explicit post-v
 ### Wave 1 (`v1.1`) — Consolidated Workbench, Seams, 2-Tier Voice & Evaluation Upgrades
 - **Unified Tabbed Workbench Window (`workbench.html`):**
   - Replaced four separate secondary Chromium windows (`mission-control.html`, `avatar-studio.html`, `policy-composer.html`, `turn-xray.html`) with one tabbed secondary Electron window (`src/renderer/workbench.html`) and left navigation rail (`Missions`, `Memory Graph`, `Policy Composer`, `Turn X-Ray`, `Audio & AEC`, `Avatar Studio`).
-  - Modules: `src/shared/workbench.ts`, `src/preload/workbench.ts`, `src/main/workbenchIpc.ts`, `src/main/missionControlIpc.ts`, `src/main/studioToolsIpc.ts`, `src/shared/missionControl.ts`, `src/shared/studioTools.ts`, `src/renderer/src/workbench/{main.ts,panels.ts,style.css}`, `src/renderer/src/mission-control/{missions.ts,memory.ts,policyReplay.ts}`, `electron.vite.config.ts`, `src/main/tray.ts`, `src/main/index.ts`.
+  - Modules: `src/shared/workbench.ts`, `src/preload/workbench.ts`, `src/main/workbenchIpc.ts`, `src/main/missionControlIpc.ts`, `src/main/studioToolsIpc.ts`, `src/shared/missionControl.ts`, `src/shared/studioTools.ts`, `src/renderer/src/workbench/{main,dom,policyComposer,turnXray,avatarStudio,audioCalibration}.ts`, `src/renderer/src/workbench/style.css`, `src/renderer/src/mission-control/{missions.ts,memory.ts,policyReplay.ts}`, `electron.vite.config.ts`, `src/main/tray.ts`, `src/main/index.ts`.
   - Animation frame pausing (`requestAnimationFrame` active only when the `Avatar Studio` tab is selected) + post-approve/resume `450 ms` UI sync.
   - **Live-Room AEC & Wake-Word Calibration Utility (`Audio & AEC` tab):** `generateCalibrationTone()` and `evaluateRoomCalibration()` (`src/core/voice/aec.ts`), `studio:run-room-calibration` IPC (`src/main/studioToolsIpc.ts`), live Web Audio probe + synthetic room loopback self-test (`renderWorkbenchAudioPanel`).
 - **Feature-Flagged Runtime Seams (`TurnHookPipeline` & `StageLayerManager`):**
@@ -24,7 +24,8 @@ Every experimental addition relative to `main` is assigned to an explicit post-v
 - **Packaged Wayland Workbench Dogfooding & Evaluation Gates:**
   - `scripts/dogfood-workbench-packaged.ts` (`scripts/test-desktop.sh`): Launches packaged `dist/linux-unpacked/astra-navi-desktop` on `kwin_wayland` + CDP, exercises all 6 Workbench tabs, verifies live Mission approval, Memory CRUD, Policy preview/replay, X-Ray, Audio & AEC (`19.6 dB` ERLE), and proves `39` active -> `0` off-tab `rAF` frames (`0` errors).
   - `src/core/trainingExport.ts` & `scripts/export-pairs.ts`: Byte-exact alignment with runtime `QwenChatWrapper({ variation: "3.5" })` (`<parameter=params>`, `JSON.stringify` `<tool_response>`, real `buildSystemPrompt`, `[form]` suffix).
-  - `evals/multiTurnSim.ts`, `scripts/run-multiturn-eval.ts`, `scripts/fuzz-native-hands.ts`.
+  - `evals/multiTurnSim.ts` (decoupled from Wave 2 `peerSync` via `withoutSecrets` from `src/core/secrets.ts`), `scripts/run-multiturn-eval.ts`, `scripts/fuzz-native-hands.ts`, `tests/upgradeMigration.test.ts` + `tests/fixtures/v1.0-profile/`.
+  - Operational verification & triage tooling: `scripts/soak-memory-leaks.ts`, `scripts/run-live-room-calibration.ts`, `docs/BETA_TRIAGE_PLAYBOOK.md`.
 - **Android Companion Quick Controls:**
   - `phone-app/java/app/astranavi/station/{VoiceWidgetProvider,PushToTalkTileService,ApprovalActionReceiver,AlertPollerService,MainActivity}.java`, `phone-app/AndroidManifest.xml`, and layouts/resources (`voice_widget.xml`, `voice_widget_info.xml`, localized strings).
 
@@ -45,8 +46,8 @@ Every experimental addition relative to `main` is assigned to an explicit post-v
 
 ### Wave 3 (`v1.3`) — Voice Cloning Studio, Acoustic Sensors, Webcam Presence & iOS Station
 - `src/core/voiceCloneStudio.ts`: Opt-in 4–16s reference clip analyzer + `.bundle` packager with quality, consent, slug, and secret-scrubbing gates.
-- `src/core/acousticEvents.ts`: Acoustic event detector and barge-in/interrupt primitives.
-- `src/core/webcamPresenceOnnx.ts`: In-memory local presence detector.
+- `src/core/acousticEvents.ts`: Acoustic event detector and barge-in/interrupt primitives (`tests/voiceAndAcousticRd.test.ts`).
+- `src/core/webcamPresenceOnnx.ts`: In-memory local presence detector (`tests/webcamPresence.test.ts`).
 - `ios-app/Sources/{AstraStationApp.swift,AstraAppIntents.swift,OfflineOutboxQueue.swift}`.
 - `docs/LIVE2D_LICENSING_AUDIT.md`.
 
@@ -132,4 +133,16 @@ Consolidated and deleted during experimental cleanup to reduce maintenance burde
 - **Live 163-Case `TurnHookPipeline` Benchmark (`exp-small-turn-hooks`):** **`87%` overall (`+3 pts` vs `post-ux-small`)**, **`100%` Nothing Leaked**, `0 MiB` VRAM delta (`3,992 / 4,000 MiB`), `22.387 ms/turn` avg hook overhead, `14/14` consensus checks agreed, and **`78.3x` repeat-query median speedup** (`4,235.4 ms` cold median -> `54.105 ms` warm median; `10.24 ms` exact hit, `97.97 ms` semantic hit @ `0.912`; `"Set the volume to 80"` cleanly missed without aliasing `40`).
 - **Packaged Linux `workbench.html` Dogfood (`scripts/test-desktop.sh node scripts/dogfood-workbench-packaged.ts`):** All 6 tabs verified end-to-end under `kwin_wayland` + CDP (`missionsApproved: true`, `memoryCrudVerified: true`, `"Replayed 1 turn(s), 1 call(s): 1 matched, 0 drifted."`, `xrayRendered: true`, `aecErleDb: 19.6`, `activeRafFrames: 39` -> `idleRafFrames: 0`, `0` exceptions/errors).
 - **Frozen `main` (`89a1b615`) Advisory:** Audited `main:phone-app/AndroidManifest.xml` (omits `ACCESS_NETWORK_STATE`) vs `main:phone-app/java/app/astranavi/station/AlertPollerService.java` (`JobInfo.NETWORK_TYPE_ANY`), confirming v1.0 `main` needs a targeted backport before shipping a v1.0 Supporter APK once authorized.
+
+---
+
+## 7. Release Readiness: Migration Guarantee, Clean Wave 1 Cut, Soak & Live Calibration (`2026-11-24`)
+
+- **Release Workflow Parity & Modular Workbench UI:** Mirrored `ci.yml`'s `.NET 9` trimmed `win-hands.exe` smoke tests (`volume-get` + `--serve` ping) in `.github/workflows/release.yml`, and split `src/renderer/src/workbench/panels.ts` into `dom.ts`, `policyComposer.ts`, `turnXray.ts`, `avatarStudio.ts`, and `audioCalibration.ts` (deleting `panels.ts`).
+- **Frozen `v1.0 -> v1.1` Migration Suite (`tests/fixtures/v1.0-profile/` + `tests/upgradeMigration.test.ts`):** Verified **`5/5` tests passed (`26 ms`)** covering SQLite `layout 3 -> 4` upgrade with zero loss across turns, FTS5, actions, standing orders, and episodes, SHA-256 hash chaining continuation across SQLite + legacy JSONL, v1.0 JSON compatibility, `.astranavi-backup` inspect/restore, and clean mid-migration rollback on failure/future-layout mismatch.
+- **Verified Clean Wave 1 Cherry-Pick Dry-Run Off `main` (`dry-run-wave1` worktree, `87` files + fixture):** `typecheck`, `lint`, **`120/120` test files (`2,480 passed | 1 skipped`)**, `build`, `--fuzz` (`500/500`), `--audit` (`PASS`), `--words-only` (`71/71`, `100.0%`), and `run-multiturn-eval.ts` (`5/5` scenarios, `42` turns) all passed with zero Wave 2/3 code included.
+- **Sustained Memory Soak (`node --expose-gc scripts/soak-memory-leaks.ts`):** `4/4` PASS — `TurnHookPipeline` (`100` turns, `+0.17 MB` heap), `OnnxVoice` (`20` preset switches / `4` `disposeSharedEngines()` cycles, `902,400` samples, `+98.85 MB` peak over `404.04 MB` warmed -> `376.68 MB` final, `sharedCacheSize=0`), Workbench Snapshots & AEC (`20` cycles, `+0.19 MB` heap), and `StageLayerManager` (`50` cycles / `500` frames, `+0.27 MB` heap).
+- **Live-Room Physical Calibration (`scripts/run-live-room-calibration.ts`, PipeWire `SSL 2+`):** Measured ambient room floor (`0.00022` RMS / `-73.15 dBFS`), physical sweep (`285.6 ms` lag, `coupling=false`, `ERLE=-0.99 dB`, `bargeInReady=false`, `minSnrDb=12`), `0/4` false mic wakes on quiet capture (`liveMic=2/4`), and `3/4` direct `Kokoro-82M` -> `moonshine-base-ONNX` gate accuracy (recording the real `"Astranavi"` fused-word ASR observation for `wakeName.ts`).
+- **Beta Triage Playbook:** Added `docs/BETA_TRIAGE_PLAYBOOK.md`.
+
 

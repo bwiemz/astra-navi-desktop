@@ -1,0 +1,26 @@
+{
+  "brain": "standard",
+  "contextSize": 16384,
+  "thinkingTokens": 256,
+  "idleUnloadMinutes": 10,
+  "yieldToGames": true,
+  "quietInGames": true,
+  "leanMemory": false,
+  "fittingTools": false,
+  "keepTraces": false,
+  "language": "en",
+  "voice": {
+    "engine": "light",
+    "design": "perky",
+    "name": "af_heart",
+    "speed": 1.05,
+    "alwaysListening": false,
+    "otherNames": [],
+    "needsName": false,
+    "speak": "when-spoken-to"
+  },
+  "handsOff": false,
+  "firstMetAt": "2026-10-01T12:00:00.000Z",
+  "keepConversations": true,
+  "onboardingComplete": true
+}

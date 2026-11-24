@@ -8,12 +8,10 @@ import type {
 import { WORKBENCH_TABS, type WorkbenchBridge, type WorkbenchTab } from "../../../shared/workbench.ts";
 import { renderMemoryPanel } from "../mission-control/memory.ts";
 import { renderMissionsPanel } from "../mission-control/missions.ts";
-import {
-  createWorkbenchAvatarPanel,
-  renderWorkbenchAudioPanel,
-  renderWorkbenchPolicyPanel,
-  renderWorkbenchXrayPanel,
-} from "./panels.ts";
+import { renderWorkbenchAudioPanel } from "./audioCalibration.ts";
+import { createWorkbenchAvatarPanel } from "./avatarStudio.ts";
+import { renderWorkbenchPolicyPanel } from "./policyComposer.ts";
+import { renderWorkbenchXrayPanel } from "./turnXray.ts";
 
 declare global {
   interface Window {

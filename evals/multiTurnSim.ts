@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { detectFactContradictions } from "../src/core/hygiene.ts";
 import { MemoryStore } from "../src/core/memory.ts";
 import { sanitizeHandoff } from "../src/core/continuity.ts";
-import { scrubSecretsForSync } from "../src/core/peerSync.ts";
+import { withoutSecrets } from "../src/core/secrets.ts";
 import { changesSomething, TOOLS, toolVerdict, type PolicyContext } from "../src/core/permissions.ts";
 import { evaluatePlanConsensus } from "../src/core/planConsensus.ts";
 import { SemanticCommandCache } from "../src/core/semanticCache.ts";
@@ -238,7 +238,7 @@ async function runAwayHandoffBoundaryScenario(): Promise<MultiTurnScenarioResult
     notifications: ["Private OTP 123456"],
     missionId: "m-88",
   });
-  const finalSummary = scrubSecretsForSync(sanitized.summary);
+  const finalSummary = withoutSecrets(sanitized.summary);
 
   if (vScreen.decision !== "ask" || vListen.decision !== "ask" || vNotices.decision !== "ask") {
     failure = "Away-mode privacy boundary failed to gate desktop sensors.";

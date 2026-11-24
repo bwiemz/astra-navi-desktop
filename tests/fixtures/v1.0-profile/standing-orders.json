@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "orders": [
+    {
+      "id": "w-10f001",
+      "title": "Legacy Disk Threshold",
+      "check": {
+        "kind": "command",
+        "where": "here",
+        "whereName": "this PC",
+        "target": "",
+        "command": "df -h"
+      },
+      "tellWhen": "contains",
+      "value": "95%",
+      "everyMinutes": 15,
+      "repeat": true,
+      "createdAt": "2026-11-22T10:00:00.000Z",
+      "expiresAt": "2026-11-28T10:00:00.000Z",
+      "baseline": null,
+      "held": false,
+      "lastCheckedAt": "2026-11-23T10:00:00.000Z"
+    }
+  ]
+}

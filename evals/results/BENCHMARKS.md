@@ -488,6 +488,66 @@ Built `dist/linux-unpacked/astra-navi-desktop` (`224M`) via `npm run build && np
 
 Inspected frozen `main` (`89a1b61541851720ee4edb3aa0264180ed41ced7`, left unmodified): `git show main:phone-app/AndroidManifest.xml` omits `ACCESS_NETWORK_STATE` while `git show main:phone-app/java/app/astranavi/station/AlertPollerService.java` calls `JobInfo.Builder.setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)` at lines `50` and `62`. Consequently, frozen v1.0 `main` is vulnerable to `SecurityException` on real Android 15 (`API 35`) until authorized for a targeted 1-line manifest + `MainActivity.onCreate()` schedule backport before building any v1.0 Supporter APK.
 
+---
+
+## 12. Wave 1 Promotion Readiness: Release Parity, Migration Suite, Clean Cherry-Pick Dry-Run, Soak & Live-Room Calibration (`2026-11-24`)
+
+### 12.1 Release Workflow Parity, `main` Docs Parity & Split Workbench Modules
+
+- **`.github/workflows/release.yml` Parity:** Added the `.NET 9` trimmed NativeAOT `win-hands.exe` runtime smoke checks (`'{}' | ... win-hands.exe volume-get` and `'{"id":"1","verb":"ping"}' | ... win-hands.exe --serve | Select-String '"ok":true'`) matching `.github/workflows/ci.yml`.
+- **Docs Parity Verification:** Confirmed `CHANGELOG.md` (`9,386` bytes) and `README.md` (`14,846` bytes) match frozen `main` (`89a1b61541851720ee4edb3aa0264180ed41ced7`) with an empty `git diff --stat main -- CHANGELOG.md README.md`.
+- **Modularized Workbench UI (`src/renderer/src/workbench/`):** Split monolithic `panels.ts` into `dom.ts`, `policyComposer.ts`, `turnXray.ts`, `avatarStudio.ts`, and `audioCalibration.ts`, updated `main.ts`, and deleted `panels.ts` (`npm run typecheck && npm run lint && npm run build` -> exit `0`, `workbench` client bundle rebuilt cleanly).
+
+### 12.2 Frozen `v1.0 -> v1.1` Profile & Schema Migration Suite (`tests/upgradeMigration.test.ts`)
+
+Committed an immutable frozen v1.0 profile fixture under `tests/fixtures/v1.0-profile/` (`her.db` at `PRAGMA user_version = 3` in `journal_mode = DELETE`, unchained legacy `actions.jsonl`, v1.0 `config.json`, `memory.json`, `missions.json`, `standing-orders.json`, and `v1.0-profile.astranavi-backup` `ASTRANAVI_PROFILE_V1` archive) and verified **`5/5` migration tests passed (`26 ms`)**:
+
+1. Upgrades frozen v1.0 SQLite `layout 3 -> 4` (`LAYOUT_VERSION = 4`) with zero data loss across conversation turns, FTS5 search, actions, standing orders, and episodes.
+2. Preserves pre-existing unchained v1.0 `actions` rows while starting valid v1.1 SHA-256 hash chaining (`prev_hash` / `entry_hash`) across SQLite and legacy JSONL import.
+3. Loads v1.0 `config.json`, `memory.json`, `missions.json`, and `standing-orders.json` cleanly while enabling v1.1 defaults/features.
+4. Inspects (`inspectProfileBackup`) and restores (`importProfileBackup`) `v1.0-profile.astranavi-backup` over both blank and populated v1.1 profiles.
+5. Rolls back cleanly on mid-migration failure and rejects future SQLite layouts (`StoreFromTheFuture`) or corrupted backup archives without corrupting existing data.
+
+### 12.3 Clean Wave 1 Cherry-Pick Dry-Run Off `main` (`/tmp/dry-run-wave1`)
+
+Decoupled three cross-wave imports (`evals/multiTurnSim.ts` switched from Wave 2 `peerSync.scrubSecretsForSync` to `main`'s `secrets.withoutSecrets`; moved Wave 3 `LocalOnnxWebcamPresence` test out of `tests/vrmaAndEmbodiment.test.ts` into `tests/webcamPresence.test.ts`; moved Wave 1 `evaluateRoomCalibration` / `generateCalibrationTone` test out of Wave 3 `tests/voiceAndAcousticRd.test.ts` into `tests/experimentalVoice.test.ts`), then branched a throwaway worktree `dry-run-wave1` off frozen `main` (`89a1b615`) with the exact **`87` Wave 1 files** + `tests/fixtures/v1.0-profile/` (excluding all Wave 2 & Wave 3 modules, plugins, and `ios-app`):
+
+| Check in Clean `/tmp/dry-run-wave1` | Result |
+| --- | --- |
+| `npm run typecheck` | **PASS** (`0` errors) |
+| `npm run lint` | **PASS** (`0` warnings/errors) |
+| `npm run test` | **`120/120` test files passed (`2,480` passed \| `1` skipped)** |
+| `npm run build` | **PASS** (`594` client modules, `workbench` `74.63 kB`) |
+| `npm run eval -- --fuzz` | **`500/500` passed** (`0` unauthorized allows, `0` unseen leaks) |
+| `npm run eval -- --audit` | **PASS** (`critical=0, warning=0, info=0`) |
+| `npm run route-check -- --words-only` | **`71/71` (`100.0%`)**, `1,636` avg / `1,532` median tool tokens |
+| `node scripts/run-multiturn-eval.ts` | **`5/5` scenarios passed (`42` turns)** |
+
+*(Throwaway worktree `/tmp/dry-run-wave1` and branch `dry-run-wave1` deleted cleanly after verification.)*
+
+### 12.4 Sustained Runtime Memory & Leak Soak Suite (`node --expose-gc scripts/soak-memory-leaks.ts`)
+
+| Workload | Duration | Key Measurements | Assertion |
+| --- | --- | --- | --- |
+| `TurnHookPipeline` (100 turns) | `18 ms` | `shortCircuits=25`, `misses=75`, heap `21.17 -> 21.34 MB` (**`+0.17 MB`**) | **PASS** (`< 32 MB`) |
+| `OnnxVoice` Preset Switches (20 switches / 4 dispose cycles) | `19,395 ms` | `902,400` samples, `0` cache violations, warmed `404.04 MB` -> peak `502.89 MB` -> final `376.68 MB` (**`+98.85 MB`** peak over warmed) | **PASS** (`< 150 MB`, `sharedCacheSize() === 0`) |
+| Workbench Snapshots & AEC Cycling (20 cycles) | `93 ms` | Heap `29.21 -> 29.40 MB` (**`+0.19 MB`**) | **PASS** (`< 32 MB`) |
+| `StageLayerManager` Mount/Update/Dispose (50 cycles / 500 frames) | `17 ms` | Heap `29.37 -> 29.63 MB` (**`+0.27 MB`**) | **PASS** (`< 16 MB`) |
+
+### 12.5 Live-Room Physical Acoustic & Wake-Word Calibration (`scripts/run-live-room-calibration.ts`)
+
+Executed against the workstation's live PipeWire audio graph (`PulseAudio (on PipeWire 1.6.11)`, sink `alsa_output.usb-Solid_State_Logic_SSL_2_-00.pro-output-0`, source `alsa_input.usb-Solid_State_Logic_SSL_2_-00.pro-input-0`) with `parec --latency-msec=20`, local cached `Kokoro-82M` (`astra`, `q8`), and local cached `onnx-community/moonshine-base-ONNX` (`cpu`, `q8`):
+
+- **Ambient Room Noise Floor (`23,680` samples @ `16 kHz`):** `RMS = 0.00022` (**`-73.15 dBFS`**).
+- **Physical Sweep (`gain = 0.35`):** `lag = 285.6 ms`, `corr = 0.0636`, `coupling = false`, `rawMicRms = 0.00023`, `residualRms = 0.00026`, `ERLE = -0.99 dB`, `bargeInReady = false`, `recommendedMinSnrDb = 12`, `recommendedMinResidualRms = 0.01`. Because speaker output and XLR mic input were acoustically/analog-isolated during the automated desk run, `evaluateRoomCalibration()` correctly declined false `bargeInReady` confirmation and tightened SNR gating to `12 dB`.
+- **Real `Kokoro-82M` + `moonshine-base-ONNX` Wake & TV-Rejection Probe:**
+  - **Live mic capture (`rms = 0.00020–0.00022`, SNR `-0.8 dB` to `0.0 dB`):** All `4/4` quiet captures stayed gated out cleanly (`2/4` expected-non-wake passed, `0` false wakes from background noise).
+  - **Direct resampled `Kokoro-82M` (`16 kHz`) -> `moonshine-base-ONNX` (`3/4`):** Accepted `"Astra, what time is it?"` (`true`) and cleanly rejected `"The weather forecast calls for rain. This weekend,"` (`false`) and `"Breaking tv news from downtown Tonight."` (`false`). Importantly, `moonshine-base-ONNX` transcribed `"Astra Navi, check the disk space"` as **`"Astranavi, check the disk space."`** (fused without a space), surfacing a concrete `v1.1` follow-up tweak for `src/core/wakeName.ts` (`astra(?:[\s,-]*navi)?\b`).
+
+### 12.6 Beta Triage Playbook (`docs/BETA_TRIAGE_PLAYBOOK.md`)
+
+Published the operational support runbook covering `main`-first hotfix backport discipline, Priority #0 `main` Android 15 `ACCESS_NETWORK_STATE` pre-APK checklist, Windows Defender / SmartScreen + trimmed `win-hands.exe` checks, DirectX / Vulkan / Steam Overlay mitigations (`solid-docked`, `lowPowerStage`, `StartupGuard` 2-crash Safe Mode, `GameWatch` GPU yielding), `.vrm`/`.pmx` Avatar Studio framing overrides, and `buildRedactedSupportBundle()` + `npm run eval -- --replay` workflows.
+
 
 
 

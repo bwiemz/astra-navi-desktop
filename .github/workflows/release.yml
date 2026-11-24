@@ -44,6 +44,8 @@ jobs:
         run: |
           ./hands/win-hands-native/bin/Release/net9.0/win-x64/publish/win-hands.exe ping
           ./hands/win-hands-native/bin/Release/net9.0/win-x64/publish/win-hands.exe version
+          '{}' | ./hands/win-hands-native/bin/Release/net9.0/win-x64/publish/win-hands.exe volume-get
+          '{"id":"1","verb":"ping"}' | ./hands/win-hands-native/bin/Release/net9.0/win-x64/publish/win-hands.exe --serve | Select-String '"ok":true'
 
       - name: Sign win-hands.exe (when credentials configured)
         shell: pwsh
