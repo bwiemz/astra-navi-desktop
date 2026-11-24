@@ -296,3 +296,18 @@ Tested across three live hosts on the `192.168.50.0/24` LAN bridge (`vmbr0` on P
 | `qwen3.5-72b` | `72B` dense | `5.000` | `2.600` | `2.750` | `1.500` | `1.400` | `1.050` | `qwen3.5-4b` (`2.9 GB`) |
 | `qwen3.5-120b-a16b-moe` | `120B` MoE | `2.500` | `1.300` | `1.375` | `0.750` | `0.700` | `0.525` | `qwen3.5-4b` (`2.9 GB`) |
 
+### 8.5 Live Cross-OS Proxmox VM Verification (Android & Windows 11 Pro)
+
+Executed against newly provisioned Proxmox test VMs (`293` and `294`) on `192.168.50.0/24` (pre-existing VMs/CTs untouched; test VMs stopped and temporary ISOs/files cleaned up after verification):
+
+- **Windows 11 Pro VM `294` (`astra-test-win11`, `192.168.50.2`, `Microsoft Windows 11 Pro` `10.0.26300`, Build `26300.9457` / `26H2` x64):**
+  - Standalone `.NET 9` single-file `win-hands.exe` (`70,996,496` bytes): verified `ping` (`{"alive":true,"platform":"win32","arch":"x64","nativeAot":true}`, exit `0`), `version` (`{"name":"win-hands-native","version":"0.1.0","platform":"win32"}`, exit `0`), `volume-get` (`{"percent":50,"muted":false}`, exit `0`), `gpu-vram` (`null` on QEMU VGA adapter, exit `0`).
+  - Interactive Desktop Session 1 (`schtasks /RU astra /IT`): `layout` enumerated real Win32 windows (`WindowsTerminal` `1129×635`, `explorer` `Program Manager` `1280×800` across `1280×800` desktop) and `game-state` returned `{"code":6,"state":"QUNS_ACCEPTS_NOTIFICATIONS","process":"SearchHost"}`.
+  - **`--serve` 30-frame chaos fuzz batch:** `30/30` structured `RpcResponse` JSON lines in **`101 ms`** (`exit 0`, `0` crashes), verifying `UIA_FALLBACK`, `"Missing verb."`, malformed JSON error handling, unsupported verb errors, `wasapi-check`, and `wasapi-streams`.
+  - **Bidirectional Win11 <-> Linux `PeerStateSyncEngine` LAN sync (`192.168.50.2` <-> `192.168.50.40`):** Windows 11 PowerShell retrieved `/sync/state` over `ssh -R 48025` (HTTP `200`, `362 ms` RTT, `cipherB64Len=536`, `sigB64Len=88`, secret redacted and `screenCapture` stripped) and received HTTP `403` on tampered `/sync/merge`; direct un-tunneled Linux `syncWithLanPeer` -> `http://192.168.50.2:48025/sync/merge` succeeded with HTTP `200` (`1,777 ms` cold `HttpListener` RTT, `cipherB64Len=460`), while `8.8.8.8` was blocked before connect by `isPrivateLanHost`.
+- **Bliss OS VM `293` (`astra-test-android14`, `192.168.50.237`, `Bliss-Surface-v14.10.3-x86_64-OFFICIAL-foss-20241013.iso`, runtime `ro.build.version.release=11` / `sdk=30` / `abi=x86_64` / kernel `6.1.112-gloria-surface-xanmod1`):**
+  - Downloaded `phone-app/build/astra-navi.apk` (`62,239` bytes, sha256 `2689e71a1d808a594be808d7435d2d2db3efccb276c25fc82bebd76904369cc5`) over LAN HTTP (`192.168.50.14:48003`); `pm install -r /data/local/tmp/astra-navi.apk` -> `Success`.
+  - `dumpsys package app.astranavi.station` confirmed `.MainActivity`, `.VoiceWidgetProvider`, and `.PushToTalkTileService (permission android.permission.BIND_QUICK_SETTINGS_TILE)` registered.
+  - `am start -W -n app.astranavi.station/.MainActivity --ez app.astranavi.station.START_VOICE true` cold-launched cleanly (`Status: ok`, `LaunchState: COLD`, `TotalTime: 772` ms, `WaitTime: 776` ms, `PID=4030` in `mResumedActivity`), LAN ping returned `pong-from-lan`, and `logcat -d -s AndroidRuntime:E` had zero fatal exceptions.
+
+
