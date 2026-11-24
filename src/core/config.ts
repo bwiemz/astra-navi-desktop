@@ -236,6 +236,21 @@ const ConfigSchema = z.object({
   windowMode: z.enum(["floating", "solid-docked"]).default("floating"),
   /** Caps 3D stage FPS and resolution scaling for battery-conscious laptops. */
   lowPowerStage: z.boolean().default(false),
+  /** Per-model camera zoom/offset and lighting/outline framing keyed by model hash. */
+  avatarFraming: z
+    .record(
+      z.string().regex(/^[a-f0-9]{8,64}$/),
+      z
+        .object({
+          scale: z.number().min(0.45).max(2.2).default(1),
+          offsetX: z.number().min(-0.6).max(0.6).default(0),
+          offsetY: z.number().min(-0.6).max(0.6).default(0),
+          rimLight: z.number().min(0.4).max(1.8).default(1),
+          outlineThickness: z.number().min(0).max(2.5).default(1),
+        })
+        .prefault({}),
+    )
+    .default({}),
   /** Optional global desktop shortcuts (Electron Accelerator format, empty = unbound). */
   hotkeys: z
     .object({

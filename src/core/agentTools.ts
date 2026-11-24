@@ -14,6 +14,7 @@ import {
   type PolicyContext,
   type RequestSummary,
 } from "./permissions.ts";
+import { classifyApprovalRisk, type PermissionRiskLevel } from "./riskRules.ts";
 import { describeRequest } from "./requestWords.ts";
 import type { Recall } from "./recall.ts";
 import { clip, isReadOnlyCommand, mayPrintOutsideText, runCommand } from "./shell.ts";
@@ -175,7 +176,13 @@ export interface ToolHost {
   /** What she is told when a question could not be put to anyone, in place of "the user said no". */
   nobodyToAskReply?: string;
   /** Asks the user to approve one action. Resolves to true when they allow it. */
-  ask(request: RequestSummary & { sensitive: boolean; rememberable: boolean }): Promise<boolean>;
+  ask(
+    request: RequestSummary & {
+      sensitive: boolean;
+      rememberable: boolean;
+      risk?: PermissionRiskLevel;
+    },
+  ): Promise<boolean>;
   /** Counts a tool call in the current reply and returns how many there have been. */
   step(): number;
   /**
@@ -303,7 +310,7 @@ function gate<Input>(
         // after a few noes no further question is put at all. Asking until the answer
         // changes is how a tired user ends up allowing something.
         // Everything the user was shown: the same file with other contents is another question.
-        const asking = `${summary.title}\u0000${String(summary.detail)}\u0000${summary.note ?? ""}`;
+        const asking = `${summary.title}\u0000${String(summary.detail)}\u0000${summary.note ?? ""}\u0000${summary.diff ?? ""}`;
         if (!host.nobodyToAsk && ledger.declined.has(asking)) {
           audit("refused", "ask-declined", "already declined in this reply");
           return DECLINED_ALREADY;
@@ -317,10 +324,25 @@ function gate<Input>(
           audit("refused", "refused", "too many declined prompts in this reply");
           return TOO_MANY_NOES;
         }
+        const risk = classifyApprovalRisk({
+          toolName,
+          changesSomething: !looksOnly,
+          sensitive: verdict.sensitive,
+          ...(verdict.commandRisk ? { commandRisk: verdict.commandRisk } : {}),
+          title: summary.title,
+          detail: summary.detail,
+        });
+        const rawCommand =
+          toolName === TOOLS.runCommand || toolName === TOOLS.startMission
+            ? String(summary.detail)
+            : (summary.rawCommand ?? null);
         const allowed = await host.ask({
           ...summary,
           note: [summary.note, verdict.reason].filter(Boolean).join("\n") || null,
           sensitive: verdict.sensitive,
+          risk,
+          ...(summary.diff ? { diff: summary.diff } : {}),
+          ...(rawCommand ? { rawCommand } : {}),
           // Only an exact, fully spelled-out command is safe to wave through again. A
           // saved file can differ in content next time, and a wildcard can match other files.
           rememberable:

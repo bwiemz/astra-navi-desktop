@@ -3,8 +3,10 @@ import type { QrMatrix } from "../core/qrCode.ts";
 import type { ShownTrace } from "../core/trace.ts";
 import type {
   BootstrapStatusView,
+  DiskSpaceCheckView,
   HardwareRecommendationView,
   MachineFound,
+  ModelDownloadStatusView,
   PolicyAuditSummaryView,
   ProfileBackupActionResult,
   ProfileRestoreActionResult,
@@ -85,6 +87,21 @@ const bridge: SettingsBridge = {
     ipcRenderer.invoke("settings:export-profile") as Promise<ProfileBackupActionResult>,
   importProfileBackup: () =>
     ipcRenderer.invoke("settings:import-profile") as Promise<ProfileRestoreActionResult>,
+  checkDiskSpace: (tier: string) =>
+    ipcRenderer.invoke("settings:disk-space", tier) as Promise<DiskSpaceCheckView>,
+  downloadStatus: () =>
+    ipcRenderer.invoke("settings:download-status") as Promise<ModelDownloadStatusView>,
+  pauseBrainDownload: () =>
+    ipcRenderer.invoke("settings:download-pause") as Promise<ModelDownloadStatusView>,
+  resumeBrainDownload: () =>
+    ipcRenderer.invoke("settings:download-resume") as Promise<ModelDownloadStatusView>,
+  previewAvatarWindow: () => ipcRenderer.send("settings:preview-avatar"),
+  importAvatarModel: () => ipcRenderer.send("settings:import-model"),
+  onDownloadProgress: (listener) => {
+    ipcRenderer.on("settings:download-progress", (_event, status: ModelDownloadStatusView) =>
+      listener(status),
+    );
+  },
 };
 
 contextBridge.exposeInMainWorld("aichanSettings", bridge);

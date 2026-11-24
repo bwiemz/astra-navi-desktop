@@ -3,6 +3,8 @@ import type {
   AichanBridge,
   AppState,
   BrainEvent,
+  DropFilesResult,
+  ModelFraming,
   PastExchange,
   Presence,
   VoiceEvent,
@@ -18,6 +20,18 @@ const bridge: AichanBridge = {
   copyText: (text) => ipcRenderer.send("clipboard:copy", text),
   openSettings: () => ipcRenderer.send("ui:open-settings"),
   importModel: () => ipcRenderer.send("model:import"),
+  saveModelFraming: (modelHash: string, framing: ModelFraming) =>
+    ipcRenderer.send("stage:save-framing", modelHash, framing),
+  setClickThrough: (on: boolean) => ipcRenderer.send("window:click-through", on),
+  setHandsOff: (off: boolean) => ipcRenderer.send("hands:off", off),
+  handleDroppedFiles: (paths: string[]) =>
+    ipcRenderer.invoke("files:drop", paths) as Promise<DropFilesResult>,
+  forgetLastTurn: () =>
+    ipcRenderer.invoke("chat:forget-last") as Promise<{
+      removed: boolean;
+      userText: string | null;
+      forgottenMemories: number;
+    }>,
   pathForFile: (file) => {
     try {
       return webUtils.getPathForFile(file);

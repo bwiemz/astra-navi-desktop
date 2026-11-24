@@ -1,11 +1,14 @@
 import "./style.css";
+import { formatAttachedPrompt } from "../../core/dropRouter.ts";
 import type {
   AichanBridge,
   AppState,
   BrainEvent,
+  DroppedAttachment,
   Mood,
   PastExchange,
   PermissionRequest,
+  PermissionRiskLevel,
   Presence,
   Senses,
   VoiceEvent,
@@ -13,11 +16,18 @@ import type {
   WindowLayout,
 } from "../../shared/ipc.ts";
 import {
+  computeDragPan,
+  computeWheelZoom,
+  DEFAULT_MODEL_FRAMING,
+  type ModelFraming,
+} from "../../shared/spatialStage.ts";
+import {
   Latest,
   type LogItemKind,
   type Origin,
   type SaidWaiting,
   type Step,
+  computeStatusPill,
   dayKey,
   dayLabel,
   dropWaiting,
@@ -62,16 +72,22 @@ const activity = element<HTMLElement>("activity");
 const activityLabel = element<HTMLElement>("activity-label");
 const permissionCard = element<HTMLElement>("permission");
 const permissionTitle = element<HTMLElement>("permission-title");
+const permissionRisk = element<HTMLElement>("permission-risk");
 const permissionFlag = element<HTMLElement>("permission-flag");
 const permissionDetail = element<HTMLElement>("permission-detail");
 const permissionDetailMore = element<HTMLElement>("permission-detail-more");
+const permissionPreview = element<HTMLDetailsElement>("permission-preview");
+const permissionPreviewSummary = element<HTMLElement>("permission-preview-summary");
+const permissionPreviewBody = element<HTMLElement>("permission-preview-body");
 const permissionNote = element<HTMLElement>("permission-note");
 const permissionNoteMore = element<HTMLElement>("permission-note-more");
+const permissionGuardHint = element<HTMLElement>("permission-guard-hint");
 const permissionAsk = element<HTMLElement>("permission-ask");
 const replyAloud = element<HTMLElement>("reply-aloud");
 const permissionSession = element<HTMLButtonElement>("permission-session");
 const askForm = element<HTMLFormElement>("ask");
 const askInput = element<HTMLTextAreaElement>("ask-input");
+const attachmentsContainer = element<HTMLElement>("attachments");
 const chips = element<HTMLElement>("chips");
 const canvas = element<HTMLCanvasElement>("stage");
 const standIn = element<HTMLElement>("stand-in");
@@ -84,6 +100,21 @@ const logList = element<HTMLOListElement>("log-list");
 const logLive = element<HTMLElement>("log-live");
 const logAsk = element<HTMLElement>("log-ask");
 const logToggle = element<HTMLButtonElement>("log-toggle");
+const liveFooter = element<HTMLElement>("live-footer");
+const liveForgetLast = element<HTMLButtonElement>("live-forget-last");
+const tbPtt = element<HTMLButtonElement>("tb-ptt");
+const tbAvatarOnly = element<HTMLButtonElement>("tb-avatar-only");
+const tbClickThrough = element<HTMLButtonElement>("tb-click-through");
+const tbHandsOff = element<HTMLButtonElement>("tb-hands-off");
+const autoFrameBtn = element<HTMLButtonElement>("auto-frame");
+const framingTuneToggle = element<HTMLButtonElement>("framing-tune-toggle");
+const framingPopover = element<HTMLElement>("framing-popover");
+const framingRim = element<HTMLInputElement>("framing-rim");
+const framingOutline = element<HTMLInputElement>("framing-outline");
+const framingReset = element<HTMLButtonElement>("framing-reset");
+const statusPill = element<HTMLElement>("status-pill");
+const statusPillLabel = element<HTMLElement>("status-pill-label");
+const statusStop = element<HTMLButtonElement>("status-stop");
 
 const IDLE_FACE_RESET_MS = 25_000;
 const PERMISSION_CLICK_GUARD_MS = 450;
@@ -104,12 +135,21 @@ let permissionButtonFocusedAt: number | null = null;
 /** When a pointer last went down on one of the question's buttons, since the question appeared. */
 let permissionPointerDownAt: number | null = null;
 let shownPermissionId: string | null = null;
+let lastTypedAt: number | null = null;
+let lastPermissionKey: string | undefined;
 let voiceState: VoiceState = "off";
 let fixedSize = false;
 let senses: Senses | null = null;
 let asleep = false;
 /** The game her brain was put away for, while that is why she is asleep. */
 let asleepFor: string | null = null;
+let activeJobsCount = 0;
+let currentActivityLabel: string | null = null;
+let avatarOnly = false;
+let clickThrough = false;
+const pendingAttachments: DroppedAttachment[] = [];
+let loadedModelHash: string | null = null;
+let framingSaveTimer: number | null = null;
 /** What the live area shows is a finished reply that is already in the conversation list. */
 let liveIsLogged = false;
 
@@ -119,14 +159,17 @@ let logOpen = false;
 let layout: WindowLayout | null = null;
 function updateLayout(): void {
   const wanted: WindowLayout =
-    logOpen && !fixedSize
-      ? "log"
-      : logOpen || !balloon.hidden || !askForm.hidden
-        ? "balloon"
-        : "compact";
-  document.body.dataset["layout"] = logOpen ? "log" : wanted;
+    avatarOnly
+      ? "compact"
+      : logOpen && !fixedSize
+        ? "log"
+        : logOpen || !balloon.hidden || !askForm.hidden
+          ? "balloon"
+          : "compact";
+  document.body.dataset["layout"] = avatarOnly ? "compact" : logOpen ? "log" : wanted;
+  document.body.dataset["avatarOnly"] = String(avatarOnly);
   // The badges move up out of the way of the message box while it floats at her feet.
-  const floating = !askForm.hidden && !logOpen;
+  const floating = !avatarOnly && !askForm.hidden && !logOpen;
   document.body.style.setProperty(
     "--ask-clear",
     floating ? `${askForm.offsetHeight + 24}px` : "0px",
@@ -134,6 +177,25 @@ function updateLayout(): void {
   if (wanted === layout) return;
   layout = wanted;
   bridge.setLayout(wanted);
+}
+
+function updateStatusPill(): void {
+  const pill = computeStatusPill({
+    handsOff: senses?.handsOff ?? false,
+    busy,
+    activityLabel: currentActivityLabel,
+    voiceState,
+    activeJobs: activeJobsCount,
+    asleep,
+    asleepFor,
+  });
+  statusPill.dataset["kind"] = pill.kind;
+  statusPillLabel.textContent = pill.label;
+  statusStop.hidden = !pill.showStop;
+  tbPtt.setAttribute("aria-pressed", String(voiceState !== "off"));
+  tbAvatarOnly.setAttribute("aria-pressed", String(avatarOnly));
+  tbClickThrough.setAttribute("aria-pressed", String(clickThrough));
+  tbHandsOff.setAttribute("aria-pressed", String(senses?.handsOff ?? false));
 }
 
 // ---------- the balloon ----------
@@ -172,6 +234,8 @@ function setReply(text: string, isError = false): void {
   caution.hidden = true; // a caution belongs to the reply it was raised about
   reply.classList.toggle("is-error", isError);
   reply.innerHTML = renderMarkdown(text);
+  enhanceCodeBlocks(reply, (code) => bridge.copyText(code));
+  liveFooter.hidden = text === "" || busy || isError;
   // Something put up whole (an error, the notice) is read out once; a reply that is
   // being written is read out when it is finished, not as each word lands.
   if (text && (isError || !busy)) replyAloud.textContent = reply.textContent ?? "";
@@ -197,11 +261,13 @@ function queueRender(): void {
     renderQueued = false;
     const pinned = liveScroll.scrollTop + liveScroll.clientHeight >= liveScroll.scrollHeight - 24;
     reply.innerHTML = renderMarkdown(replyText);
+    enhanceCodeBlocks(reply, (code) => bridge.copyText(code));
     if (pinned) liveScroll.scrollTop = liveScroll.scrollHeight;
   });
 }
 
 function setActivity(label: string | null): void {
+  currentActivityLabel = label;
   activity.hidden = label === null;
   if (label !== null) {
     activityLabel.textContent = label;
@@ -209,6 +275,7 @@ function setActivity(label: string | null): void {
   } else if (logOpen) {
     logLive.hidden = !liveHasContent();
   }
+  updateStatusPill();
   updateLayout();
 }
 
@@ -278,6 +345,30 @@ permissionNote.addEventListener("scroll", updatePermissionHints, { passive: true
 new ResizeObserver(updatePermissionHints).observe(permissionDetail);
 new ResizeObserver(updatePermissionHints).observe(permissionNote);
 
+const RISK_LABELS: Record<PermissionRiskLevel, string> = {
+  "read-only": "Read-Only",
+  modify: "Modify",
+  "high-impact": "High-Impact",
+};
+
+function renderDiffPreview(body: HTMLElement, text: string): void {
+  body.replaceChildren(
+    ...text.split("\n").map((line) => {
+      const div = document.createElement("div");
+      div.className =
+        line.startsWith("+") && !line.startsWith("+++")
+          ? "diff-line diff-add"
+          : line.startsWith("-") && !line.startsWith("---")
+            ? "diff-line diff-del"
+            : line.startsWith("@@")
+              ? "diff-line diff-hunk"
+              : "diff-line";
+      div.textContent = line === "" ? " " : line;
+      return div;
+    }),
+  );
+}
+
 function showNextPermission(): void {
   const request = permissionQueue[0];
   permissionCard.hidden = request === undefined;
@@ -292,15 +383,35 @@ function showNextPermission(): void {
     permissionButtonFocusedAt = null;
     // Nor does a button held down since the last one: letting go of it answers nothing.
     permissionPointerDownAt = null;
+    permissionGuardHint.hidden = true;
+    permissionGuardHint.textContent = "";
     // Emptied first, so that a question worded like the one before it is still said.
     permissionAsk.textContent = "";
   }
   if (request && isNew) {
+    const risk: PermissionRiskLevel = request.risk ?? (request.sensitive ? "high-impact" : "modify");
     permissionTitle.textContent = request.title;
+    permissionRisk.dataset["risk"] = risk;
+    permissionRisk.textContent = RISK_LABELS[risk];
     permissionDetail.textContent = request.detail;
     permissionDetail.scrollTop = 0;
     permissionNote.textContent = request.note ?? "";
     permissionNote.scrollTop = 0;
+    if (request.diff) {
+      permissionPreviewSummary.textContent = "View file diff";
+      renderDiffPreview(permissionPreviewBody, request.diff);
+      permissionPreview.open = false;
+      permissionPreview.hidden = false;
+    } else if (request.rawCommand) {
+      permissionPreviewSummary.textContent = "View raw command";
+      renderDiffPreview(permissionPreviewBody, request.rawCommand);
+      permissionPreview.open = false;
+      permissionPreview.hidden = false;
+    } else {
+      permissionPreviewBody.replaceChildren();
+      permissionPreview.open = false;
+      permissionPreview.hidden = true;
+    }
     permissionLines = {
       detail: request.detail.split("\n").length,
       note: (request.note ?? "").split("\n").length,
@@ -312,7 +423,7 @@ function showNextPermission(): void {
     const firstLine = request.detail.split("\n")[0] ?? "";
     const rest = permissionLines.detail - 1;
     const asking =
-      `She is asking before she acts. ${request.title} ${firstLine.slice(0, 300)}` +
+      `She is asking before she acts (${RISK_LABELS[risk]}). ${request.title} ${firstLine.slice(0, 300)}` +
       `${rest > 0 ? ` (and ${rest} more ${rest === 1 ? "line" : "lines"})` : ""}. ` +
       "Answer with the buttons in her window, or press Escape for no.";
     window.setTimeout(() => {
@@ -335,10 +446,13 @@ function showNextPermission(): void {
 function answerPermission(
   decision: "allow" | "allow-session" | "deny",
   by: "pointer" | "key-on-button" | "escape",
+  key?: string,
 ): void {
   const request = permissionQueue[0];
   if (!request || answeredPermissions.has(request.id)) return;
-  // A second click (or key) meant for another question must not land on this one.
+  const risk: PermissionRiskLevel = request.risk ?? (request.sensitive ? "high-impact" : "modify");
+  // A second click (or key) meant for another question must not land on this one,
+  // and Enter never confirms high-impact actions automatically.
   const counts = mayAnswer({
     now: performance.now(),
     shownAt: permissionShownAt,
@@ -346,14 +460,34 @@ function answerPermission(
     by,
     buttonFocusedAt: permissionButtonFocusedAt,
     pointerDownAt: permissionPointerDownAt,
+    risk,
+    decision,
+    lastTypedAt,
+    inputFocused: document.activeElement === askInput,
+    ...(key ? { key } : {}),
   });
-  if (!counts) return;
+  if (!counts) {
+    if (by === "key-on-button" && risk === "high-impact" && decision !== "deny") {
+      permissionGuardHint.textContent =
+        "High-impact action: click the button to confirm, or press Esc to deny.";
+      permissionGuardHint.hidden = false;
+    }
+    return;
+  }
   answeredPermissions.set(request.id, decision);
   bridge.answerPermission(request.id, decision);
 }
 
 permissionCard.addEventListener("focusin", (event) => {
   if (event.target instanceof HTMLButtonElement) permissionButtonFocusedAt = performance.now();
+});
+permissionCard.addEventListener("keydown", (event) => {
+  if (event.target instanceof HTMLButtonElement && (event.key === "Enter" || event.key === " ")) {
+    lastPermissionKey = event.key;
+    window.setTimeout(() => {
+      if (lastPermissionKey === event.key) lastPermissionKey = undefined;
+    }, 50);
+  }
 });
 permissionCard.addEventListener("pointerdown", (event) => {
   if (event.target instanceof Element && event.target.closest("button")) {
@@ -363,7 +497,11 @@ permissionCard.addEventListener("pointerdown", (event) => {
 
 /** A click made with Space or Enter on a focused button carries no click count. */
 function answerWith(decision: "allow" | "allow-session" | "deny"): (event: MouseEvent) => void {
-  return (event) => answerPermission(decision, event.detail === 0 ? "key-on-button" : "pointer");
+  return (event) => {
+    const key = lastPermissionKey;
+    lastPermissionKey = undefined;
+    answerPermission(decision, event.detail === 0 ? "key-on-button" : "pointer", key);
+  };
 }
 
 element("permission-allow").addEventListener("click", answerWith("allow"));
@@ -438,6 +576,39 @@ function logItem(className: string): HTMLLIElement {
   return item;
 }
 
+let latestTurnNodes: HTMLElement[] = [];
+let latestTurnActionsBar: HTMLElement | null = null;
+
+async function handleForgetLastTurn(putInInput: boolean): Promise<void> {
+  const res = await bridge.forgetLastTurn();
+  if (!res.removed) return;
+  if (latestTurnNodes.length > 0) {
+    for (const node of latestTurnNodes) node.remove();
+    latestTurnNodes = [];
+    entriesShown = Math.max(0, entriesShown - 1);
+    if (logList.lastElementChild?.classList.contains("log-day")) {
+      logList.lastElementChild.remove();
+    }
+    const lastSaid = [...logList.querySelectorAll<HTMLElement>(".log-said[data-day]")].at(-1);
+    lastDayKey = lastSaid?.dataset["day"] ?? "";
+  }
+  latestTurnActionsBar?.remove();
+  latestTurnActionsBar = null;
+  clearLive();
+  if (!logOpen) hideBalloon();
+  if (putInInput && res.userText) {
+    openAsk();
+    askInput.value = res.userText;
+    growInput();
+    askInput.focus();
+    askInput.setSelectionRange(askInput.value.length, askInput.value.length);
+  }
+}
+
+liveForgetLast.addEventListener("click", () => {
+  void handleForgetLastTurn(false);
+});
+
 /** The list items for one exchange: a day line when the day changes, the caption, her steps, her balloon. */
 function entryElements(entry: LogEntry): HTMLLIElement[] {
   const items: HTMLLIElement[] = [];
@@ -478,6 +649,7 @@ function entryElements(entry: LogEntry): HTMLLIElement[] {
     const words = document.createElement("div");
     words.className = entry.isError ? "reply is-error" : "reply";
     words.innerHTML = renderMarkdown(entry.reply);
+    enhanceCodeBlocks(words, (code) => bridge.copyText(code));
     her.append(words);
     if (entry.caution !== null) {
       const note = document.createElement("p");
@@ -504,6 +676,33 @@ function entryElements(entry: LogEntry): HTMLLIElement[] {
     items.push(her);
   }
   return items;
+}
+
+function attachLatestTurnActions(nodes: HTMLLIElement[]): void {
+  latestTurnActionsBar?.remove();
+  latestTurnActionsBar = null;
+  latestTurnNodes = nodes;
+  const target = [...nodes].reverse().find((n) => n.classList.contains("log-her") || n.classList.contains("log-said"));
+  if (!target || target.classList.contains("is-event")) return;
+  const bar = document.createElement("div");
+  bar.className = "log-turn-actions";
+  const editResend = document.createElement("button");
+  editResend.type = "button";
+  editResend.className = "copy";
+  editResend.textContent = "Edit & Resend";
+  editResend.addEventListener("click", () => {
+    void handleForgetLastTurn(true);
+  });
+  const forgetBtn = document.createElement("button");
+  forgetBtn.type = "button";
+  forgetBtn.className = "copy";
+  forgetBtn.textContent = "Forget Last Turn";
+  forgetBtn.addEventListener("click", () => {
+    void handleForgetLastTurn(false);
+  });
+  bar.append(editResend, forgetBtn);
+  target.append(bar);
+  latestTurnActionsBar = bar;
 }
 
 /**
@@ -545,7 +744,9 @@ function logItemKind(item: Element): LogItemKind {
 
 function appendEntry(entry: LogEntry): void {
   relabelDays();
-  logList.append(...entryElements(entry));
+  const nodes = entryElements(entry);
+  logList.append(...nodes);
+  attachLatestTurnActions(nodes);
   entriesShown += 1;
   // The page holds the recent ones; her archive holds the rest.
   while (entriesShown > MAX_LOG_ENTRIES) {
@@ -580,18 +781,18 @@ async function loadHistory(): Promise<void> {
   logList.replaceChildren();
   lastDayKey = "";
   entriesShown = 0;
+  let lastPastNodes: HTMLLIElement[] = [];
   for (const exchange of earlier) {
-    logList.append(
-      ...entryElements({
-        at: Date.parse(exchange.at),
-        said: exchange.said,
-        origin: { kind: "here" },
-        reply: exchange.reply,
-        steps: [],
-        caution: null,
-        isError: false,
-      }),
-    );
+    lastPastNodes = entryElements({
+      at: Date.parse(exchange.at),
+      said: exchange.said,
+      origin: { kind: "here" },
+      reply: exchange.reply,
+      steps: [],
+      caution: null,
+      isError: false,
+    });
+    logList.append(...lastPastNodes);
     entriesShown += 1;
   }
   // Then a line, and what has been said since she was started. That line stands in for
@@ -601,6 +802,9 @@ async function loadHistory(): Promise<void> {
   const firstSaid = sessionItems.findIndex((item) => !item.classList.contains("log-day"));
   logList.append(line, ...(firstSaid === -1 ? [] : sessionItems.slice(firstSaid)));
   const sessionEntries = sessionItems.filter((item) => item.classList.contains("log-said"));
+  if (sessionEntries.length === 0 && lastPastNodes.length > 0) {
+    attachLatestTurnActions(lastPastNodes);
+  }
   entriesShown += sessionEntries.length;
   // The line stands for today until something is said on another day.
   lastDayKey = sessionEntries.length > 0 ? sessionLastDay : dayKey(Date.now());
@@ -611,6 +815,8 @@ async function loadHistory(): Promise<void> {
 /** Past conversations were erased on purpose: nothing of them stays on the page either. */
 function forgetLog(): void {
   historyAsked.callOff();
+  latestTurnNodes = [];
+  latestTurnActionsBar = null;
   logList.replaceChildren();
   entriesShown = 0;
   lastDayKey = "";
@@ -724,9 +930,37 @@ function closeAsk(): void {
   updateLayout();
 }
 
+function renderAttachments(): void {
+  attachmentsContainer.hidden = pendingAttachments.length === 0;
+  attachmentsContainer.replaceChildren(
+    ...pendingAttachments.map((att, idx) => {
+      const chip = document.createElement("span");
+      chip.className = "attachment-chip";
+      chip.title = att.path;
+      const label = document.createElement("span");
+      label.textContent = `${att.kind === "image" ? "Img:" : "Doc:"} ${att.name}`;
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "attachment-remove";
+      rm.textContent = "×";
+      rm.setAttribute("aria-label", `Remove ${att.name}`);
+      rm.addEventListener("click", () => {
+        pendingAttachments.splice(idx, 1);
+        renderAttachments();
+      });
+      chip.append(label, rm);
+      return chip;
+    }),
+  );
+  updateLayout();
+}
+
 function sendMessage(text: string): void {
-  const message = text.trim();
+  const message =
+    pendingAttachments.length > 0 ? formatAttachedPrompt(text, pendingAttachments) : text.trim();
   if (!message) return;
+  pendingAttachments.length = 0;
+  renderAttachments();
   if (sentBefore[sentBefore.length - 1] !== message) sentBefore.push(message);
   if (sentBefore.length > 50) sentBefore.shift();
   recallIndex = -1;
@@ -744,11 +978,13 @@ askForm.addEventListener("submit", (event) => {
 });
 
 askInput.addEventListener("input", () => {
+  lastTypedAt = performance.now();
   recallIndex = -1;
   growInput();
 });
 
 askInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== "Escape") lastTypedAt = performance.now();
   // Enter sends; Shift+Enter makes a new line. Composing text (Japanese, Chinese) is left alone.
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
@@ -823,14 +1059,33 @@ window.addEventListener("drop", (event) => {
   const paths = [...(event.dataTransfer?.files ?? [])]
     .map((file) => bridge.pathForFile(file))
     .filter((path) => path !== "")
-    .slice(0, 5);
+    .slice(0, 8);
   if (paths.length === 0) return;
-  openAsk();
-  const quoted = paths.map((path) => `"${path}"`).join(" ");
-  askInput.value =
-    askInput.value.trim() === "" ? `${quoted} ` : `${askInput.value.trim()} ${quoted} `;
-  growInput();
-  askInput.focus();
+  void bridge.handleDroppedFiles(paths).then((res) => {
+    for (const att of res.attachments) {
+      if (!pendingAttachments.some((existing) => existing.path === att.path) && pendingAttachments.length < 6) {
+        pendingAttachments.push(att);
+      }
+    }
+    renderAttachments();
+    if (res.attachments.length > 0) {
+      openAsk();
+      askInput.focus();
+    }
+    const notices: string[] = [];
+    if (res.avatarsLoaded.length > 0) {
+      notices.push(`Loaded avatar: ${res.avatarsLoaded.join(", ")}.`);
+    }
+    if (res.calendarAdded.length > 0) {
+      notices.push(`Added calendar to agenda: ${res.calendarAdded.join(", ")}.`);
+    }
+    if (res.notes.length > 0) {
+      notices.push(...res.notes);
+    }
+    if (notices.length > 0) {
+      setReply(notices.join("\n\n"));
+    }
+  });
 });
 
 window.addEventListener("keydown", (event) => {
@@ -947,9 +1202,11 @@ function onPresence(presence: Presence): void {
   stage?.setAsleep(presence.asleep);
   asleep = presence.asleep;
   asleepFor = presence.asleep ? (presence.asleepFor ?? null) : null;
+  activeJobsCount = presence.activeJobs ?? 0;
   senses = presence.senses;
   renderBadges();
   renderChips();
+  updateStatusPill();
 }
 
 // ---------- her brain's events ----------
@@ -965,6 +1222,7 @@ function onBrainEvent(event: BrainEvent): void {
       busy = event.state === "thinking";
       stage?.setThinking(busy && replyText === "");
       if (event.state === "thinking") {
+        liveFooter.hidden = true;
         window.clearTimeout(faceResetTimer);
         // What was said to her is matched to this reply: from the PC or from another device,
         // each from its own list. A thing she brings up herself has none.
@@ -978,11 +1236,13 @@ function onBrainEvent(event: BrainEvent): void {
         setActivity(null);
         reply.classList.remove("is-streaming");
         finishEntry();
+        liveFooter.hidden = replyText === "" || reply.classList.contains("is-error");
         if (logOpen) clearLive();
         else if (!liveHasContent()) hideBalloon();
         window.clearTimeout(faceResetTimer);
         faceResetTimer = window.setTimeout(() => setMood("neutral"), IDLE_FACE_RESET_MS);
       }
+      updateStatusPill();
       break;
     case "setup":
       // Only the first message ever waits on a download; say so, it can take minutes.
@@ -1010,6 +1270,8 @@ function onBrainEvent(event: BrainEvent): void {
       reply.classList.remove("is-streaming");
       // The whole reply, read out once now that it is finished.
       reply.innerHTML = renderMarkdown(replyText);
+      enhanceCodeBlocks(reply, (code) => bridge.copyText(code));
+      liveFooter.hidden = replyText === "" || reply.classList.contains("is-error");
       replyAloud.textContent = reply.textContent ?? "";
       break;
     case "mood":
@@ -1076,6 +1338,7 @@ function setVoiceState(state: VoiceState): void {
   micButton.setAttribute("aria-pressed", String(state !== "off"));
   // She leans in while someone is speaking to her.
   stage?.setListening(state === "hearing");
+  updateStatusPill();
 }
 
 /** Switches the microphone to the state asked for, if it is not already there. */
@@ -1138,12 +1401,85 @@ function onVoiceEvent(event: VoiceEvent): void {
   }
 }
 
-// ---------- the character: click her to type; the stand under her feet moves the window ----------
+// ---------- hover mini-toolbar, status pill, and per-model framing ----------
 
-canvas.addEventListener("click", () => {
-  if (logOpen) askInput.focus();
-  else if (askForm.hidden) openAsk();
-  else closeAsk();
+function syncFramingInputs(framing: ModelFraming): void {
+  framingRim.value = String(framing.rimLight);
+  framingOutline.value = String(framing.outlineThickness);
+}
+
+function scheduleFramingSave(framing: ModelFraming): void {
+  if (!loadedModelHash) return;
+  const targetHash = loadedModelHash;
+  if (framingSaveTimer !== null) window.clearTimeout(framingSaveTimer);
+  framingSaveTimer = window.setTimeout(() => {
+    framingSaveTimer = null;
+    bridge.saveModelFraming(targetHash, framing);
+  }, 350);
+}
+
+tbPtt.addEventListener("click", () => void toggleVoice());
+tbAvatarOnly.addEventListener("click", () => {
+  avatarOnly = !avatarOnly;
+  updateLayout();
+  updateStatusPill();
+});
+tbClickThrough.addEventListener("click", () => bridge.setClickThrough(!clickThrough));
+tbHandsOff.addEventListener("click", () => bridge.setHandsOff(!(senses?.handsOff ?? false)));
+statusStop.addEventListener("click", () => {
+  bridge.interrupt();
+  if (voiceState !== "off") void setVoice(false);
+});
+
+autoFrameBtn.addEventListener("click", () => {
+  if (!stage) return;
+  const reset = stage.autoFrame();
+  syncFramingInputs(reset);
+  scheduleFramingSave(reset);
+});
+framingReset.addEventListener("click", () => {
+  if (!stage) return;
+  const reset = stage.autoFrame();
+  syncFramingInputs(reset);
+  scheduleFramingSave(reset);
+});
+framingTuneToggle.addEventListener("click", () => {
+  const open = framingPopover.hidden;
+  framingPopover.hidden = !open;
+  document.body.dataset["framingOpen"] = String(open);
+  framingTuneToggle.setAttribute("aria-expanded", String(open));
+});
+framingRim.addEventListener("input", () => {
+  if (!stage) return;
+  const updated = stage.setFraming({ rimLight: Number(framingRim.value) });
+  scheduleFramingSave(updated);
+});
+framingOutline.addEventListener("input", () => {
+  if (!stage) return;
+  const updated = stage.setFraming({ outlineThickness: Number(framingOutline.value) });
+  scheduleFramingSave(updated);
+});
+
+// ---------- the character: click her to type; wheel zooms & drag repositions ----------
+
+let stageDrag: { x: number; y: number; moved: boolean } | null = null;
+let suppressNextStageClick = false;
+
+canvas.addEventListener(
+  "wheel",
+  (event) => {
+    if (!stage || !stage.hasModel) return;
+    event.preventDefault();
+    const scale = computeWheelZoom(stage.getFraming().scale, event.deltaY);
+    const updated = stage.setFraming({ scale });
+    scheduleFramingSave(updated);
+  },
+  { passive: false },
+);
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || !stage?.hasModel) return;
+  stageDrag = { x: event.clientX, y: event.clientY, moved: false };
 });
 
 window.addEventListener("pointermove", (event) => {
@@ -1151,6 +1487,41 @@ window.addEventListener("pointermove", (event) => {
     (event.clientX / window.innerWidth) * 2 - 1,
     (event.clientY / window.innerHeight) * 2 - 1,
   );
+  if (!stageDrag || !stage) return;
+  const dx = event.clientX - stageDrag.x;
+  const dy = event.clientY - stageDrag.y;
+  if (!stageDrag.moved && Math.hypot(dx, dy) < 5) return;
+  stageDrag.moved = true;
+  suppressNextStageClick = true;
+  stageDrag.x = event.clientX;
+  stageDrag.y = event.clientY;
+  const cur = stage.getFraming();
+  const panned = computeDragPan(
+    { offsetX: cur.offsetX, offsetY: cur.offsetY },
+    dx,
+    dy,
+    canvas.clientHeight || 430,
+    cur.scale,
+  );
+  stage.setFraming(panned);
+});
+
+const finishStageDrag = (): void => {
+  if (!stageDrag) return;
+  if (stageDrag.moved && stage) scheduleFramingSave(stage.getFraming());
+  stageDrag = null;
+};
+window.addEventListener("pointerup", finishStageDrag);
+window.addEventListener("pointercancel", finishStageDrag);
+
+canvas.addEventListener("click", () => {
+  if (suppressNextStageClick) {
+    suppressNextStageClick = false;
+    return;
+  }
+  if (logOpen) askInput.focus();
+  else if (askForm.hidden) openAsk();
+  else closeAsk();
 });
 document.documentElement.addEventListener("pointerleave", () => stage?.lookAt(0, 0));
 
@@ -1165,11 +1536,14 @@ async function applyState(state: AppState): Promise<void> {
     ? `${state.notice}\n\nCharacter model in use: **${state.modelCredit.name}**. Its own notes and terms:\n\n${state.modelCredit.terms}`
     : state.notice;
   fixedSize = state.fixedSize;
+  clickThrough = state.clickThrough;
+  loadedModelHash = state.modelHash;
   document.body.dataset["fixed"] = String(fixedSize);
   document.body.dataset["windowMode"] = state.windowMode;
   document.body.dataset["clickThrough"] = state.clickThrough ? "true" : "false";
   stage?.setLowPowerMode(state.lowPowerStage);
   stage?.setSolidBackdrop(state.windowMode === "solid-docked");
+  updateStatusPill();
   // The invitation to import a model is only for when there is none, not for one still loading.
   firstRun.hidden = state.modelUrl !== null;
   if (!stage) {
@@ -1187,6 +1561,8 @@ async function applyState(state: AppState): Promise<void> {
     // A load that was overtaken by a newer one (or by "Remove") must not touch the stand-in.
     if (await stage.loadModel(state.modelUrl)) {
       loadedModelUrl = state.modelUrl;
+      const framing = stage.setFraming(state.modelFraming ?? DEFAULT_MODEL_FRAMING);
+      syncFramingInputs(framing);
       standIn.hidden = true;
       stage.play("wave"); // hello
     }
@@ -1234,6 +1610,30 @@ async function start(): Promise<void> {
   if (state.showNotice) setReply(state.notice);
   updateLayout();
   if (state.autoListen) void setVoice(true);
+}
+
+/** Adds one-click Copy buttons to fenced code blocks without altering renderMarkdown(). */
+function enhanceCodeBlocks(container: HTMLElement, onCopy: (code: string) => void): void {
+  for (const pre of container.querySelectorAll("pre")) {
+    const code = pre.querySelector("code");
+    if (!code || pre.parentElement?.classList.contains("code-block-wrap")) continue;
+    const wrap = document.createElement("div");
+    wrap.className = "code-block-wrap";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "code-copy-btn";
+    btn.textContent = "Copy";
+    btn.setAttribute("aria-label", "Copy code block");
+    btn.addEventListener("click", () => {
+      onCopy(code.textContent ?? "");
+      btn.textContent = "Copied";
+      window.setTimeout(() => {
+        btn.textContent = "Copy";
+      }, 1400);
+    });
+    pre.parentNode?.insertBefore(wrap, pre);
+    wrap.append(pre, btn);
+  }
 }
 
 window.aichanDebug = () => stage?.debugSnapshot() ?? null;

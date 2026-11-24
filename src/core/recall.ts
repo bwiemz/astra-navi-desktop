@@ -71,6 +71,24 @@ export class Recall {
     this.db = db ?? null;
   }
 
+  /** Drops vector & FTS entries for forgotten memory IDs immediately. */
+  drop(ids: readonly string[]): void {
+    if (ids.length === 0) return;
+    for (const id of ids) {
+      this.passages.delete(id);
+      this.statements.delete(id);
+    }
+    const db = this.db && this.db.isOpen ? this.db : null;
+    if (!db) return;
+    db.together(() => {
+      for (const id of ids) {
+        db.run("DELETE FROM memory_vectors WHERE id = ?", id);
+        db.run("DELETE FROM memory_words WHERE id = ?", id);
+      }
+    });
+    db.settle();
+  }
+
   /** Loads the meaning model and prepares every memory, so the first real question is quick. */
   async warm(): Promise<void> {
     await this.refresh(this.passages, this.store.all(), searchableText, "passage", "passage");

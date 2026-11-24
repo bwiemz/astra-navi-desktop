@@ -1,3 +1,5 @@
+import type { PermissionRiskLevel, VoiceState } from "../../shared/ipc.ts";
+
 /**
  * The parts of her window's conversation view that are plain reckoning, kept apart from
  * the page so they can be tested without one: the trail of steps in a reply, which
@@ -325,6 +327,64 @@ export function scrollHint(
  * counts when the button was pressed down after that first moment: a button held down
  * since the question before, and let go on this one, answers nothing.
  */
+export interface StatusPillState {
+  kind: "ready" | "listening" | "thinking" | "job" | "vram-yielded" | "hands-off";
+  label: string;
+  showStop: boolean;
+}
+
+/** Computes the always-visible avatar status pill from runtime senses, voice, and brain state. */
+export function computeStatusPill(input: {
+  handsOff: boolean;
+  busy: boolean;
+  activityLabel: string | null;
+  voiceState: VoiceState;
+  activeJobs: number;
+  asleep: boolean;
+  asleepFor: string | null;
+}): StatusPillState {
+  if (input.handsOff) {
+    return {
+      kind: "hands-off",
+      label: "Hands Off",
+      showStop: input.busy || input.voiceState !== "off",
+    };
+  }
+  if (input.busy) {
+    return {
+      kind: "thinking",
+      label: input.activityLabel?.trim() || "Thinking",
+      showStop: true,
+    };
+  }
+  if (input.voiceState === "listening" || input.voiceState === "hearing" || input.voiceState === "transcribing" || input.voiceState === "starting") {
+    const label =
+      input.voiceState === "hearing"
+        ? "Hearing you"
+        : input.voiceState === "transcribing"
+          ? "Transcribing"
+          : input.voiceState === "starting"
+            ? "Starting mic"
+            : "Listening";
+    return { kind: "listening", label, showStop: true };
+  }
+  if (input.activeJobs > 0) {
+    return {
+      kind: "job",
+      label: input.activeJobs === 1 ? "Background Job" : `${input.activeJobs} Background Jobs`,
+      showStop: false,
+    };
+  }
+  if (input.asleep) {
+    return {
+      kind: "vram-yielded",
+      label: input.asleepFor ? `VRAM Yielded (${input.asleepFor})` : "VRAM Yielded",
+      showStop: false,
+    };
+  }
+  return { kind: "ready", label: "Ready", showStop: false };
+}
+
 export function mayAnswer(attempt: {
   now: number;
   shownAt: number;
@@ -335,11 +395,39 @@ export function mayAnswer(attempt: {
   buttonFocusedAt: number | null;
   /** When a pointer last went down on one of the question's buttons; null if none has since it appeared. */
   pointerDownAt: number | null;
+  /** Optional risk level of the pending request. */
+  risk?: PermissionRiskLevel;
+  /** Optional button decision being attempted. */
+  decision?: "allow" | "allow-session" | "deny";
+  /** When the user last typed in the chat box, for high-impact typing guardrails. */
+  lastTypedAt?: number | null;
+  typingGuardMs?: number;
+  /** True while the chat textarea is focused. */
+  inputFocused?: boolean;
+  /** Optional keyboard key name when `by === "key-on-button"`. */
+  key?: string;
 }): boolean {
   if (attempt.now - attempt.shownAt < attempt.guardMs) return false;
   if (attempt.by === "escape") return true;
   if (attempt.by === "key-on-button") {
-    return attempt.buttonFocusedAt !== null && attempt.buttonFocusedAt >= attempt.shownAt;
+    if (attempt.buttonFocusedAt === null || attempt.buttonFocusedAt < attempt.shownAt) {
+      return false;
+    }
+    if (attempt.decision !== "deny") {
+      if (attempt.inputFocused === true) return false;
+      if (attempt.risk === "high-impact") {
+        if (attempt.key === "Enter") return false;
+        const guardWindow = attempt.typingGuardMs ?? 1500;
+        if (
+          attempt.lastTypedAt !== null &&
+          attempt.lastTypedAt !== undefined &&
+          attempt.now - attempt.lastTypedAt < guardWindow
+        ) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
   return (
     attempt.pointerDownAt !== null && attempt.pointerDownAt >= attempt.shownAt + attempt.guardMs

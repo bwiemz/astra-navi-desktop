@@ -44,7 +44,9 @@ import {
 } from "../shared/edition.ts";
 import type {
   BootstrapStatusView,
+  DiskSpaceCheckView,
   HardwareRecommendationView,
+  ModelDownloadStatusView,
   PolicyAuditSummaryView,
   ProfileBackupActionResult,
   ProfileRestoreActionResult,
@@ -96,6 +98,8 @@ export interface SettingsIpcDeps {
   applyStageOptions?(): void;
   beforeProfileRestore?(): Promise<void>;
   relaunchAfterRestore?(): void;
+  showAvatarWindow?(): void;
+  importModel?(): Promise<void>;
   sendToWindow(channel: string, payload?: unknown): void;
   rebuildTrayMenu(): void;
 }
@@ -106,6 +110,8 @@ export interface SettingsController {
   settingsView(): SettingsView;
   openSettings(): void;
   registerSettingsIpc(): void;
+  exportSupportBundle(): Promise<SupportBundleResultView>;
+  sendDownloadProgress(status: ModelDownloadStatusView): void;
   setWatching(on: boolean): Promise<void>;
   setHearingPc(on: boolean): Promise<void>;
   setStationOpen(on: boolean): Promise<void>;
@@ -176,6 +182,19 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
 
   /** Finds out whether a firewall service is running. Asks the service manager; changes nothing. */
   async function detectFirewall(): Promise<void> {
+    if (process.platform === "win32") {
+      try {
+        const { stdout } = await runFile(
+          "netsh",
+          ["advfirewall", "show", "privateprofile", "state"],
+          { timeout: 4000 },
+        );
+        firewall = /\bON\b/i.test(stdout) ? "windows-defender" : null;
+      } catch {
+        firewall = "windows-defender";
+      }
+      return;
+    }
     for (const name of ["ufw", "firewalld"]) {
       try {
         const { stdout } = await runFile("systemctl", ["is-active", name], { timeout: 4000 });
@@ -263,6 +282,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
           addresses: reach?.station?.addresses() ?? [],
           fingerprint: reach?.station?.fingerprint() ?? null,
           firewall,
+          platform: process.platform,
           devices: (reach?.station?.devices() ?? []).map(({ id, name, pairedAt, lastSeenAt }) => ({
             id,
             name,
@@ -613,6 +633,78 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     );
   }
 
+  function sendDownloadProgress(status: ModelDownloadStatusView): void {
+    if (settingsWindow && !settingsWindow.isDestroyed()) {
+      settingsWindow.webContents.send("settings:download-progress", status);
+    }
+  }
+
+  async function exportSupportBundleNow(): Promise<SupportBundleResultView> {
+    const [selfRes, hwRes, bootRes] = await Promise.allSettled([
+      deps.runSelfCheck ? deps.runSelfCheck() : Promise.resolve(null),
+      probeHardwareView(false),
+      checkBootstrapStatus(),
+    ]);
+
+    const extraSecrets: string[] = [
+      config.value.search.braveApiKey,
+      config.value.search.searxngUrl,
+      stationAccount()?.username,
+      ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
+    ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+
+    const enabledTier10Flags = Object.entries(config.value.tier10)
+      .filter(([, enabled]) => enabled)
+      .map(([key]) => key);
+
+    const bundle = buildRedactedSupportBundle({
+      appVersion: app.getVersion(),
+      edition: resolveEdition(),
+      platform: process.platform,
+      arch: process.arch,
+      nodeVersion: process.versions.node,
+      electronVersion: process.versions.electron,
+      desktopSessionNotice: deps.desktopSessionNotice?.() ?? null,
+      selfCheck: selfRes.status === "fulfilled" ? selfRes.value : null,
+      hardware: hwRes.status === "fulfilled" ? hwRes.value : null,
+      bootstrapStatus: bootRes.status === "fulfilled" ? bootRes.value : null,
+      recentErrors: deps.recentErrors?.() ?? [],
+      settingsSummary: {
+        brain: config.value.brain,
+        language: config.value.language,
+        voiceEngine: config.value.voice.engine,
+        speak: config.value.voice.speak,
+        handsOff: config.value.handsOff,
+        lookWithoutAsking: config.value.sight.withoutAsking,
+        yieldToGames: config.value.yieldToGames,
+        quietInGames: config.value.quietInGames,
+        fittingTools: config.value.fittingTools,
+        keepTraces: config.value.keepTraces,
+        advancedSettings: config.value.advancedSettings,
+        stationOpen: config.value.devices.station,
+        enabledTier10Flags,
+      },
+      extraSecretLiterals: extraSecrets,
+    });
+
+    const json = formatSupportBundleJson(bundle);
+    const dir = join(dataDir(), "support-bundles");
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const filePath = join(dir, `astra-navi-support-${stamp}.json`);
+    await writeFile(filePath, json, { encoding: "utf8", mode: 0o600 });
+    try {
+      shell.showItemInFolder(filePath);
+    } catch {
+      // Headless / sandboxed environments may lack a file manager portal.
+    }
+    return {
+      path: filePath,
+      bytes: Buffer.byteLength(json, "utf8"),
+      redactions: bundle.redactionsApplied,
+    };
+  }
+
   function registerSettingsIpc(): void {
     ipcMain.handle("settings:load", async (event): Promise<SettingsView> => {
       if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
@@ -763,9 +855,95 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         }
         deps.chooseBrain(tier);
         await config.update({ brain: tier });
+        void deps
+          .engine()
+          ?.startBackgroundDownload(tier)
+          .then(sendDownloadProgress)
+          .catch(() => undefined);
         return settingsView();
       },
     );
+    ipcMain.handle(
+      "settings:disk-space",
+      async (event, tier: unknown): Promise<DiskSpaceCheckView> => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const chosenTier = typeof tier === "string" ? tier : config.value.brain;
+        const engine = deps.engine();
+        if (!engine) {
+          return {
+            availableBytes: 0,
+            requiredBytes: 0,
+            enough: true,
+            label: chosenTier,
+            alreadyDownloaded: false,
+          };
+        }
+        return engine.checkDiskSpaceFor(chosenTier);
+      },
+    );
+    ipcMain.handle("settings:download-status", (event): ModelDownloadStatusView => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      return (
+        deps.engine()?.downloadState() ?? {
+          state: "idle",
+          tier: config.value.brain,
+          label: config.value.brain,
+          received: 0,
+          total: 0,
+          bytesPerSec: 0,
+          etaSeconds: null,
+          freeDiskBytes: null,
+          requiredBytes: 0,
+          error: null,
+        }
+      );
+    });
+    ipcMain.handle("settings:download-pause", (event): ModelDownloadStatusView => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      const st = deps.engine()?.pauseDownload() ?? {
+        state: "idle",
+        tier: config.value.brain,
+        label: config.value.brain,
+        received: 0,
+        total: 0,
+        bytesPerSec: 0,
+        etaSeconds: null,
+        freeDiskBytes: null,
+        requiredBytes: 0,
+        error: null,
+      };
+      sendDownloadProgress(st);
+      return st;
+    });
+    ipcMain.handle("settings:download-resume", async (event): Promise<ModelDownloadStatusView> => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      const engine = deps.engine();
+      if (!engine) {
+        return {
+          state: "idle",
+          tier: config.value.brain,
+          label: config.value.brain,
+          received: 0,
+          total: 0,
+          bytesPerSec: 0,
+          etaSeconds: null,
+          freeDiskBytes: null,
+          requiredBytes: 0,
+          error: null,
+        };
+      }
+      const st = await engine.resumeDownload();
+      sendDownloadProgress(st);
+      return st;
+    });
+    ipcMain.on("settings:preview-avatar", (event) => {
+      if (!fromSettingsWindow(event)) return;
+      deps.showAvatarWindow?.();
+    });
+    ipcMain.on("settings:import-model", (event) => {
+      if (!fromSettingsWindow(event)) return;
+      void deps.importModel?.();
+    });
     ipcMain.handle(
       "settings:run-bootstrap",
       async (
@@ -810,69 +988,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       "settings:export-support-bundle",
       async (event): Promise<SupportBundleResultView> => {
         if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
-        const [selfRes, hwRes, bootRes] = await Promise.allSettled([
-          deps.runSelfCheck ? deps.runSelfCheck() : Promise.resolve(null),
-          probeHardwareView(false),
-          checkBootstrapStatus(),
-        ]);
-
-        const extraSecrets: string[] = [
-          config.value.search.braveApiKey,
-          config.value.search.searxngUrl,
-          stationAccount()?.username,
-          ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
-        ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-
-        const enabledTier10Flags = Object.entries(config.value.tier10)
-          .filter(([, enabled]) => enabled)
-          .map(([key]) => key);
-
-        const bundle = buildRedactedSupportBundle({
-          appVersion: app.getVersion(),
-          edition: resolveEdition(),
-          platform: process.platform,
-          arch: process.arch,
-          nodeVersion: process.versions.node,
-          electronVersion: process.versions.electron,
-          desktopSessionNotice: deps.desktopSessionNotice?.() ?? null,
-          selfCheck: selfRes.status === "fulfilled" ? selfRes.value : null,
-          hardware: hwRes.status === "fulfilled" ? hwRes.value : null,
-          bootstrapStatus: bootRes.status === "fulfilled" ? bootRes.value : null,
-          recentErrors: deps.recentErrors?.() ?? [],
-          settingsSummary: {
-            brain: config.value.brain,
-            language: config.value.language,
-            voiceEngine: config.value.voice.engine,
-            speak: config.value.voice.speak,
-            handsOff: config.value.handsOff,
-            lookWithoutAsking: config.value.sight.withoutAsking,
-            yieldToGames: config.value.yieldToGames,
-            quietInGames: config.value.quietInGames,
-            fittingTools: config.value.fittingTools,
-            keepTraces: config.value.keepTraces,
-            advancedSettings: config.value.advancedSettings,
-            stationOpen: config.value.devices.station,
-            enabledTier10Flags,
-          },
-          extraSecretLiterals: extraSecrets,
-        });
-
-        const json = formatSupportBundleJson(bundle);
-        const dir = join(dataDir(), "support-bundles");
-        await mkdir(dir, { recursive: true, mode: 0o700 });
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const filePath = join(dir, `astra-navi-support-${stamp}.json`);
-        await writeFile(filePath, json, { encoding: "utf8", mode: 0o600 });
-        try {
-          shell.showItemInFolder(filePath);
-        } catch {
-          // Headless / sandboxed environments may lack a file manager portal.
-        }
-        return {
-          path: filePath,
-          bytes: Buffer.byteLength(json, "utf8"),
-          redactions: bundle.redactionsApplied,
-        };
+        return exportSupportBundleNow();
       },
     );
     ipcMain.handle("settings:check-updates", async (event): Promise<UpdateCheckResult> => {
@@ -963,6 +1079,8 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     settingsView,
     openSettings,
     registerSettingsIpc,
+    exportSupportBundle: exportSupportBundleNow,
+    sendDownloadProgress,
     setWatching,
     setHearingPc,
     setStationOpen,

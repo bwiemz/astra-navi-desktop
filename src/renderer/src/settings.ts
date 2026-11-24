@@ -9,6 +9,7 @@ import {
 } from "../../shared/settings.ts";
 import { bridge, choose, element, fill, setAdvancedMode, stamp } from "./settings/dom.ts";
 import { showOnboarding, wireOnboarding } from "./settings/onboarding.ts";
+import { showPosture, wireSearchAndPresets } from "./settings/searchAndPresets.ts";
 import { showStation, wireDevices } from "./settings/devices.ts";
 import { showMachines, wireFleet } from "./settings/fleet.ts";
 import { wireTraces } from "./settings/traces.ts";
@@ -22,6 +23,7 @@ function show(view: SettingsView): void {
   element("days").textContent =
     view.daysTogether === 1 ? "Day 1 aboard." : `Day ${view.daysTogether} aboard.`;
 
+  showPosture(view);
   showOnboarding(view);
   showSystem(view);
 
@@ -453,6 +455,7 @@ onChange<HTMLInputElement>("advancedSettings", (control) => {
   return { advancedSettings: control.checked };
 });
 
+wireSearchAndPresets(save);
 wireOnboarding(show, save);
 wireDevices(show);
 wireFleet(show);

@@ -187,6 +187,38 @@ const READS_WIDELY =
 
 export type CommandRisk = "sensitive" | "broad" | "opaque" | "plain";
 
+export type PermissionRiskLevel = "read-only" | "modify" | "high-impact";
+
+const HIGH_IMPACT_COMMAND_PATTERN =
+  /\b(rm|rmdir|del|erase|remove-item|pkexec|sudo|su|chmod|chown|mkfs|dd|shutdown|reboot|poweroff|kill|killall|taskkill|format|diskpart|reg\s+delete|pacman\s+-R|apt\s+(?:remove|purge))\b/i;
+
+/** Classifies a permission approval prompt into Read-Only, Modify, or High-Impact. */
+export function classifyApprovalRisk(input: {
+  toolName?: string;
+  changesSomething: boolean;
+  sensitive: boolean;
+  commandRisk?: CommandRisk;
+  title?: string;
+  detail?: string;
+}): PermissionRiskLevel {
+  if (
+    input.sensitive ||
+    input.commandRisk === "sensitive" ||
+    input.commandRisk === "broad" ||
+    input.commandRisk === "opaque" ||
+    input.toolName === "tidy_storage" ||
+    input.toolName === "plan_mission" ||
+    (input.toolName === "remote" && input.changesSomething) ||
+    HIGH_IMPACT_COMMAND_PATTERN.test(input.detail ?? "")
+  ) {
+    return "high-impact";
+  }
+  if (!input.changesSomething) {
+    return "read-only";
+  }
+  return "modify";
+}
+
 /**
  * Sorts a shell command by what can be told from its text alone.
  *

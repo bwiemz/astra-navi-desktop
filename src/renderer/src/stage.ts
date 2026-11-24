@@ -35,11 +35,15 @@ import {
 } from "../../shared/gestures.ts";
 import {
   blendAmbientScreenLighting,
+  clampModelFraming,
+  computeFramedCamera,
   computeTimeOfDayLighting,
+  DEFAULT_MODEL_FRAMING,
   facingYawForEdge,
   PresenceTracker,
   ROOM_SCENE_SPECS,
   type DockEdge,
+  type ModelFraming,
   type PresenceUpdate,
   type RoomScenePreset,
   type StageLightingState,
@@ -174,6 +178,14 @@ export class Stage {
 
   private dockFacingDeg = 0;
   private dockFacingDegTarget = 0;
+  private baseBounds: { centerX: number; centerY: number; height: number } = {
+    centerX: 0,
+    centerY: 10,
+    height: 20,
+  };
+  private framing: ModelFraming = { ...DEFAULT_MODEL_FRAMING };
+  private baseOutlineWidths = new WeakMap<object, number>();
+  private baseLighting = { skyIntensity: 0.35, sunIntensity: 0.85 };
   private roomGroup: TransformNode | null = null;
   private roomPreset: RoomScenePreset = "none";
   private lightingMode: "default" | "time-of-day" | "screen-ambient" = "default";
@@ -424,20 +436,21 @@ export class Stage {
 
   private applyLightingState(state: StageLightingState): void {
     this.currentLighting = state;
+    this.baseLighting = { skyIntensity: state.skyIntensity, sunIntensity: state.sunIntensity };
     this.skyLight.diffuse = new Color3(state.skyColor[0], state.skyColor[1], state.skyColor[2]);
     this.skyLight.groundColor = new Color3(
       state.groundColor[0],
       state.groundColor[1],
       state.groundColor[2],
     );
-    this.skyLight.intensity = state.skyIntensity;
+    this.skyLight.intensity = state.skyIntensity * this.framing.rimLight;
     this.sunLight.diffuse = new Color3(state.sunColor[0], state.sunColor[1], state.sunColor[2]);
     this.sunLight.direction = new Vector3(
       state.sunDirection[0],
       state.sunDirection[1],
       state.sunDirection[2],
     );
-    this.sunLight.intensity = state.sunIntensity;
+    this.sunLight.intensity = state.sunIntensity * this.framing.rimLight;
     this.scene.ambientColor = new Color3(
       state.ambientColor[0],
       state.ambientColor[1],
@@ -449,8 +462,9 @@ export class Stage {
   setLightingMode(mode: "default" | "time-of-day" | "screen-ambient", now = new Date()): void {
     this.lightingMode = mode;
     if (mode === "default") {
-      this.skyLight.intensity = 0.35;
-      this.sunLight.intensity = 0.85;
+      this.baseLighting = { skyIntensity: 0.35, sunIntensity: 0.85 };
+      this.skyLight.intensity = 0.35 * this.framing.rimLight;
+      this.sunLight.intensity = 0.85 * this.framing.rimLight;
       this.sunLight.direction = new Vector3(0.4, -1, 1);
       this.scene.ambientColor = new Color3(0.5, 0.5, 0.5);
       this.stir();
@@ -891,13 +905,88 @@ export class Stage {
     };
   }
 
+  getFraming(): ModelFraming {
+    return { ...this.framing };
+  }
+
+  setFraming(next: Partial<ModelFraming>): ModelFraming {
+    this.framing = clampModelFraming({ ...this.framing, ...next });
+    this.applyFraming();
+    return { ...this.framing };
+  }
+
+  autoFrame(): ModelFraming {
+    this.framing = { ...DEFAULT_MODEL_FRAMING };
+    this.applyFraming();
+    return { ...this.framing };
+  }
+
+  private applyFraming(): void {
+    const cam = computeFramedCamera(this.baseBounds, this.camera.fov, this.framing);
+    this.camera.position = new Vector3(cam.position[0], cam.position[1], cam.position[2]);
+    this.camera.setTarget(new Vector3(cam.target[0], cam.target[1], cam.target[2]));
+    this.camera.maxZ = cam.maxZ;
+    this.skyLight.intensity = this.baseLighting.skyIntensity * this.framing.rimLight;
+    this.sunLight.intensity = this.baseLighting.sunIntensity * this.framing.rimLight;
+    this.rig?.vrmRig?.applyShaderPreset({
+      rimLight: this.framing.rimLight,
+      outlineThickness: this.framing.outlineThickness,
+    });
+    for (const mat of this.scene.materials) {
+      const mmdMat = mat as unknown as { outlineWidth?: number };
+      if (typeof mmdMat.outlineWidth === "number") {
+        let baseWidth = this.baseOutlineWidths.get(mat);
+        if (baseWidth === undefined) {
+          baseWidth = mmdMat.outlineWidth;
+          this.baseOutlineWidths.set(mat, baseWidth);
+        }
+        mmdMat.outlineWidth = baseWidth * this.framing.outlineThickness;
+      }
+    }
+    this.stir();
+  }
+
   /** Points the camera so the whole figure fills the canvas with a little headroom. */
-  private frameMeshes(parts: readonly { getVerticesData(kind: string): unknown }[]): void {
+  private frameMeshes(
+    parts: readonly {
+      getVerticesData(kind: string): unknown;
+      computeWorldMatrix?(force?: boolean): unknown;
+      getBoundingInfo?(): {
+        boundingBox: {
+          minimumWorld: { x: number; y: number };
+          maximumWorld: { x: number; y: number };
+        };
+      };
+    }[],
+  ): void {
     let bottom = Infinity;
     let top = -Infinity;
     let left = Infinity;
     let right = -Infinity;
     for (const part of parts) {
+      try {
+        part.computeWorldMatrix?.(true);
+        const info = part.getBoundingInfo?.();
+        if (info) {
+          const min = info.boundingBox.minimumWorld;
+          const max = info.boundingBox.maximumWorld;
+          if (
+            Number.isFinite(min.x) &&
+            Number.isFinite(min.y) &&
+            Number.isFinite(max.x) &&
+            Number.isFinite(max.y) &&
+            max.y - min.y > 1e-4
+          ) {
+            if (min.y < bottom) bottom = min.y;
+            if (max.y > top) top = max.y;
+            if (min.x < left) left = min.x;
+            if (max.x > right) right = max.x;
+            continue;
+          }
+        }
+      } catch {
+        // Fall through to raw vertex buffer inspection below.
+      }
       const positions = part.getVerticesData(VertexBuffer.PositionKind) as ArrayLike<number> | null;
       if (!positions) continue;
       for (let i = 0; i < positions.length; i += 3) {
@@ -915,13 +1004,12 @@ export class Stage {
       left = -5;
       right = 5;
     }
-    const height = Math.max(1, top - bottom);
-    const centerX = (left + right) / 2;
-    const centerY = bottom + height / 2;
-    const distance = (height * 0.56) / Math.tan(this.camera.fov / 2);
-    this.camera.position = new Vector3(centerX, centerY, -distance);
-    this.camera.setTarget(new Vector3(centerX, centerY, 0));
-    this.camera.maxZ = distance * 3;
+    this.baseBounds = {
+      height: Math.max(1, top - bottom),
+      centerX: (left + right) / 2,
+      centerY: bottom + Math.max(1, top - bottom) / 2,
+    };
+    this.applyFraming();
   }
 
   private animate(): void {

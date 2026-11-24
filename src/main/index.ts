@@ -102,6 +102,7 @@ import {
 } from "../shared/ipc.ts";
 import {
   computeMultiMonitorDock,
+  isBoundsOnAnyDisplay,
   snapBoundsToMonitorEdge,
   type DisplayWorkArea,
   type DockEdge,
@@ -258,10 +259,14 @@ function appState(showNotice: boolean): AppState {
     ? // The revision keeps a re-imported model from being served out of the page's cache.
       `${SCHEME}://model/${modelRevision}/${modelBundle.entry.split("/").map(encodeURIComponent).join("/")}`
     : null;
+  const modelHash = modelBundle?.hash ?? null;
+  const modelFraming = modelHash ? (config.value.avatarFraming[modelHash] ?? null) : null;
   const info = modelBundle?.info;
   const modelCredit = info ? { name: info.name, terms: info.comment.slice(0, 1500) } : null;
   return {
     modelUrl,
+    modelHash,
+    modelFraming,
     modelCredit,
     notice: UNOFFICIAL_NOTICE,
     showNotice,
@@ -289,7 +294,8 @@ const modelFiles = createModelFiles({
   appState,
   defaultModelPath: join(resolveBundledRoot(app.getAppPath()), "assets", "models", "ai-navigator", "ai-navigator.pmx"),
 });
-const { loadModelBundle, packIntoBundle, registerProtocol, importModel, removeModel } = modelFiles;
+const { loadModelBundle, packIntoBundle, registerProtocol, importModel, importModelFile, removeModel } =
+  modelFiles;
 
 // ---------- the window ----------
 
@@ -473,6 +479,63 @@ function setClickThrough(on: boolean): void {
     mainWindow.setIgnoreMouseEvents(on, { forward: true });
   }
   sendToWindow("app:state", appState(false));
+  rebuildTrayMenu();
+}
+
+/** Moves the companion window back onto the primary display workArea and clears click-through. */
+function resetWindowToPrimary(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  if (!mainWindow) return;
+  const area = screen.getPrimaryDisplay().workArea;
+  const bounds = mainWindow.getBounds();
+  const size = {
+    width: Math.max(WINDOW_COMPACT.width, Math.min(bounds.width || WINDOW_COMPACT.width, area.width - 24)),
+    height: Math.max(WINDOW_COMPACT.height, Math.min(bounds.height || WINDOW_COMPACT.height, area.height - 24)),
+  };
+  heldCorner = null;
+  if (clickThrough) {
+    clickThrough = false;
+    mainWindow.setIgnoreMouseEvents(false);
+  }
+  mainWindow.setBounds({ ...defaultPosition(size), ...size });
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  sendToWindow("app:state", appState(false));
+  rebuildTrayMenu();
+  sendPresence();
+}
+
+function rescueOffscreenWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const displays = connectedDisplays();
+  if (!isBoundsOnAnyDisplay(mainWindow.getBounds(), displays)) {
+    resetWindowToPrimary();
+  }
+}
+
+async function forceReleaseVram(): Promise<void> {
+  interruptBrain();
+  await brain?.whenIdle();
+  await engine?.unload();
+  await voice.speaker()?.restIfQuiet().catch(() => undefined);
+  sendPresence();
+}
+
+async function restartInSafeMode(): Promise<void> {
+  await startupGuard?.requestSafeModeNextBoot(
+    "Restarted in Safe Mode from the system tray. Optional background hooks are paused until you clear Safe Mode.",
+  );
+  quitting = true;
+  app.relaunch();
+  app.exit(0);
+}
+
+async function exportSupportBundleFromTray(): Promise<void> {
+  const result = await settings.exportSupportBundle();
+  showNotice(
+    `Support bundle exported (${result.redactions} secrets scrubbed): ${result.path}`,
+  );
 }
 
 function applyStageOptions(): void {
@@ -657,6 +720,8 @@ const settings = createSettingsController({
     app.relaunch();
     app.exit(0);
   },
+  showAvatarWindow: () => showWindow(false),
+  importModel,
   sendToWindow,
   rebuildTrayMenu: () => rebuildTrayMenu(),
 });
@@ -692,16 +757,27 @@ const { rebuildTrayMenu, createTray } = createTrayMenu({
   toldStopped,
   importModel,
   removeModel,
+  clickThrough: () => clickThrough,
+  setClickThrough,
+  resetWindowToPrimary,
+  forceReleaseVram,
+  restartInSafeMode,
+  exportSupportBundle: exportSupportBundleFromTray,
 });
 
 // ---------- thinking and presence ----------
 
 /** Tells the page whether to draw her at all, and whether she is asleep. */
 function sendPresence(): void {
+  const activeJobs =
+    (missions?.running ?? 0) +
+    (research?.busy ? 1 : 0) +
+    (board?.list().filter((m) => m.state === "running").length ?? 0);
   sendToWindow("stage:presence", {
     visible: mainWindow?.isVisible() ?? false,
     asleep: brainAsleep,
     ...(brainAsleep && brainAsleepFor !== null ? { asleepFor: brainAsleepFor } : {}),
+    activeJobs,
     // What she is taking in and held back from, for the small badges beside her.
     senses: {
       watching: config.value.sight.watch,
@@ -1314,6 +1390,7 @@ async function main(): Promise<void> {
     lean: config.value.leanMemory,
     gameOnCard: config.value.yieldToGames ? gameOnCard : undefined,
     onStatus: onEngineStatus,
+    onDownloadUpdate: (dl) => settings.sendDownloadProgress(dl),
   });
   const thinker = engine;
   const routines = new RoutineWatch(routinesFile());
@@ -1543,11 +1620,17 @@ async function main(): Promise<void> {
     },
     brain: () => brain,
     archive: () => archive,
+    agenda: () => agenda,
+    workspaceDir: environment.workspace,
+    privateDirs: [dataDir()],
     voice,
     interruptBrain,
     resizeWindow,
+    setClickThrough,
+    setHandsOff,
     openSettings: () => settings.openSettings(),
     importModel,
+    importModelFile,
   });
   settings.registerSettingsIpc();
   registerFleetIpc({
@@ -1575,6 +1658,8 @@ async function main(): Promise<void> {
   }
   settings.noteStartAtLogin(await startsAtLogin());
   createWindow();
+  screen.on("display-removed", rescueOffscreenWindow);
+  screen.on("display-metrics-changed", rescueOffscreenWindow);
   const hotkeyStatus = applyHotkeys();
   if (hotkeyStatus.failed.length > 0) {
     console.warn(`[hotkeys] Failed to register: ${hotkeyStatus.failed.join(", ")}`);

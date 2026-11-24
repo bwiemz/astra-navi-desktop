@@ -316,6 +316,39 @@ export class ConversationArchive {
     return scored.sort((a, b) => b.score - a.score).slice(0, limit);
   }
 
+  /** Removes and returns the newest archived turn (for Forget Last Turn / Edit & Resend). */
+  async removeLast(): Promise<ArchivedTurn | null> {
+    if (this.store) {
+      const store = this.store;
+      if (!store.isOpen) return null;
+      const latest = store.one<Omit<TurnRow, "vector">>(
+        "SELECT id, at, said, reply, outside FROM turns ORDER BY id DESC LIMIT 1",
+      );
+      if (!latest) return null;
+      store.together(() => {
+        store.run("DELETE FROM turn_words WHERE rowid = ?", latest.id);
+        store.run("DELETE FROM turns WHERE id = ?", latest.id);
+      });
+      store.settle();
+      return {
+        at: latest.at,
+        said: latest.said,
+        reply: latest.reply,
+        outside: latest.outside === 1,
+      };
+    }
+    await this.writeChain.catch(() => undefined);
+    const removed = this.turns.pop();
+    if (!removed) return null;
+    await this.rewrite();
+    return {
+      at: removed.at,
+      said: removed.said,
+      reply: removed.reply,
+      outside: removed.outside,
+    };
+  }
+
   /** Forgets every past conversation. */
   async clear(): Promise<void> {
     if (this.store) {

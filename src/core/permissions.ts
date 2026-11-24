@@ -4,6 +4,7 @@ import type { WindowDetail } from "./desktop.ts";
 import { operateVerdict } from "./operateRules.ts";
 import type { Backup, Machine } from "./fleet.ts";
 import { remoteChangesSomething, remoteVerdict, shown } from "./fleetRules.ts";
+import { compareText } from "./textDiff.ts";
 import {
   describeWake,
   planMission,
@@ -15,6 +16,7 @@ import {
   BROAD_REASON,
   canonical,
   classifyCommand,
+  type CommandRisk,
   hasShellExpansion,
   isInside,
   isPlainWebAddress,
@@ -71,6 +73,8 @@ export type Verdict =
       summary?: RequestSummary;
       /** Whether "for this chat" may be offered; left out, the tool's usual answer applies. */
       rememberable?: boolean;
+      /** Command classification when originating from run_command / start_mission. */
+      commandRisk?: CommandRisk;
     };
 
 export interface PolicyContext {
@@ -144,6 +148,8 @@ export interface RequestSummary {
   title: string;
   detail: string;
   note: string | null;
+  diff?: string | null;
+  rawCommand?: string | null;
 }
 
 /** The most text she may put on the clipboard: all of it has to fit in the question the user is shown. */
@@ -395,17 +401,19 @@ const UNKNOWN_ADDRESS_REASON =
   "This address did not come from you or from a search result, so check it is one you expect.";
 
 async function commandVerdict(command: string, context: PolicyContext): Promise<Verdict> {
-  switch (await classifyCommand(command, context)) {
+  const commandRisk = await classifyCommand(command, context);
+  switch (commandRisk) {
     case "sensitive":
-      return { decision: "ask", sensitive: true, reason: SENSITIVE_REASON };
+      return { decision: "ask", sensitive: true, reason: SENSITIVE_REASON, commandRisk };
     case "broad":
-      return { decision: "ask", sensitive: true, reason: BROAD_REASON };
+      return { decision: "ask", sensitive: true, reason: BROAD_REASON, commandRisk };
     case "opaque":
       return {
         decision: "ask",
         sensitive: false,
         reason:
           "This command works out file names as it runs, so it is not clear up front what it will touch.",
+        commandRisk,
       };
     case "plain":
       if (isReadOnlyCommand(command)) return { decision: "allow" };
@@ -413,6 +421,7 @@ async function commandVerdict(command: string, context: PolicyContext): Promise<
         decision: "ask",
         sensitive: false,
         reason: "This command can change things on your computer.",
+        commandRisk,
       };
   }
 }
@@ -473,10 +482,41 @@ export async function toolVerdict(
         }
       }
       if (isInside(target, await canonical(context.workspace))) return { decision: "allow" };
+      const content = stringField(input, "content") ?? "";
+      let diffText: string | null = null;
+      let diffNote: string | null = `${content.length} characters.`;
+      try {
+        const info = await stat(target).catch(() => null);
+        if (info?.isFile() && info.size <= 200_000) {
+          const prevBytes = await readFile(target);
+          if (!prevBytes.includes(0)) {
+            const cmp = compareText(prevBytes.toString("utf8"), content, {
+              context: 2,
+              maxLines: 60,
+            });
+            diffText = cmp.same ? "(no line changes)" : cmp.text;
+            diffNote = cmp.same
+              ? `Same contents as current file (${content.length} characters).`
+              : `${content.length} characters (+${cmp.added} / -${cmp.removed} lines vs existing file).`;
+          }
+        } else if (!info) {
+          const cmp = compareText("", content, { context: 2, maxLines: 40 });
+          diffText = cmp.text;
+          diffNote = `New file (${content.length} characters, ${cmp.added} line${cmp.added === 1 ? "" : "s"}).`;
+        }
+      } catch {
+        // Diff preview is best-effort; fallback note above suffices.
+      }
       return {
         decision: "ask",
         sensitive: false,
         reason: "This file is outside AI-chan's own folder.",
+        summary: {
+          title: "Save this file?",
+          detail: target,
+          note: diffNote,
+          ...(diffText !== null ? { diff: diffText } : {}),
+        },
       };
     }
     case TOOLS.runCommand:

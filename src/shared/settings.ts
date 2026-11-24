@@ -214,10 +214,12 @@ export interface StationView {
   fingerprint: string | null;
   devices: { id: string; name: string; pairedAt: string; lastSeenAt: string | null }[];
   /**
-   * A firewall running on this PC ("ufw", "firewalld"), or null. With one on, other
-   * devices cannot reach her until her port is allowed through it.
+   * A firewall running on this PC ("ufw", "firewalld", "windows-defender"), or null.
+   * With one on, other devices cannot reach her until her port is allowed through it.
    */
   firewall: string | null;
+  /** Host OS platform ("win32", "linux", "darwin") for firewall hint formatting. */
+  platform?: string;
   /** The single mission currently pinned for paired devices, if any. */
   pinnedMission?: { id: string; title: string; state: string; done: number; total: number } | null;
   /** Open missions that may be pinned to paired devices from the PC. */
@@ -350,6 +352,124 @@ export interface SettingsBridge {
   clearSafeMode(): Promise<SettingsView>;
   exportProfileBackup(): Promise<ProfileBackupActionResult>;
   importProfileBackup(): Promise<ProfileRestoreActionResult>;
+  checkDiskSpace(tier: string): Promise<DiskSpaceCheckView>;
+  downloadStatus(): Promise<ModelDownloadStatusView>;
+  pauseBrainDownload(): Promise<ModelDownloadStatusView>;
+  resumeBrainDownload(): Promise<ModelDownloadStatusView>;
+  previewAvatarWindow(): void;
+  importAvatarModel(): void;
+  onDownloadProgress(listener: (status: ModelDownloadStatusView) => void): void;
+}
+
+export type PosturePresetId = "companion" | "desktop-helper" | "full-ship-ai";
+
+export interface PosturePresetDefinition {
+  id: PosturePresetId;
+  label: string;
+  summary: string;
+  patch: SettingsPatch;
+}
+
+export const POSTURE_PRESETS: readonly PosturePresetDefinition[] = [
+  {
+    id: "companion",
+    label: "Companion",
+    summary: "Chat, voice & 3D avatar only — hands off controls, no screen or desktop watchers.",
+    patch: {
+      handsOff: true,
+      lookWithoutAsking: false,
+      watch: false,
+      hearPc: false,
+      readNotices: false,
+      workInPrograms: false,
+      station: false,
+      tier10: {
+        semanticBridges: false,
+        signedPlugins: false,
+        workerMesh: false,
+        stationFederation: false,
+      },
+    },
+  },
+  {
+    id: "desktop-helper",
+    label: "Desktop Helper",
+    summary: "Sees active window context, hears PC audio & agenda, while still asking before acting.",
+    patch: {
+      handsOff: false,
+      lookWithoutAsking: false,
+      watch: true,
+      hearPc: true,
+      readNotices: false,
+      workInPrograms: false,
+      morningBriefing: true,
+      yieldToGames: true,
+      quietInGames: true,
+    },
+  },
+  {
+    id: "full-ship-ai",
+    label: "Full Ship AI",
+    summary: "Enables UI automation, notification awareness, semantic bridges & advanced controls.",
+    patch: {
+      handsOff: false,
+      watch: true,
+      hearPc: true,
+      readNotices: true,
+      workInPrograms: true,
+      advancedSettings: true,
+      tier10: {
+        semanticBridges: true,
+      },
+    },
+  },
+];
+
+/** Identifies which posture preset matches current settings, or `"custom"` when customized. */
+export function detectActivePosture(
+  view: Pick<SettingsView, "handsOff" | "watch" | "hearPc" | "readNotices" | "workInPrograms"> & {
+    station: Pick<StationView, "on"> | boolean;
+  },
+): PosturePresetId | "custom" {
+  const stationOn = typeof view.station === "boolean" ? view.station : view.station.on;
+  if (
+    view.handsOff &&
+    !view.watch &&
+    !view.hearPc &&
+    !view.readNotices &&
+    !view.workInPrograms &&
+    !stationOn
+  ) {
+    return "companion";
+  }
+  if (!view.handsOff && view.watch && view.hearPc && !view.readNotices && !view.workInPrograms) {
+    return "desktop-helper";
+  }
+  if (!view.handsOff && view.watch && view.hearPc && view.readNotices && view.workInPrograms) {
+    return "full-ship-ai";
+  }
+  return "custom";
+}
+
+export interface DiskSpaceCheckView {
+  availableBytes: number;
+  requiredBytes: number;
+  enough: boolean;
+  label: string;
+  alreadyDownloaded: boolean;
+}
+
+export interface ModelDownloadStatusView {
+  state: "idle" | "downloading" | "paused" | "verifying" | "ready" | "error";
+  tier: string;
+  label: string;
+  received: number;
+  total: number;
+  bytesPerSec: number;
+  etaSeconds: number | null;
+  freeDiskBytes: number | null;
+  requiredBytes: number;
+  error: string | null;
 }
 
 export type ProfileBackupActionResult =

@@ -1,4 +1,9 @@
+import type { PermissionRiskLevel } from "../core/riskRules.ts";
+import type { DroppedAttachment } from "../core/dropRouter.ts";
+import type { ModelFraming } from "./spatialStage.ts";
 import type { VisemeFrame } from "./visemes.ts";
+
+export type { DroppedAttachment, ModelFraming, PermissionRiskLevel };
 
 /** Types shared by the main process and the window. No runtime code lives here. */
 
@@ -28,6 +33,12 @@ export interface PermissionRequest {
   sensitive: boolean;
   /** Whether "allow for this session" can be offered. */
   canRemember: boolean;
+  /** Risk classification badge for the approval card. */
+  risk?: PermissionRiskLevel;
+  /** Optional unified diff preview when overwriting or creating files. */
+  diff?: string | null;
+  /** Optional raw command or script text for collapsible preview. */
+  rawCommand?: string | null;
 }
 
 export type BrainEvent =
@@ -83,9 +94,20 @@ export type VoiceEvent =
   | { type: "stop" }
   | { type: "error"; message: string };
 
+export interface DropFilesResult {
+  avatarsLoaded: string[];
+  attachments: DroppedAttachment[];
+  calendarAdded: string[];
+  notes: string[];
+}
+
 export interface AppState {
   /** URL of the imported model on the private in-app protocol, or null when none is imported. */
   modelUrl: string | null;
+  /** Short hash of the active model file for per-model framing persistence. */
+  modelHash: string | null;
+  /** Saved per-model camera zoom/offset and lighting/outline framing, if any. */
+  modelFraming: ModelFraming | null;
   /** The imported model's own name and usage notes, shown under About. */
   modelCredit: { name: string; terms: string } | null;
   /** Shown once on first launch and from the tray's About item. */
@@ -128,6 +150,8 @@ export interface Presence {
   asleep: boolean;
   /** The game her brain was put away for, when that is why she is asleep. */
   asleepFor?: string;
+  /** Count of background missions/research/board jobs currently active. */
+  activeJobs?: number;
   senses: Senses;
 }
 
@@ -255,6 +279,16 @@ export interface AichanBridge {
   openSettings(): void;
   /** Starts importing a character model, as the tray menu's entry does. */
   importModel(): void;
+  /** Persists per-model zoom, pan, rim light, and outline thickness overrides. */
+  saveModelFraming(modelHash: string, framing: ModelFraming): void;
+  /** Toggles click-through lock on the overlay window. */
+  setClickThrough(on: boolean): void;
+  /** Toggles the Hands-Off kill switch immediately from the hover mini-toolbar. */
+  setHandsOff(off: boolean): void;
+  /** Handles dropped `.vrm`/`.pmx`, documents/images, or `.ics` files. */
+  handleDroppedFiles(paths: string[]): Promise<DropFilesResult>;
+  /** Removes the last user turn and its reply/memories cleanly. */
+  forgetLastTurn(): Promise<{ removed: boolean; userText: string | null; forgottenMemories: number }>;
   /** The full path of a file dropped onto the window, or "" when it has none. */
   pathForFile(file: File): string;
   openLink(url: string): void;

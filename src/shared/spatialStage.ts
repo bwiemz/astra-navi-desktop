@@ -616,3 +616,106 @@ export class PresenceTracker {
     };
   }
 }
+
+// --- Per-Model Avatar Framing, Ergonomics & Multi-Monitor Visibility ---
+
+export interface ModelFraming {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  rimLight: number;
+  outlineThickness: number;
+}
+
+export const DEFAULT_MODEL_FRAMING: Readonly<ModelFraming> = {
+  scale: 1,
+  offsetX: 0,
+  offsetY: 0,
+  rimLight: 1,
+  outlineThickness: 1,
+};
+
+function clampFinite(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+/** Clamps untrusted/stored per-model framing overrides to ergonomic bounds. */
+export function clampModelFraming(raw: Partial<ModelFraming> | null | undefined): ModelFraming {
+  return {
+    scale: clampFinite(raw?.scale, 0.45, 2.2, DEFAULT_MODEL_FRAMING.scale),
+    offsetX: clampFinite(raw?.offsetX, -0.6, 0.6, DEFAULT_MODEL_FRAMING.offsetX),
+    offsetY: clampFinite(raw?.offsetY, -0.6, 0.6, DEFAULT_MODEL_FRAMING.offsetY),
+    rimLight: clampFinite(raw?.rimLight, 0.4, 1.8, DEFAULT_MODEL_FRAMING.rimLight),
+    outlineThickness: clampFinite(
+      raw?.outlineThickness,
+      0,
+      2.5,
+      DEFAULT_MODEL_FRAMING.outlineThickness,
+    ),
+  };
+}
+
+/** Computes next zoom scale from a mouse-wheel event (scrolling up zooms in). */
+export function computeWheelZoom(currentScale: number, deltaY: number): number {
+  const safeScale = clampFinite(currentScale, 0.45, 2.2, 1);
+  if (!Number.isFinite(deltaY) || deltaY === 0) return safeScale;
+  const clampedDelta = Math.max(-240, Math.min(240, deltaY));
+  const factor = Math.exp(-clampedDelta * 0.0016);
+  return Math.max(0.45, Math.min(2.2, safeScale * factor));
+}
+
+/** Computes next normalized framing offset from pointer drag pixel deltas. */
+export function computeDragPan(
+  current: { offsetX: number; offsetY: number },
+  dxPx: number,
+  dyPx: number,
+  canvasHeight: number,
+  scale: number,
+): { offsetX: number; offsetY: number } {
+  const h = Math.max(120, Number.isFinite(canvasHeight) ? canvasHeight : 430);
+  const s = clampFinite(scale, 0.45, 2.2, 1);
+  const stepX = (Number.isFinite(dxPx) ? dxPx : 0) / (h * s);
+  const stepY = -(Number.isFinite(dyPx) ? dyPx : 0) / (h * s);
+  return {
+    offsetX: clampFinite(current.offsetX + stepX, -0.6, 0.6, 0),
+    offsetY: clampFinite(current.offsetY + stepY, -0.6, 0.6, 0),
+  };
+}
+
+/** Computes camera position/target for any bounding box and per-model framing overrides. */
+export function computeFramedCamera(
+  bounds: { centerX: number; centerY: number; height: number },
+  fovRad: number,
+  framing: ModelFraming,
+): { position: [number, number, number]; target: [number, number, number]; maxZ: number } {
+  const safeFraming = clampModelFraming(framing);
+  const safeHeight = Math.max(1, Number.isFinite(bounds.height) ? bounds.height : 20);
+  const safeFov = Math.max(0.05, Number.isFinite(fovRad) ? fovRad : (20 * Math.PI) / 180);
+  const baseDistance = (safeHeight * 0.56) / Math.tan(safeFov / 2);
+  const distance = baseDistance / safeFraming.scale;
+  const targetX = (Number.isFinite(bounds.centerX) ? bounds.centerX : 0) - safeFraming.offsetX * safeHeight;
+  const targetY = (Number.isFinite(bounds.centerY) ? bounds.centerY : 10) - safeFraming.offsetY * safeHeight;
+  return {
+    position: [targetX, targetY, -distance],
+    target: [targetX, targetY, 0],
+    maxZ: Math.max(200, distance * 4),
+  };
+}
+
+/**
+ * True when a reasonable portion (>= 48px wide and tall) of `bounds` intersects
+ * at least one active monitor workArea, catching windows stranded on unplugged monitors.
+ */
+export function isBoundsOnAnyDisplay(
+  bounds: { x: number; y: number; width: number; height: number },
+  displays: readonly DisplayWorkArea[],
+  minVisiblePx = 48,
+): boolean {
+  if (displays.length === 0) return false;
+  return displays.some((d) => {
+    const overlapW = Math.min(bounds.x + bounds.width, d.x + d.width) - Math.max(bounds.x, d.x);
+    const overlapH = Math.min(bounds.y + bounds.height, d.y + d.height) - Math.max(bounds.y, d.y);
+    return overlapW >= Math.min(minVisiblePx, bounds.width) && overlapH >= Math.min(minVisiblePx, bounds.height);
+  });
+}

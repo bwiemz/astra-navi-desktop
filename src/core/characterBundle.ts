@@ -259,11 +259,16 @@ export async function openSignedCharacterBundle(
   const entryBytes = fileMap.get(normalizeBundlePath(parsed.manifest.modelEntry));
   const modelInfo =
     parsed.manifest.modelFormat === "pmx" && entryBytes ? readModelInfo(entryBytes) : null;
+  const hash = createHash("sha256")
+    .update(entryBytes ?? parsed.manifest.id)
+    .digest("hex")
+    .slice(0, 16);
 
   return {
     manifest: parsed.manifest,
     verifiedSignature,
     bundle: {
+      hash,
       info: modelInfo,
       entry: parsed.manifest.modelEntry.replaceAll("\\", "/"),
       fileCount: fileMap.size,

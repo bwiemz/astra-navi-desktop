@@ -30,6 +30,18 @@
       <button id="clear-safe-mode" type="button">Clear Safe Mode &amp; Resume Hooks</button>
     </div>
 
+    <div id="download-banner" class="banner download-banner" role="status" aria-live="polite" hidden>
+      <div class="download-banner-info">
+        <strong id="banner-dl-title">Downloading local AI brain…</strong>
+        <progress id="banner-dl-bar" max="100" value="0"></progress>
+        <span id="banner-dl-stats" class="why"></span>
+      </div>
+      <div class="download-banner-actions">
+        <button id="banner-dl-toggle" type="button">Pause</button>
+        <button id="banner-dl-preview" type="button" class="quiet">Preview Avatar</button>
+      </div>
+    </div>
+
     <section id="onboarding-wizard" class="wizard-overlay" hidden aria-label="60-second setup wizard">
       <div class="wizard-card">
         <header class="wizard-head">
@@ -37,20 +49,28 @@
           <p id="wiz-step-indicator" class="why">Step 1 of 4</p>
         </header>
 
-    <div id="safe-mode-banner" class="banner" role="alert" hidden>
-      <p id="safe-mode-reason"></p>
-      <button id="clear-safe-mode" type="button">Clear Safe Mode &amp; Resume Hooks</button>
-    </div>
-
         <div id="wiz-step-1" class="wiz-step">
           <h3>1. Hardware &amp; Brain</h3>
           <p id="wiz-hw-summary" class="note">Probing GPU VRAM, memory bandwidth, and system RAM…</p>
           <p id="wiz-hw-reason" class="why"></p>
+          <p id="wiz-disk-status" class="why" role="status"></p>
           <div class="row">
             <span class="what">Brain tier</span>
             <select id="wiz-brain-select"></select>
-            <button id="wiz-use-recommended" type="button">Apply recommended</button>
+            <button id="wiz-use-recommended" type="button">Download &amp; Prepare Brain</button>
             <button id="wiz-hw-refresh" type="button" class="quiet">Re-probe</button>
+          </div>
+          <div id="wiz-download-box" class="wiz-download-box" hidden>
+            <div class="wiz-dl-top">
+              <strong id="wiz-dl-label">Preparing download…</strong>
+              <button id="wiz-dl-toggle" type="button">Pause</button>
+            </div>
+            <progress id="wiz-dl-bar" max="100" value="0"></progress>
+            <p id="wiz-dl-stats" class="why"></p>
+          </div>
+          <div class="wiz-explore-row">
+            <span class="why">You can explore the app while weights download:</span>
+            <button id="wiz-preview-avatar" type="button" class="quiet">Preview 3D Avatar</button>
           </div>
         </div>
 
@@ -58,8 +78,14 @@
           <h3>2. Character &amp; Voice</h3>
           <p class="note">
             Ships with the built-in <strong>Astra Navi</strong> 3D navigator. You can also import your
-            own <code>.pmx</code>/<code>.pmd</code> model from the tray menu at any time.
+            own <code>.vrm</code> / <code>.pmx</code> / <code>.pmd</code> model at any time without
+            waiting for brain weights.
           </p>
+          <div class="row">
+            <span class="what">Avatar model</span>
+            <button id="wiz-import-avatar" type="button">Import VRM / PMX Avatar…</button>
+            <span class="why">Supports VRoid Studio <code>.vrm</code> 1.0 and MMD <code>.pmx</code> models.</span>
+          </div>
           <label class="row">
             <span class="what">Language</span>
             <select id="wiz-language"></select>
@@ -98,13 +124,50 @@
         </div>
 
         <footer class="wizard-foot">
-          <button id="wiz-skip" type="button" class="quiet">Close</button>
+          <div class="wizard-left-actions">
+            <button id="wiz-minimize" type="button" class="quiet">Minimize to explore Settings</button>
+            <button id="wiz-skip" type="button" class="quiet">Close</button>
+          </div>
           <div class="wizard-nav">
             <button id="wiz-prev" type="button" class="quiet">Back</button>
             <button id="wiz-next" type="button">Next</button>
             <button id="wiz-finish" type="button" hidden>Finish &amp; Launch</button>
           </div>
         </footer>
+      </div>
+    </section>
+
+    <section id="quick-setup-bar" class="quick-setup-bar" aria-label="Search settings and posture presets">
+      <div class="search-bar-row">
+        <input
+          id="settings-search"
+          type="search"
+          placeholder="Search settings (voice, GPU, firewall, VRM, microphone, backup…)"
+          aria-label="Search settings"
+          autocomplete="off"
+        />
+        <button id="settings-search-clear" type="button" class="quiet" hidden>Clear</button>
+      </div>
+      <p id="settings-search-count" class="why" role="status" aria-live="polite"></p>
+      <div class="posture-wrap">
+        <div class="posture-head">
+          <strong>Quick Posture Presets</strong>
+          <span id="posture-active-label" class="why">Active: Custom</span>
+        </div>
+        <div id="posture-presets" class="posture-presets">
+          <button type="button" class="posture-btn" data-posture="companion" aria-pressed="false">
+            <span class="posture-title">Companion</span>
+            <span class="posture-desc">Chat, voice &amp; avatar only</span>
+          </button>
+          <button type="button" class="posture-btn" data-posture="desktop-helper" aria-pressed="false">
+            <span class="posture-title">Desktop Helper</span>
+            <span class="posture-desc">+ Screen, audio &amp; calendar</span>
+          </button>
+          <button type="button" class="posture-btn" data-posture="full-ship-ai" aria-pressed="false">
+            <span class="posture-title">Full Ship AI</span>
+            <span class="posture-desc">+ Hands, notices &amp; bridges</span>
+          </button>
+        </div>
       </div>
     </section>
 
@@ -320,6 +383,14 @@
           <div id="pair-qr" class="pair-qr" hidden>
             <div id="pair-qr-svg" class="pair-qr-svg" aria-label="QR pairing code"></div>
             <span id="pair-qr-caption" class="why">Scan with Astra Station on Android</span>
+            <details id="pair-firewall-help" class="traces pair-firewall-help">
+              <summary>Phone can&apos;t connect? Firewall help</summary>
+              <p id="pair-firewall-text" class="why"></p>
+              <div class="firewall-cmd-row">
+                <code id="pair-firewall-cmd" class="firewall-cmd"></code>
+                <button id="pair-firewall-copy" type="button" class="quiet">Copy command</button>
+              </div>
+            </details>
           </div>
         </div>
         <div class="row" id="station-devices" hidden>

@@ -262,6 +262,36 @@ export class MemoryStore {
     return true;
   }
 
+  async forgetIds(ids: readonly string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const drop = new Set(ids);
+    const before = this.memories.length;
+    this.memories = this.memories.filter((m) => !drop.has(m.id));
+    const removed = before - this.memories.length;
+    if (removed > 0) await this.persist();
+    return removed;
+  }
+
+  /** Removes memories newly created on or after `sinceIso` and returns their IDs. */
+  async forgetCreatedSince(sinceIso: string): Promise<string[]> {
+    const cutoff = Date.parse(sinceIso);
+    if (!Number.isFinite(cutoff)) return [];
+    const removedIds: string[] = [];
+    const kept: Memory[] = [];
+    for (const mem of this.memories) {
+      const createdMs = Date.parse(mem.createdAt);
+      if (Number.isFinite(createdMs) && createdMs >= cutoff) {
+        removedIds.push(mem.id);
+      } else {
+        kept.push(mem);
+      }
+    }
+    if (removedIds.length === 0) return [];
+    this.memories = kept;
+    await this.persist();
+    return removedIds;
+  }
+
   /** Search by shared words. Used as a fallback, and to break ties, beside search by meaning. */
   search(query: string, limit = 8, namespace?: string): Memory[] {
     return this.scored(query, namespace)

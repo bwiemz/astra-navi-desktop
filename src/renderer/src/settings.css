@@ -837,3 +837,181 @@ body[data-advanced="false"] .advanced-only {
 #safe-mode-banner[hidden] {
   display: none;
 }
+
+/* Search & quick posture presets bar */
+body[data-searching="true"][data-advanced="false"] .advanced-only {
+  display: grid;
+}
+
+body[data-searching="true"][data-advanced="false"] details.advanced-only {
+  display: block;
+}
+
+.search-miss {
+  display: none !important;
+}
+
+.quick-setup-bar {
+  max-width: 640px;
+  margin-bottom: 14px;
+  padding: 12px 16px;
+  background: var(--paper);
+  border: var(--outline);
+  border-radius: 14px;
+  box-shadow: var(--drop);
+  display: grid;
+  gap: 8px;
+}
+
+.search-bar-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.search-bar-row input[type="search"] {
+  flex: 1 1 auto;
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper);
+  border: 2px solid var(--ink);
+  border-radius: 9px;
+  padding: 6px 10px;
+  min-height: 36px;
+}
+
+.search-bar-row button {
+  width: auto;
+  flex: none;
+}
+
+.posture-wrap {
+  display: grid;
+  gap: 6px;
+}
+
+.posture-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.posture-presets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 560px) {
+  .posture-presets {
+    grid-template-columns: 1fr;
+  }
+}
+
+.posture-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  padding: 8px 10px;
+  background: var(--paper);
+}
+
+.posture-btn:hover {
+  background: var(--lemon);
+}
+
+.posture-btn.is-active {
+  background: var(--blush);
+}
+
+.posture-title {
+  font-weight: 800;
+  font-size: 13.5px;
+}
+
+.posture-desc {
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+/* Non-blocking download progress banner + wizard download card */
+.download-banner {
+  max-width: 640px;
+  margin: 0 0 14px;
+  background: #e9f7ff;
+}
+
+.download-banner-info {
+  flex: 1 1 260px;
+  display: grid;
+  gap: 4px;
+}
+
+.download-banner-info progress,
+.wiz-download-box progress {
+  width: 100%;
+  height: 12px;
+  accent-color: var(--blush);
+}
+
+.download-banner-actions,
+.wizard-left-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.download-banner-actions button,
+.wizard-left-actions button,
+.wiz-explore-row button,
+.wiz-dl-top button,
+.firewall-cmd-row button {
+  width: auto;
+  flex: none;
+}
+
+.wiz-download-box {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: #e9f7ff;
+  display: grid;
+  gap: 6px;
+}
+
+.wiz-dl-top,
+.wiz-explore-row,
+.firewall-cmd-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.disk-warn {
+  color: #a11a3b;
+  font-weight: 800;
+}
+
+.pair-firewall-help {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.firewall-cmd {
+  display: block;
+  flex: 1 1 220px;
+  padding: 5px 8px;
+  border: 1.5px solid var(--ink);
+  border-radius: 6px;
+  background: #f4f5fd;
+  font-size: 12px;
+  overflow-x: auto;
+  user-select: all;
+}

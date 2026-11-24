@@ -18,7 +18,11 @@ import {
   recommendHardwareTier,
   type HardwareProfile,
 } from "./hardwareTuner.ts";
-import { downloadModelResumable } from "./modelBundle.ts";
+import {
+  computeDownloadStats,
+  downloadModelResumable,
+  probeDiskSpace,
+} from "./modelBundle.ts";
 import {
   BRAIN_MODELS,
   isDownloaded,
@@ -29,7 +33,17 @@ import {
 } from "./models.ts";
 
 export type EngineStatus =
-  | { stage: "downloading"; label: string; received: number; total: number }
+  | {
+      stage: "downloading";
+      label: string;
+      received: number;
+      total: number;
+      bytesPerSec?: number;
+      etaSeconds?: number | null;
+      paused?: boolean;
+      error?: string | null;
+      freeDiskBytes?: number | null;
+    }
   | { stage: "loading"; label: string }
   | { stage: "ready"; label: string }
   /** The model has been put away to free its memory. */
@@ -38,6 +52,27 @@ export type EngineStatus =
       label: string;
       /** The game the memory was given back to. */ game?: string;
     };
+
+export interface ModelDownloadState {
+  state: "idle" | "downloading" | "paused" | "verifying" | "ready" | "error";
+  tier: string;
+  label: string;
+  received: number;
+  total: number;
+  bytesPerSec: number;
+  etaSeconds: number | null;
+  freeDiskBytes: number | null;
+  requiredBytes: number;
+  error: string | null;
+}
+
+export interface DiskSpaceCheck {
+  availableBytes: number;
+  requiredBytes: number;
+  enough: boolean;
+  label: string;
+  alreadyDownloaded: boolean;
+}
 
 export interface EngineOptions {
   modelsDir: string;
@@ -74,6 +109,7 @@ export interface EngineOptions {
   /** How soon after a reply the model is put away while a game is running. */
   yieldAfterMs?: number;
   onStatus(status: EngineStatus): void;
+  onDownloadUpdate?(state: ModelDownloadState): void;
 }
 
 /** While a game is running the card is looked at this often, and only while she rests with the model loaded. */
@@ -222,6 +258,23 @@ export class LocalEngine {
   private restingSince = 0;
   /** Lets a download in progress be cancelled. */
   private download: AbortController | null = null;
+  private bgDownloadPromise: Promise<ModelDownloadState> | null = null;
+  private bgDownloadAbort: AbortController | null = null;
+  private downloadPausedByUser = false;
+  private lastDownloadChoice: BrainChoice | undefined;
+  private dlState: ModelDownloadState = {
+    state: "idle",
+    tier: "",
+    label: "",
+    received: 0,
+    total: 0,
+    bytesPerSec: 0,
+    etaSeconds: null,
+    freeDiskBytes: null,
+    requiredBytes: 0,
+    error: null,
+  };
+  private downloadListener: ((state: ModelDownloadState) => void) | null = null;
   /** Work going on beside the conversation. It must have ended before the model is let go. */
   private readonly sideWorks = new Set<{ done: Promise<unknown>; stop: AbortController }>();
   /** One write-up at a time; see `sideQuestion`. */
@@ -232,6 +285,296 @@ export class LocalEngine {
 
   constructor(options: EngineOptions) {
     this.options = options;
+  }
+
+  /** Registers or replaces an observer for background model download progress. */
+  setDownloadListener(listener: ((state: ModelDownloadState) => void) | null): void {
+    this.downloadListener = listener;
+  }
+
+  downloadState(): ModelDownloadState {
+    return { ...this.dlState };
+  }
+
+  private emitDownloadState(next: ModelDownloadState): void {
+    this.dlState = next;
+    this.options.onDownloadUpdate?.({ ...next });
+    this.downloadListener?.({ ...next });
+  }
+
+  private async resolveModelForSetup(choice?: BrainChoice): Promise<ResolvedModel> {
+    const target = choice ?? this.options.choice;
+    let totalVram: number | null = null;
+    try {
+      this.llama ??= this.options.processorOnly
+        ? await getLlama({ gpu: false, maxThreads: this.options.processorOnly.threads })
+        : await getLlama();
+      if (this.llama.gpu !== false) {
+        totalVram = (await this.llama.getVramState()).total;
+      }
+    } catch {
+      totalVram = null;
+    }
+    return resolveBrain(target, this.options.modelsDir, totalVram);
+  }
+
+  /** Checks free disk space vs required download size (including 10% headroom). */
+  async checkDiskSpaceFor(choice?: BrainChoice): Promise<DiskSpaceCheck> {
+    const target = choice ?? this.options.choice;
+    const chosen = await this.resolveModelForSetup(target);
+    const alreadyDownloaded = await isDownloaded(chosen);
+    const needed = alreadyDownloaded ? 0 : chosen.download?.sizeBytes ?? 0;
+    const disk = await probeDiskSpace(this.options.modelsDir, needed);
+    return {
+      availableBytes: disk.availableBytes,
+      requiredBytes: disk.requiredBytes,
+      enough: disk.enough,
+      label: chosen.label,
+      alreadyDownloaded,
+    };
+  }
+
+  private createProgressTracker(
+    tier: string,
+    label: string,
+    totalFallback: number,
+    freeDiskBytes: number | null,
+    requiredBytes: number,
+  ): (progress: { received: number; total: number }) => void {
+    let lastAt = Date.now();
+    let lastBytes = -1;
+    let lastEmitAt = 0;
+    let ewmaBps = 0;
+    return ({ received, total }) => {
+      const effectiveTotal = total || totalFallback;
+      const now = Date.now();
+      if (lastBytes < 0) {
+        lastBytes = received;
+        lastAt = now;
+      } else {
+        const dt = (now - lastAt) / 1000;
+        const delta = received - lastBytes;
+        if (dt >= 0.15 && delta >= 0) {
+          const instBps = delta / dt;
+          ewmaBps = ewmaBps > 0 ? ewmaBps * 0.65 + instBps * 0.35 : instBps;
+          lastBytes = received;
+          lastAt = now;
+        }
+      }
+      const stats = computeDownloadStats({
+        received,
+        total: effectiveTotal,
+        bytesPerSec: ewmaBps,
+      });
+      const shouldEmit = now - lastEmitAt >= 200 || (effectiveTotal > 0 && received >= effectiveTotal);
+      if (!shouldEmit) return;
+      lastEmitAt = now;
+      this.options.onStatus({
+        stage: "downloading",
+        label,
+        received,
+        total: effectiveTotal,
+        bytesPerSec: ewmaBps,
+        etaSeconds: stats.etaSeconds,
+        paused: false,
+        freeDiskBytes,
+      });
+      this.emitDownloadState({
+        state:
+          effectiveTotal > 0 && received >= effectiveTotal ? "verifying" : "downloading",
+        tier,
+        label,
+        received,
+        total: effectiveTotal,
+        bytesPerSec: ewmaBps,
+        etaSeconds: stats.etaSeconds,
+        freeDiskBytes,
+        requiredBytes,
+        error: null,
+      });
+    };
+  }
+
+  /**
+   * Starts (or attaches to) a non-blocking resumable model download in the background so the
+   * user can continue onboarding, preview voices, or inspect their 3D avatar while weights fetch.
+   */
+  async startBackgroundDownload(choice?: BrainChoice): Promise<ModelDownloadState> {
+    const target = choice ?? this.options.choice;
+    this.lastDownloadChoice = target;
+    if (this.bgDownloadPromise && this.dlState.tier === String(target) && this.dlState.state === "downloading") {
+      return this.downloadState();
+    }
+    if (this.bgDownloadAbort) {
+      this.downloadPausedByUser = false;
+      this.bgDownloadAbort.abort();
+      await this.bgDownloadPromise?.catch(() => undefined);
+    }
+
+    const chosen = await this.resolveModelForSetup(target);
+    const dlSpec = chosen.download;
+    const totalBytes = dlSpec?.sizeBytes ?? 0;
+    const disk = await probeDiskSpace(this.options.modelsDir, totalBytes);
+    if (await isDownloaded(chosen)) {
+      const readyState: ModelDownloadState = {
+        state: "ready",
+        tier: String(target),
+        label: chosen.label,
+        received: totalBytes,
+        total: totalBytes,
+        bytesPerSec: 0,
+        etaSeconds: 0,
+        freeDiskBytes: disk.availableBytes,
+        requiredBytes: 0,
+        error: null,
+      };
+      this.emitDownloadState(readyState);
+      return readyState;
+    }
+    if (!dlSpec) {
+      const missingState: ModelDownloadState = {
+        state: "error",
+        tier: String(target),
+        label: chosen.label,
+        received: 0,
+        total: 0,
+        bytesPerSec: 0,
+        etaSeconds: null,
+        freeDiskBytes: disk.availableBytes,
+        requiredBytes: disk.requiredBytes,
+        error: `Custom model file does not exist: ${chosen.path}`,
+      };
+      this.emitDownloadState(missingState);
+      return missingState;
+    }
+
+    this.downloadPausedByUser = false;
+    const abort = new AbortController();
+    this.bgDownloadAbort = abort;
+    this.emitDownloadState({
+      state: "downloading",
+      tier: String(target),
+      label: chosen.label,
+      received: 0,
+      total: totalBytes,
+      bytesPerSec: 0,
+      etaSeconds: null,
+      freeDiskBytes: disk.availableBytes,
+      requiredBytes: disk.requiredBytes,
+      error: null,
+    });
+
+    const tracker = this.createProgressTracker(
+      String(target),
+      chosen.label,
+      totalBytes,
+      disk.availableBytes,
+      disk.requiredBytes,
+    );
+
+    const run = (async (): Promise<ModelDownloadState> => {
+      try {
+        await mkdir(this.options.modelsDir, { recursive: true });
+        await downloadModelResumable({
+          url: dlSpec.url,
+          destPath: chosen.path,
+          expectedSizeBytes: totalBytes,
+          expectedSha256: dlSpec.sha256,
+          signal: abort.signal,
+          cleanupPartialOnAbort: false,
+          onProgress: tracker,
+        });
+        const doneState: ModelDownloadState = {
+          state: "ready",
+          tier: String(target),
+          label: chosen.label,
+          received: totalBytes,
+          total: totalBytes,
+          bytesPerSec: 0,
+          etaSeconds: 0,
+          freeDiskBytes: disk.availableBytes,
+          requiredBytes: disk.requiredBytes,
+          error: null,
+        };
+        this.emitDownloadState(doneState);
+        return doneState;
+      } catch (error) {
+        if (abort.signal.aborted && this.downloadPausedByUser) {
+          const pausedState: ModelDownloadState = {
+            ...this.dlState,
+            state: "paused",
+            bytesPerSec: 0,
+            etaSeconds: null,
+            error: null,
+          };
+          this.options.onStatus({
+            stage: "downloading",
+            label: chosen.label,
+            received: pausedState.received,
+            total: pausedState.total,
+            bytesPerSec: 0,
+            etaSeconds: null,
+            paused: true,
+            freeDiskBytes: disk.availableBytes,
+          });
+          this.emitDownloadState(pausedState);
+          return pausedState;
+        }
+        const errMsg = error instanceof Error ? error.message : String(error);
+        const errState: ModelDownloadState = {
+          ...this.dlState,
+          state: "error",
+          bytesPerSec: 0,
+          etaSeconds: null,
+          error: errMsg,
+        };
+        this.options.onStatus({
+          stage: "downloading",
+          label: chosen.label,
+          received: errState.received,
+          total: errState.total,
+          bytesPerSec: 0,
+          etaSeconds: null,
+          paused: false,
+          error: errMsg,
+          freeDiskBytes: disk.availableBytes,
+        });
+        this.emitDownloadState(errState);
+        return errState;
+      } finally {
+        if (this.bgDownloadAbort === abort) {
+          this.bgDownloadAbort = null;
+          this.bgDownloadPromise = null;
+        }
+      }
+    })();
+
+    this.bgDownloadPromise = run;
+    return this.downloadState();
+  }
+
+  /** Pauses an in-progress background or active model download while preserving `.part` bytes. */
+  pauseDownload(): ModelDownloadState {
+    if (this.dlState.state !== "downloading" && !this.bgDownloadAbort && !this.download) {
+      return this.downloadState();
+    }
+    this.downloadPausedByUser = true;
+    this.bgDownloadAbort?.abort();
+    this.download?.abort();
+    const pausedState: ModelDownloadState = {
+      ...this.dlState,
+      state: "paused",
+      bytesPerSec: 0,
+      etaSeconds: null,
+      error: null,
+    };
+    this.emitDownloadState(pausedState);
+    return pausedState;
+  }
+
+  /** Resumes a paused download from where `.part` stopped via HTTP Range requests. */
+  async resumeDownload(): Promise<ModelDownloadState> {
+    return this.startBackgroundDownload(this.lastDownloadChoice ?? this.options.choice);
   }
 
   /** Switches to another model. It is loaded (and downloaded if needed) on the next message. */
@@ -749,6 +1092,9 @@ export class LocalEngine {
   private async unloadNow(forGame?: string): Promise<void> {
     this.cancelIdleUnload();
     this.download?.abort();
+    this.downloadPausedByUser = false;
+    this.bgDownloadAbort?.abort();
+    if (this.bgDownloadPromise) await this.bgDownloadPromise.catch(() => undefined);
     if (this.loading) await this.loading.catch(() => undefined);
     // Whoever owns a piece of side work closes it when told to stop; wait for that.
     const works = [...this.sideWorks];
@@ -838,12 +1184,46 @@ export class LocalEngine {
       }
     }
 
+    if (this.bgDownloadPromise) {
+      await this.bgDownloadPromise.catch(() => undefined);
+    }
+
     if (!(await isDownloaded(chosen))) {
       if (!chosen.download) throw new Error(`The model file ${chosen.path} does not exist.`);
       await mkdir(options.modelsDir, { recursive: true });
       const total = chosen.download.sizeBytes;
-      options.onStatus({ stage: "downloading", label: chosen.label, received: 0, total });
+      const disk = await probeDiskSpace(options.modelsDir, total);
+      options.onStatus({
+        stage: "downloading",
+        label: chosen.label,
+        received: 0,
+        total,
+        bytesPerSec: 0,
+        etaSeconds: null,
+        freeDiskBytes: disk.availableBytes,
+      });
       this.download = new AbortController();
+      this.lastDownloadChoice = options.choice;
+      this.downloadPausedByUser = false;
+      this.emitDownloadState({
+        state: "downloading",
+        tier: String(options.choice),
+        label: chosen.label,
+        received: 0,
+        total,
+        bytesPerSec: 0,
+        etaSeconds: null,
+        freeDiskBytes: disk.availableBytes,
+        requiredBytes: disk.requiredBytes,
+        error: null,
+      });
+      const tracker = this.createProgressTracker(
+        String(options.choice),
+        chosen.label,
+        total,
+        disk.availableBytes,
+        disk.requiredBytes,
+      );
       try {
         await downloadModelResumable({
           url: chosen.download.url,
@@ -851,14 +1231,20 @@ export class LocalEngine {
           expectedSizeBytes: total,
           expectedSha256: chosen.download.sha256,
           signal: this.download.signal,
-          onProgress: (progress) => {
-            options.onStatus({
-              stage: "downloading",
-              label: chosen.label,
-              received: progress.received,
-              total: progress.total || total,
-            });
-          },
+          cleanupPartialOnAbort: false,
+          onProgress: tracker,
+        });
+        this.emitDownloadState({
+          state: "ready",
+          tier: String(options.choice),
+          label: chosen.label,
+          received: total,
+          total,
+          bytesPerSec: 0,
+          etaSeconds: 0,
+          freeDiskBytes: disk.availableBytes,
+          requiredBytes: disk.requiredBytes,
+          error: null,
         });
       } finally {
         this.download = null;

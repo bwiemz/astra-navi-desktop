@@ -78,7 +78,25 @@ export function showStation(view: SettingsView, onView: (fresh: SettingsView) =>
       ? ` This PC's firewall (ufw) is on: allow her port once with "sudo ufw allow from ${network} to any port ${station.port} proto tcp".`
       : station.firewall === "firewalld"
         ? ` This PC's firewall (firewalld) is on: allow her port once with "sudo firewall-cmd --permanent --add-port=${station.port}/tcp" and then "sudo firewall-cmd --reload".`
-        : "";
+        : station.firewall === "windows-defender" || station.platform === "win32"
+          ? ` On Windows, make sure your Wi-Fi network is set to Private and allow TCP port ${station.port} in Windows Defender Firewall (or run the command under Firewall help below).`
+          : "";
+  const firewallCmd =
+    station.firewall === "ufw"
+      ? `sudo ufw allow from ${network || "192.168.0.0/16"} to any port ${station.port} proto tcp`
+      : station.firewall === "firewalld"
+        ? `sudo firewall-cmd --permanent --add-port=${station.port}/tcp && sudo firewall-cmd --reload`
+        : `netsh advfirewall firewall add rule name="Astra Navi Station" dir=in action=allow protocol=TCP localport=${station.port} profile=private`;
+  const firewallDesc =
+    station.firewall === "windows-defender" || station.platform === "win32"
+      ? "Windows Defender Firewall: make sure your Wi-Fi profile is set to Private, or run this in an Administrator Command Prompt / PowerShell:"
+      : station.firewall === "ufw"
+        ? "Ubuntu / ufw firewall detected: allow your local Wi-Fi subnet cleanly with:"
+        : station.firewall === "firewalld"
+          ? "firewalld detected: open only the local Station port with:"
+          : "If your phone times out scanning the QR code, allow incoming TCP on your LAN subnet:";
+  element("pair-firewall-text").textContent = firewallDesc;
+  element("pair-firewall-cmd").textContent = firewallCmd;
   element("station-note").textContent = open
     ? `Open this on the other device, https:// included: ${station.addresses.join(" or ")}. Its browser will warn that the certificate is self-made; it is the right one if its fingerprint ends in ${station.fingerprint?.slice(-47) ?? "?"}.${letThrough}`
     : station.on
@@ -217,5 +235,14 @@ export function wireDevices(onView: (fresh: SettingsView) => void): void {
         element("pair-qr").hidden = false;
       })
       .catch(() => stamp("The station is not open.", true));
+  });
+
+  element<HTMLButtonElement>("pair-firewall-copy").addEventListener("click", () => {
+    const cmd = element("pair-firewall-cmd").textContent ?? "";
+    if (!cmd) return;
+    void navigator.clipboard
+      ?.writeText(cmd)
+      .then(() => stamp("Copied firewall command"))
+      .catch(() => stamp("Select and copy the command above", true));
   });
 }

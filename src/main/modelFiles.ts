@@ -63,6 +63,7 @@ export interface ModelFiles {
     options?: { trustedPublicKeysPem?: readonly string[]; requireSignature?: boolean },
   ): Promise<CharacterBundleManifest>;
   packIntoBundle(file: string): Promise<number>;
+  importModelFile(filePath: string): Promise<{ ok: true; files: number; name: string } | { ok: false; error: string }>;
   registerProtocol(): void;
   importModel(): Promise<void>;
   removeModel(): Promise<void>;
@@ -172,6 +173,21 @@ export function createModelFiles(deps: ModelFilesDeps): ModelFiles {
     }
   }
 
+  async function importModelFile(
+    filePath: string,
+  ): Promise<{ ok: true; files: number; name: string } | { ok: false; error: string }> {
+    try {
+      const files = await packIntoBundle(filePath);
+      await loadModelBundle();
+      deps.sendToWindow("app:state", deps.appState(false));
+      const name = modelBundle?.info?.name?.trim() || "Custom Avatar";
+      console.log(`[model] imported ${files} files (${name})`);
+      return { ok: true, files, name };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   async function removeModel(): Promise<void> {
     const answer = await dialog.showMessageBox({
       type: "question",
@@ -204,6 +220,7 @@ export function createModelFiles(deps: ModelFilesDeps): ModelFiles {
     loadModelBundle,
     switchCharacterBundle,
     packIntoBundle,
+    importModelFile,
     registerProtocol,
     importModel,
     removeModel,

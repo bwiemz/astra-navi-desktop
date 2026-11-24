@@ -6,6 +6,7 @@ export interface StartupState {
   safeMode: boolean;
   lastStartAt: string;
   lastHealthyAt: string | null;
+  manualReason?: string | null;
 }
 
 export interface BootStartStatus {
@@ -46,6 +47,7 @@ export class StartupGuard {
         safeMode: raw.safeMode === true,
         lastStartAt: typeof raw.lastStartAt === "string" ? raw.lastStartAt : "",
         lastHealthyAt: typeof raw.lastHealthyAt === "string" ? raw.lastHealthyAt : null,
+        manualReason: typeof raw.manualReason === "string" ? raw.manualReason : null,
       };
     } catch {
       return { ...DEFAULT_STATE };
@@ -72,12 +74,14 @@ export class StartupGuard {
       safeMode,
       lastStartAt: now.toISOString(),
       lastHealthyAt: prev.lastHealthyAt,
+      manualReason: prev.manualReason ?? null,
     });
     return {
       safeMode,
       consecutiveCrashes,
       reason: safeMode
-        ? `Safe Mode active after ${consecutiveCrashes} consecutive interrupted startups. Optional background hooks (Screen Watch, Desktop Hands, PC Audio, Notification Watch, and Station auto-start) are paused until you clear Safe Mode.`
+        ? prev.manualReason ||
+          `Safe Mode active after ${consecutiveCrashes} consecutive interrupted startups. Optional background hooks (Screen Watch, Desktop Hands, PC Audio, Notification Watch, and Station auto-start) are paused until you clear Safe Mode.`
         : null,
     };
   }
@@ -89,6 +93,21 @@ export class StartupGuard {
       safeMode: prev.safeMode,
       lastStartAt: prev.lastStartAt || now.toISOString(),
       lastHealthyAt: now.toISOString(),
+      manualReason: prev.manualReason ?? null,
+    });
+  }
+
+  async requestSafeModeNextBoot(
+    reason = "Restarted in Safe Mode from the system tray. Optional background hooks are paused until you clear Safe Mode.",
+    now = new Date(),
+  ): Promise<void> {
+    const prev = await this.readState();
+    await this.writeState({
+      consecutiveCrashes: 0,
+      safeMode: true,
+      lastStartAt: prev.lastStartAt || now.toISOString(),
+      lastHealthyAt: now.toISOString(),
+      manualReason: reason,
     });
   }
 
@@ -99,6 +118,7 @@ export class StartupGuard {
       safeMode: false,
       lastStartAt: prev.lastStartAt || now.toISOString(),
       lastHealthyAt: now.toISOString(),
+      manualReason: null,
     });
   }
 }

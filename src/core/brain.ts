@@ -16,6 +16,7 @@ import type { EnvironmentFacts } from "./environment.ts";
 import type { MemoryStore } from "./memory.ts";
 import { MoodStream } from "./moodStream.ts";
 import { TOOLS, type PolicyContext, type RequestSummary } from "./permissions.ts";
+import type { PermissionRiskLevel } from "./riskRules.ts";
 import { ToolRouter } from "./toolRouter.ts";
 import {
   hardenFunctionsForGrammar,
@@ -332,6 +333,8 @@ export class Brain {
   private instructedFor: string | null = null;
   private disposed = false;
   private saveChain: Promise<void> = Promise.resolve();
+  /** Tracks the latest completed user turn for "Forget Last Turn" / "Edit & Resend". */
+  private lastTurnRecord: { startedAtIso: string; userText: string; archived: boolean } | null = null;
 
   constructor(deps: BrainDeps) {
     this.deps = deps;
@@ -426,6 +429,50 @@ export class Brain {
     }
   }
 
+  /** Removes the latest user turn and its reply/memory notes from context, archive, and recall. */
+  async forgetLastTurn(): Promise<{
+    removed: boolean;
+    userText: string | null;
+    forgottenMemories: number;
+  }> {
+    this.interrupt();
+    await this.whenIdle();
+    const history = this.deps.engine.getHistory();
+    let lastUserIdx = -1;
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i]?.type === "user") {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    const record = this.lastTurnRecord;
+    if (lastUserIdx === -1 && !record) {
+      return { removed: false, userText: null, forgottenMemories: 0 };
+    }
+    let userText = record?.userText ?? null;
+    if (lastUserIdx !== -1) {
+      if (userText === null) {
+        const entry = history[lastUserIdx] as { type: "user"; text?: unknown } | undefined;
+        if (typeof entry?.text === "string") userText = entry.text;
+      }
+      this.deps.engine.setHistory(history.slice(0, lastUserIdx));
+      this.turnsBegun += 1;
+      await this.saveHistory();
+    }
+    if (record?.archived || (this.deps.archive && lastUserIdx !== -1)) {
+      const removedArchive = await this.deps.archive?.removeLast();
+      if (userText === null && removedArchive?.said) userText = removedArchive.said;
+    }
+    let forgottenMemories = 0;
+    if (record?.startedAtIso) {
+      const droppedIds = await this.deps.memory.forgetCreatedSince(record.startedAtIso);
+      forgottenMemories = droppedIds.length;
+      this.deps.recall?.drop(droppedIds);
+    }
+    this.lastTurnRecord = null;
+    this.saidBefore = undefined;
+    return { removed: true, userText, forgottenMemories };
+  }
   /** Forgets the current conversation thread. Long-term memory is untouched. */
   async newConversation(options: { keepLoaded?: boolean } = {}): Promise<void> {
     this.interrupt();
@@ -439,6 +486,7 @@ export class Brain {
     this.notesGiven.clear();
     this.toolsOfLate.length = 0;
     this.saidBefore = undefined;
+    this.lastTurnRecord = null;
     this.clock.reset();
     this.deps.screen?.reset();
     this.readOutsideText = false;
@@ -813,7 +861,20 @@ export class Brain {
       } else if (!signal.aborted && !message.event) {
         this.turnsSinceTool += 1;
       }
-      if (!signal.aborted) this.journal(message, falseClaim);
+      if (!signal.aborted) {
+        if (!message.event && !message.correction) {
+          this.lastTurnRecord = {
+            startedAtIso: new Date(traceBegan).toISOString(),
+            userText: message.text,
+            archived:
+              Boolean(deps.archive) &&
+              deps.config.value.keepConversations &&
+              !falseClaim &&
+              !this.turnReadUnsaved,
+          };
+        }
+        this.journal(message, falseClaim);
+      }
       if (!signal.aborted && deps.onTrace) {
         const meterAfter = deps.engine.meter();
         const withheld = this.turnReadUnsaved;
@@ -1187,7 +1248,11 @@ export class Brain {
 
   /** Puts one question in front of the user and waits for the answer. */
   private askUser(
-    request: RequestSummary & { sensitive: boolean; rememberable: boolean },
+    request: RequestSummary & {
+      sensitive: boolean;
+      rememberable: boolean;
+      risk?: PermissionRiskLevel;
+    },
   ): Promise<boolean> {
     const canRemember = request.rememberable && !request.sensitive;
     const key = `${request.title}\u0000${request.detail}`;
@@ -1219,6 +1284,9 @@ export class Brain {
           note: request.note,
           sensitive: request.sensitive,
           canRemember,
+          ...(request.risk ? { risk: request.risk } : {}),
+          ...(request.diff !== undefined ? { diff: request.diff } : {}),
+          ...(request.rawCommand !== undefined ? { rawCommand: request.rawCommand } : {}),
         },
       });
     });

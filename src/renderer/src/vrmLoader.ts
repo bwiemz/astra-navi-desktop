@@ -38,8 +38,12 @@ export interface LoadedVrmRig {
   setBoneLocalRotation(boneName: string, rotation: Quaternion): void;
   /** Advances spring-bone physics chains (`VRMC_springBone`) by `dt` seconds. */
   stepSpringBones(dt: number): void;
-  /** Applies custom outline / specular toon overrides cleanly. */
-  applyShaderPreset(preset: { specularScale?: number }): void;
+  /** Applies custom outline / specular / rim toon overrides cleanly. */
+  applyShaderPreset(preset: {
+    specularScale?: number;
+    rimLight?: number;
+    outlineThickness?: number;
+  }): void;
   dispose(): void;
 }
 
@@ -168,6 +172,7 @@ export async function loadVrmIntoScene(
       }
       materials.push(mat);
     }
+    const baseAmbients = materials.map((mat) => mat.ambientColor.clone());
 
     // --- Scene node hierarchy (cycle-safe) --------------------------------
     for (let idx = 0; idx < doc.nodes.length; idx += 1) {
@@ -506,10 +511,38 @@ export async function loadVrmIntoScene(
       });
     };
 
-    const applyShaderPreset = (preset: { specularScale?: number }): void => {
-      if (typeof preset.specularScale !== "number" || !Number.isFinite(preset.specularScale)) return;
-      for (const mat of materials) {
-        mat.specularPower = Math.max(1, 24 * preset.specularScale);
+    const applyShaderPreset = (preset: {
+      specularScale?: number;
+      rimLight?: number;
+      outlineThickness?: number;
+    }): void => {
+      if (typeof preset.specularScale === "number" && Number.isFinite(preset.specularScale)) {
+        for (const mat of materials) {
+          mat.specularPower = Math.max(1, 24 * preset.specularScale);
+        }
+      }
+      if (typeof preset.rimLight === "number" && Number.isFinite(preset.rimLight)) {
+        const lift = Math.max(0, preset.rimLight - 1) * 0.22;
+        const scale = Math.max(0.4, Math.min(1.8, preset.rimLight));
+        for (let i = 0; i < materials.length; i += 1) {
+          const mat = materials[i];
+          const base = baseAmbients[i];
+          if (!mat || !base) continue;
+          mat.ambientColor = new Color3(
+            Math.min(1, base.r * scale),
+            Math.min(1, base.g * scale),
+            Math.min(1, base.b * scale),
+          );
+          mat.emissiveColor = new Color3(lift, lift, lift);
+        }
+      }
+      if (typeof preset.outlineThickness === "number" && Number.isFinite(preset.outlineThickness)) {
+        const thickness = Math.max(0, Math.min(2.5, preset.outlineThickness));
+        for (const mesh of meshes) {
+          mesh.renderOutline = thickness > 0.05;
+          mesh.outlineWidth = 0.008 * thickness;
+          mesh.outlineColor = new Color3(0.11, 0.12, 0.23);
+        }
       }
     };
 

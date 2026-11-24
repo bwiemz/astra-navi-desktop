@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, hkdfSync, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, scryptSync } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import {
@@ -85,6 +85,8 @@ interface BundleIndex {
 }
 
 export interface ModelBundle {
+  /** Short SHA-256 content identifier of the entry model file for per-model UI persistence. */
+  hash?: string;
   info: ModelInfo | null;
   /** Path of the model file inside the bundle, with forward slashes. */
   entry: string;
@@ -333,7 +335,26 @@ export async function openModelBundle(
   }
   const body = raw.subarray(cursor + indexLength);
 
+  const entryKey = normalizePath(index.entry);
+  const entryMeta = index.files[entryKey];
+  let hash = createHash("sha256").update(index.entry).digest("hex").slice(0, 16);
+  if (entryMeta) {
+    try {
+      const entryPlain = unseal(
+        subKey(master, salt, `file:${entryKey}`),
+        Buffer.from(entryMeta.iv, "base64"),
+        Buffer.from(entryMeta.tag, "base64"),
+        body.subarray(entryMeta.offset, entryMeta.offset + entryMeta.length),
+        entryKey,
+      );
+      hash = createHash("sha256").update(entryPlain).digest("hex").slice(0, 16);
+    } catch {
+      // Fallback hash above keeps bundle loading intact if get() handles error reporting.
+    }
+  }
+
   return {
+    hash,
     info: index.info ?? null,
     entry: index.entry,
     fileCount: Object.keys(index.files).length,
@@ -377,13 +398,18 @@ export async function openLooseModelFolder(modelPath: string): Promise<ModelBund
   const files = new Map<string, Buffer>();
   let info: ModelInfo | null = null;
 
+  let hash = createHash("sha256").update(resolvedModel).digest("hex").slice(0, 16);
   for (const file of wanted) {
     const plain = await readFile(file);
-    if (file === resolvedModel) info = readModelInfo(plain);
+    if (file === resolvedModel) {
+      info = readModelInfo(plain);
+      hash = createHash("sha256").update(plain).digest("hex").slice(0, 16);
+    }
     files.set(normalizePath(relative(root, file)), plain);
   }
 
   return {
+    hash,
     info,
     entry: relative(root, resolvedModel).split(sep).join("/"),
     fileCount: files.size,
@@ -449,6 +475,60 @@ export interface ResumableDownloadOptions {
   headroomRatio?: number;
   fetchImpl?: typeof fetch;
   onProgress?: (progress: { received: number; total: number }) => void;
+}
+
+/** Computes percentage, MB/s throughput, and remaining ETA seconds for a model download. */
+export function computeDownloadStats(input: {
+  received: number;
+  total: number;
+  bytesPerSec: number;
+}): { percent: number; mbPerSec: number; etaSeconds: number | null } {
+  const received = Math.max(0, Number.isFinite(input.received) ? input.received : 0);
+  const total = Math.max(0, Number.isFinite(input.total) ? input.total : 0);
+  const bytesPerSec = Math.max(0, Number.isFinite(input.bytesPerSec) ? input.bytesPerSec : 0);
+  const percent = total > 0 ? Math.max(0, Math.min(100, (received / total) * 100)) : 0;
+  const mbPerSec = bytesPerSec / 1e6;
+  const remaining = Math.max(0, total - received);
+  const etaSeconds =
+    total > 0 && remaining === 0
+      ? 0
+      : bytesPerSec >= 1024 && remaining > 0
+        ? Math.ceil(remaining / bytesPerSec)
+        : null;
+  return { percent, mbPerSec, etaSeconds };
+}
+
+/**
+ * Checks free disk space in `dir` without throwing so onboarding UI can display
+ * available vs required space side-by-side.
+ */
+export async function probeDiskSpace(
+  dir: string,
+  requiredBytes: number,
+  headroomRatio = 1.1,
+): Promise<{ availableBytes: number; requiredBytes: number; enough: boolean }> {
+  const neededBytes = Math.max(0, Math.ceil(requiredBytes * headroomRatio));
+  let probeDir = resolve(dir);
+  while (true) {
+    try {
+      const info = await statfs(probeDir);
+      const availableBytes = Number(info.bavail) * Number(info.bsize);
+      return {
+        availableBytes,
+        requiredBytes: neededBytes,
+        enough: neededBytes === 0 || availableBytes >= neededBytes,
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        const parent = dirname(probeDir);
+        if (parent === probeDir) break;
+        probeDir = parent;
+        continue;
+      }
+      return { availableBytes: 0, requiredBytes: neededBytes, enough: neededBytes === 0 };
+    }
+  }
+  return { availableBytes: 0, requiredBytes: neededBytes, enough: neededBytes === 0 };
 }
 
 /**

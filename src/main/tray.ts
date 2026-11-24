@@ -74,6 +74,12 @@ export interface TrayDeps {
   toldStopped(): void;
   importModel(): Promise<void>;
   removeModel(): Promise<void>;
+  clickThrough?: () => boolean;
+  setClickThrough?: (on: boolean) => void;
+  resetWindowToPrimary?: () => void;
+  forceReleaseVram?: () => Promise<void>;
+  restartInSafeMode?: () => Promise<void>;
+  exportSupportBundle?: () => Promise<void>;
 }
 
 export interface TrayMenu {
@@ -111,6 +117,19 @@ export function createTrayMenu(deps: TrayDeps): TrayMenu {
           label: "Show or hide",
           click: () =>
             deps.mainWindow()?.isVisible() ? deps.mainWindow()?.hide() : deps.showWindow(false),
+        },
+        {
+          label: "Reset window to primary monitor",
+          click: () => deps.resetWindowToPrimary?.(),
+        },
+        {
+          label: "Click-through lock",
+          type: "checkbox",
+          checked: deps.clickThrough?.() ?? false,
+          click: (item) => {
+            deps.setClickThrough?.(item.checked);
+            rebuildTrayMenu();
+          },
         },
         { type: "separator" },
         {
@@ -290,8 +309,24 @@ export function createTrayMenu(deps: TrayDeps): TrayMenu {
             void deps.setHandsOff(item.checked).catch((error: unknown) => console.error(error)),
         },
         {
+          label: "Force release GPU VRAM",
+          click: () =>
+            void deps.forceReleaseVram?.().catch((error: unknown) => console.error(error)),
+        },
+        { type: "separator" },
+        {
           label: "Check her systems…",
           click: () => void deps.showSelfCheck().catch((error: unknown) => console.error(error)),
+        },
+        {
+          label: "Restart in Safe Mode",
+          click: () =>
+            void deps.restartInSafeMode?.().catch((error: unknown) => console.error(error)),
+        },
+        {
+          label: "Export Support Bundle…",
+          click: () =>
+            void deps.exportSupportBundle?.().catch((error: unknown) => console.error(error)),
         },
         {
           label: "What she has done…",
