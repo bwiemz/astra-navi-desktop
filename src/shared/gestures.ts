@@ -2,6 +2,7 @@
  * Expanded catalog of mocap-inspired conversation gestures and kinematic evaluation curves
  * shared between the 3D WebGL stage (`renderer/src/stage.ts`), plugins, and unit tests.
  */
+import type { ExpressiveCueFrame } from "./visemes.ts";
 
 export const GESTURES = {
   nod: 0.9,
@@ -95,4 +96,38 @@ export function evaluateGestureMotion(kind: Gesture, phase: number): GestureMoti
       break;
   }
   return out;
+}
+
+export interface ExpressiveGestureBlend extends GestureMotionSample {
+  eyebrowRaise: number;
+  headTiltDeg: number;
+  emphasis: number;
+  laughBounce: number;
+  postureEnergy: number;
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+/** Merges real-time vocal cue envelopes into the base procedural gesture motion sample. */
+export function blendExpressiveGesture(
+  base: GestureMotionSample,
+  cue: Pick<
+    ExpressiveCueFrame,
+    "emphasis" | "pause" | "laugh" | "eyebrowRaise" | "headTiltDeg" | "nodDrive" | "postureEnergy"
+  >,
+): ExpressiveGestureBlend {
+  const nodAdd = cue.pause ? 0 : cue.nodDrive * 0.45;
+  const perkAdd = clamp01(cue.emphasis * 0.35 + cue.laugh * 0.4);
+  return {
+    ...base,
+    nod: Math.max(-1, Math.min(1, base.nod + nodAdd)),
+    perk: clamp01(base.perk + perkAdd),
+    eyebrowRaise: clamp01(cue.eyebrowRaise),
+    headTiltDeg: Math.max(-15, Math.min(15, cue.headTiltDeg)),
+    emphasis: clamp01(cue.emphasis),
+    laughBounce: clamp01(cue.laugh),
+    postureEnergy: Math.max(0.5, Math.min(1.6, cue.postureEnergy)),
+  };
 }

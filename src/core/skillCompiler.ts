@@ -33,7 +33,12 @@ export const SkillStepSchema = z.object({
 });
 export type SkillStep = z.infer<typeof SkillStepSchema>;
 
-export const CompiledSkillStatusSchema = z.enum(["proposed", "active", "needs_recalibration"]);
+export const CompiledSkillStatusSchema = z.enum([
+  "proposed",
+  "active",
+  "needs_recalibration",
+  "revoked",
+]);
 export type CompiledSkillStatus = z.infer<typeof CompiledSkillStatusSchema>;
 
 export const CompiledSkillSchema = z.object({
@@ -449,6 +454,18 @@ export class CompiledSkillStore {
     skill.ratifiedAt = nowIso;
     skill.updatedAt = nowIso;
     skill.driftReason = null;
+    await this.persist();
+    return structuredClone(skill);
+  }
+
+  /** Revokes a compiled skill so it cannot be executed until rebuilt. */
+  async revoke(id: string): Promise<CompiledSkill> {
+    const skill = this.skills.find((s) => s.id === id);
+    if (!skill) throw new Error(`Unknown compiled skill "${id}".`);
+    const nowIso = this.now().toISOString();
+    skill.status = "revoked";
+    skill.updatedAt = nowIso;
+    skill.driftReason = "Revoked via Mission Control.";
     await this.persist();
     return structuredClone(skill);
   }

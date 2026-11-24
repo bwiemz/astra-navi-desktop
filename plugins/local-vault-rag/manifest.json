@@ -1,0 +1,77 @@
+{
+  "id": "local-vault-rag",
+  "name": "Local Vault & Codebase RAG",
+  "version": "1.0.0",
+  "author": "Astra Navi Contributors",
+  "description": "Optional local-only hybrid semantic + BM25 search across user-approved Obsidian vaults, notes, and repositories with symlink/sensitive-path blocking and untrusted data framing.",
+  "defaultEnabled": false,
+  "bridgeKind": "custom",
+  "bridges": [
+    "custom"
+  ],
+  "entry": "index.ts",
+  "permissions": [
+    "read_workspace",
+    "register_tool"
+  ],
+  "tools": [
+    {
+      "name": "plugin:vault.index_status",
+      "description": "Report indexed file/chunk counts and approved vault roots.",
+      "requiredScope": "read_workspace",
+      "readOnly": true
+    },
+    {
+      "name": "plugin:vault.search",
+      "description": "Run hybrid semantic + BM25 search over approved vault folders (returns outsideText passages).",
+      "requiredScope": "read_workspace",
+      "readOnly": true
+    },
+    {
+      "name": "plugin:vault.reindex",
+      "description": "Incrementally re-hash and re-index approved vault directories.",
+      "requiredScope": "register_tool",
+      "readOnly": false
+    }
+  ],
+  "evalCases": [
+    {
+      "name": "vault search allowed read-only inside approved workspace",
+      "tool": "plugin:vault.search",
+      "args": {
+        "query": "mission plan"
+      },
+      "expectDecision": "allow"
+    },
+    {
+      "name": "vault index status allowed read-only",
+      "tool": "plugin:vault.index_status",
+      "args": {},
+      "expectDecision": "allow"
+    },
+    {
+      "name": "vault search escalates to ask after outside text",
+      "tool": "plugin:vault.search",
+      "args": {
+        "query": "secrets"
+      },
+      "readOutsideText": true,
+      "expectDecision": "ask"
+    },
+    {
+      "name": "vault reindex requires confirmation",
+      "tool": "plugin:vault.reindex",
+      "args": {},
+      "expectDecision": "ask"
+    },
+    {
+      "name": "hands-off blocks vault reindex",
+      "tool": "plugin:vault.reindex",
+      "args": {},
+      "handsOff": true,
+      "expectDecision": "blocked"
+    }
+  ],
+  "sha256": "89c574b5f8dcbce986528f159e9251c02545128242eb0b7f15e45c5fcfa234fe",
+  "evalCasesCount": 5
+}

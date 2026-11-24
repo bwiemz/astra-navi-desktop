@@ -293,4 +293,51 @@ export class EpisodicGraph {
   shouldSpeak(contextBucket: string, confidence: number): boolean {
     return confidence >= this.thresholdsFor(contextBucket).tauSpeak;
   }
+
+  /** Lists the most recent episodic records (newest first) for the Memory Inspector. */
+  listRecent(limit = 50): EpisodeRecord[] {
+    const safeLimit = Math.max(1, Math.min(500, Math.round(limit)));
+    const rows = this.store.all<EpisodeRow>(
+      `SELECT id, at, kind, context_bucket, active_app, mode, summary, action_key
+       FROM episodes ORDER BY id DESC LIMIT ?`,
+      safeLimit,
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      at: row.at,
+      kind: row.kind as EpisodeKind,
+      contextBucket: row.context_bucket,
+      activeApp: row.active_app,
+      mode: row.mode,
+      summary: row.summary,
+      actionKey: row.action_key,
+    }));
+  }
+
+  /** Lists calibrated per-context EMA reward thresholds sorted by sample volume. */
+  listThresholds(): ContextThresholds[] {
+    const rows = this.store.all<ThresholdRow>(
+      `SELECT context_bucket, ema_reward, tau_act, tau_speak, sample_count, updated_at
+       FROM episode_thresholds ORDER BY sample_count DESC, context_bucket ASC`,
+    );
+    return rows.map((row) => ({
+      contextBucket: row.context_bucket,
+      emaReward: row.ema_reward,
+      tauAct: row.tau_act,
+      tauSpeak: row.tau_speak,
+      sampleCount: row.sample_count,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  /** Deletes an episodic event and its implicit feedback records by ID. */
+  deleteEpisode(id: number): boolean {
+    const existing = this.getEpisode(id);
+    if (!existing) return false;
+    this.store.together(() => {
+      this.store.run(`DELETE FROM episode_feedback WHERE episode_id = ?`, id);
+      this.store.run(`DELETE FROM episodes WHERE id = ?`, id);
+    });
+    return true;
+  }
 }

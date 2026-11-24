@@ -58,6 +58,7 @@ export interface TrayDeps {
   nameRequired(): boolean;
   showWindow(focusInput: boolean): void;
   openSettings(): void;
+  openMissionControl?: () => void;
   sendToWindow(channel: string, payload?: unknown): void;
   chooseBrain(choice: string): void;
   chooseLanguage(language: LanguageCode): void;
@@ -113,6 +114,9 @@ export function createTrayMenu(deps: TrayDeps): TrayMenu {
       Menu.buildFromTemplate([
         { label: "Talk to Astra Navi", click: () => deps.showWindow(true) },
         { label: "Settings…", click: deps.openSettings },
+        ...(deps.openMissionControl
+          ? [{ label: "Mission Control…", click: deps.openMissionControl }]
+          : []),
         {
           label: "Show or hide",
           click: () =>

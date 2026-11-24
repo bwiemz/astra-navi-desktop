@@ -399,3 +399,64 @@ describe("TrainingSink", () => {
     await expect(stat(sftFile)).rejects.toThrow();
   });
 });
+
+describe("Qwen3.5 SFT template & specialist domain routing", () => {
+  it("formats native Qwen3.5 tool schemas and <function=NAME><parameter=params> calls", async () => {
+    const { buildQwen35ToolsSection } = await import("../src/core/trainingExport.ts");
+    const { estimateSpecialistPromptTokens, inferSpecialistDomain } = await import(
+      "../src/core/loraAgents.ts"
+    );
+
+    const toolsBlock = buildQwen35ToolsSection(["ship_status", "read_file"], {
+      ship_status: {
+        description: "Check ship vitals.",
+        parameters: { type: "object", properties: { detail: { type: "string" } } },
+      },
+      read_file: {
+        description: "Read a file.",
+        parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      },
+    });
+    expect(toolsBlock).toContain("# Tools");
+    expect(toolsBlock).toContain("<tools>");
+    expect(toolsBlock).toContain('"name":"ship_status"');
+    expect(toolsBlock).toContain("<function=...></function>");
+
+    const ex = formatQwenSft({
+      id: "q35-1",
+      prompt: "Check ship health now.",
+      offered: ["ship_status"],
+      calls: [
+        makeCall({
+          tool: "ship_status",
+          input: JSON.stringify({ detail: "full" }),
+          outcome: "done",
+          result: "OK",
+        }),
+      ],
+      reply: "All systems nominal.",
+      chatTemplate: "qwen3.5",
+      toolSchemas: {
+        ship_status: { description: "Check ship vitals.", parameters: { type: "object" } },
+      },
+    });
+    expect(ex).not.toBeNull();
+    if (!ex) throw new Error("expected Qwen3.5 SFT example");
+    expect(ex.text).toContain("<think>\n\n</think>\n\n<tool_call>\n<function=ship_status>\n<parameter=params>\n");
+    expect(ex.text).toContain('{"detail":"full"}');
+    expect(ex.text).toContain("</parameter>\n</function>\n</tool_call><|im_end|>");
+    expect(ex.spans).toHaveLength(2);
+    for (const [start, end] of ex.spans) {
+      expect(end).toBeGreaterThan(start);
+      expect(Array.from(ex.text).slice(start, end).join("")).toContain("<think>\n\n</think>");
+    }
+
+    expect(inferSpecialistDomain("Check CPU load on proxmox node over SSH")).toBe("fleet-systems");
+    expect(inferSpecialistDomain("Schedule a reminder tomorrow and check calendar")).toBe(
+      "logistics-scheduling",
+    );
+    const tokStats = estimateSpecialistPromptTokens("fleet-systems");
+    expect(tokStats.estimatedPromptTokens).toBeGreaterThan(100);
+    expect(tokStats.tokensSaved).toBeGreaterThan(3000);
+  });
+});

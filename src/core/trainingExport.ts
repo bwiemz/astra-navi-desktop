@@ -28,6 +28,13 @@ export interface PreferencePair {
   };
 }
 
+export interface ToolSchemaSummary {
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+export type SftTemplate = "qwen3" | "qwen3.5";
+
 export interface SftExample {
   id: string;
   text: string;
@@ -85,9 +92,43 @@ function codePointLength(value: string): number {
   return count;
 }
 
+export function buildQwen35ToolsSection(
+  offered: readonly string[],
+  toolSchemas?: Record<string, ToolSchemaSummary>,
+): string {
+  if (offered.length === 0) return "";
+  const schemas = offered
+    .map((name) => {
+      const schema = toolSchemas?.[name];
+      return JSON.stringify({
+        type: "function",
+        function: {
+          name,
+          ...(schema?.description ? { description: schema.description } : { description: `Invoke ${name}.` }),
+          parameters: schema?.parameters ?? { type: "object", properties: {} },
+        },
+      });
+    })
+    .join("\n");
+  return (
+    "\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n" +
+    `${schemas}\n</tools>\n\n` +
+    "If you choose to call a function ONLY reply in the following format with NO suffix:\n\n" +
+    "<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n" +
+    "<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n" +
+    "</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n" +
+    "- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n" +
+    "- Required parameters MUST be specified\n" +
+    "- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n" +
+    "- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n" +
+    "</IMPORTANT>"
+  );
+}
+
 /**
  * Formats a single request + verified tool trajectory into Qwen ChatML with Unicode code-point
  * assistant `spans` covering every assistant tool-call block and final answer for `train/lora.py`.
+ * Supports both compact `qwen3` JSON calls and native `qwen3.5` (`QwenChatWrapper variation "3.5"`) format.
  */
 export function formatQwenSft(params: {
   id: string;
@@ -97,15 +138,22 @@ export function formatQwenSft(params: {
   calls: readonly TracedCall[];
   reply: string;
   meta?: SftExample["meta"];
+  chatTemplate?: SftTemplate;
+  toolSchemas?: Record<string, ToolSchemaSummary>;
 }): SftExample | null {
   const prompt = params.prompt.trim();
   const reply = params.reply.trim();
   if (!prompt || !reply) return null;
 
+  const template: SftTemplate = params.chatTemplate ?? "qwen3";
   const baseSystem = (params.system ?? "").trim() || DEFAULT_SYSTEM_PROMPT;
-  const toolsLine =
-    params.offered.length > 0 ? `\n\nAvailable tools: ${params.offered.join(", ")}.` : "";
-  const systemBlock = `${baseSystem}${toolsLine}`;
+  const toolsBlock =
+    template === "qwen3.5"
+      ? buildQwen35ToolsSection(params.offered, params.toolSchemas)
+      : params.offered.length > 0
+        ? `\n\nAvailable tools: ${params.offered.join(", ")}.`
+        : "";
+  const systemBlock = `${baseSystem}${toolsBlock}`;
 
   let text = "";
   let cursor = 0;
@@ -121,11 +169,18 @@ export function formatQwenSft(params: {
     if (call.outcome !== "done") continue;
     append("<|im_start|>assistant\n");
     const start = cursor;
-    const payload = JSON.stringify({
-      name: call.tool,
-      arguments: parseJsonInput(call.input),
-    });
-    append(`<tool_call>\n${payload}\n</tool_call><|im_end|>`);
+    if (template === "qwen3.5") {
+      const parsedArgs = JSON.stringify(parseJsonInput(call.input));
+      append(
+        `<think>\n\n</think>\n\n<tool_call>\n<function=${call.tool}>\n<parameter=params>\n${parsedArgs}\n</parameter>\n</function>\n</tool_call><|im_end|>`,
+      );
+    } else {
+      const payload = JSON.stringify({
+        name: call.tool,
+        arguments: parseJsonInput(call.input),
+      });
+      append(`<tool_call>\n${payload}\n</tool_call><|im_end|>`);
+    }
     const end = cursor;
     spans.push([start, end]);
     append(`\n<|im_start|>user\n<tool_response>\n${call.result}\n</tool_response><|im_end|>\n`);
@@ -133,7 +188,11 @@ export function formatQwenSft(params: {
 
   append("<|im_start|>assistant\n");
   const replyStart = cursor;
-  append(`${reply}<|im_end|>`);
+  if (template === "qwen3.5") {
+    append(`<think>\n\n</think>\n\n${reply}<|im_end|>`);
+  } else {
+    append(`${reply}<|im_end|>`);
+  }
   const replyEnd = cursor;
   spans.push([replyStart, replyEnd]);
 
@@ -155,6 +214,8 @@ export interface ExtractTrainingOptions {
   /** When true, only distill clean examples from Standard/Large teacher brains. */
   teacherOnlyForClean?: boolean;
   systemPrompt?: string;
+  chatTemplate?: SftTemplate;
+  toolSchemas?: Record<string, ToolSchemaSummary>;
 }
 
 /**
@@ -193,6 +254,8 @@ export function extractTrainingData(
       calls: pair.accepted.calls,
       reply: pair.accepted.reply,
       meta: { source: "corrected", from: options.from, brain: pair.brain },
+      chatTemplate: options.chatTemplate,
+      toolSchemas: options.toolSchemas,
     });
     if (example) sft.push(example);
   }
@@ -209,6 +272,8 @@ export function extractTrainingData(
         calls: clean.calls,
         reply: clean.reply,
         meta: { source: "clean", from: options.from, brain: clean.brain },
+        chatTemplate: options.chatTemplate,
+        toolSchemas: options.toolSchemas,
       });
       if (example) sft.push(example);
     }
@@ -232,7 +297,12 @@ export interface ReportLikeForTraining {
 /** Extracts preference pairs and distilled SFT examples from an eval report. */
 export function extractReportTrainingData(
   report: ReportLikeForTraining,
-  options: { teacherOnlyForClean?: boolean; systemPrompt?: string } = {},
+  options: {
+    teacherOnlyForClean?: boolean;
+    systemPrompt?: string;
+    chatTemplate?: SftTemplate;
+    toolSchemas?: Record<string, ToolSchemaSummary>;
+  } = {},
 ): { pairs: PreferencePair[]; sft: SftExample[]; runsWithoutTraces: number } {
   const pairs: PreferencePair[] = [];
   const sft: SftExample[] = [];
@@ -253,6 +323,8 @@ export function extractReportTrainingData(
         includeClean: run.pass,
         teacherOnlyForClean: options.teacherOnlyForClean,
         systemPrompt: options.systemPrompt,
+        chatTemplate: options.chatTemplate,
+        toolSchemas: options.toolSchemas,
       });
       if (rightInEnd) pairs.push(...runPairs);
       for (const item of runSft) {

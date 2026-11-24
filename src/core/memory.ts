@@ -36,6 +36,8 @@ const MemorySchema = z.object({
   updatedAt: z.string(),
   /** How often this came up: found in a search, discussed again, or done again. */
   hits: z.number().default(0),
+  /** Pinned notes stay prioritized in Mission Control's inspector and recall views. */
+  pinned: z.boolean().optional(),
   /** Optional household vault namespace isolating one family member's notes from another's. */
   namespace: z.string().optional(),
 });
@@ -249,6 +251,16 @@ export class MemoryStore {
     const trimmed = oneLine(text);
     if (trimmed.length === 0) throw new Error("A memory needs some text.");
     memory.text = trimmed;
+    memory.updatedAt = new Date().toISOString();
+    await this.persist();
+    return memory;
+  }
+
+  /** Marks or unmarks a stored note as pinned without rewriting its creation time. */
+  async pin(id: string, pinned: boolean): Promise<Memory | null> {
+    const memory = this.memories.find((m) => m.id === id);
+    if (!memory) return null;
+    memory.pinned = pinned;
     memory.updatedAt = new Date().toISOString();
     await this.persist();
     return memory;

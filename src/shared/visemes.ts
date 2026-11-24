@@ -291,3 +291,81 @@ export function estimateSpokenOffset(
     ratio,
   };
 }
+
+/** Per-frame audio-driven expressive modulation cues aligned with playback time. */
+export interface ExpressiveCueFrame {
+  timeMs: number;
+  durationMs: number;
+  rmsEnergy: number;
+  pitchHz: number;
+  pitchNorm: number;
+  emphasis: number;
+  pause: boolean;
+  laugh: number;
+  eyebrowRaise: number;
+  headTiltDeg: number;
+  nodDrive: number;
+  postureEnergy: number;
+}
+
+const NEUTRAL_CUE: ExpressiveCueFrame = {
+  timeMs: 0,
+  durationMs: 0,
+  rmsEnergy: 0,
+  pitchHz: 0,
+  pitchNorm: 0,
+  emphasis: 0,
+  pause: true,
+  laugh: 0,
+  eyebrowRaise: 0,
+  headTiltDeg: 0,
+  nodDrive: 0,
+  postureEnergy: 0.85,
+};
+
+function lerpNumber(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+/** Smoothly samples/interpolates an `ExpressiveCueFrame` at playback `elapsedMs`. */
+export function sampleExpressiveCue(
+  frames: readonly ExpressiveCueFrame[],
+  elapsedMs: number,
+): ExpressiveCueFrame {
+  if (frames.length === 0 || !Number.isFinite(elapsedMs) || elapsedMs < 0) {
+    return { ...NEUTRAL_CUE };
+  }
+  const first = frames[0];
+  const last = frames[frames.length - 1];
+  if (!first || !last) return { ...NEUTRAL_CUE };
+  if (elapsedMs <= first.timeMs) return { ...first };
+  if (elapsedMs >= last.timeMs + last.durationMs) {
+    return { ...NEUTRAL_CUE, timeMs: elapsedMs };
+  }
+  if (elapsedMs >= last.timeMs) return { ...last };
+
+  for (let i = 0; i + 1 < frames.length; i += 1) {
+    const a = frames[i];
+    const b = frames[i + 1];
+    if (!a || !b) continue;
+    if (elapsedMs >= a.timeMs && elapsedMs <= b.timeMs) {
+      const span = Math.max(1, b.timeMs - a.timeMs);
+      const t = Math.max(0, Math.min(1, (elapsedMs - a.timeMs) / span));
+      return {
+        timeMs: elapsedMs,
+        durationMs: a.durationMs,
+        rmsEnergy: lerpNumber(a.rmsEnergy, b.rmsEnergy, t),
+        pitchHz: lerpNumber(a.pitchHz, b.pitchHz, t),
+        pitchNorm: lerpNumber(a.pitchNorm, b.pitchNorm, t),
+        emphasis: lerpNumber(a.emphasis, b.emphasis, t),
+        pause: t < 0.5 ? a.pause : b.pause,
+        laugh: lerpNumber(a.laugh, b.laugh, t),
+        eyebrowRaise: lerpNumber(a.eyebrowRaise, b.eyebrowRaise, t),
+        headTiltDeg: lerpNumber(a.headTiltDeg, b.headTiltDeg, t),
+        nodDrive: lerpNumber(a.nodDrive, b.nodDrive, t),
+        postureEnergy: lerpNumber(a.postureEnergy, b.postureEnergy, t),
+      };
+    }
+  }
+  return { ...last };
+}

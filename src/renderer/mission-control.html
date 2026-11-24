@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'"
+    />
+    <title>Astra Navi — Mission Control &amp; Memory Inspector</title>
+  </head>
+  <body>
+    <header class="mc-header">
+      <div class="mc-title-group">
+        <h1>Mission Control &amp; Memory Inspector</h1>
+        <p id="mc-subtitle" class="mc-subtitle">Loading live state…</p>
+      </div>
+      <div class="mc-header-actions">
+        <span id="mc-status" class="mc-status" role="status" aria-live="polite">Ready</span>
+        <button id="mc-refresh" type="button" class="btn-primary">Refresh Snapshot</button>
+      </div>
+    </header>
+
+    <nav class="mc-tabs" role="tablist" aria-label="Mission Control Views">
+      <button type="button" class="mc-tab active" data-tab="missions" role="tab" aria-selected="true">
+        Mission DAG &amp; Timeline
+      </button>
+      <button type="button" class="mc-tab" data-tab="memory" role="tab" aria-selected="false">
+        Episodic &amp; Memory Browser
+      </button>
+      <button type="button" class="mc-tab" data-tab="policy" role="tab" aria-selected="false">
+        Policy &amp; Replay Debugger
+      </button>
+    </nav>
+
+    <main class="mc-main">
+      <section id="panel-missions" class="mc-panel active" role="tabpanel"></section>
+      <section id="panel-memory" class="mc-panel" role="tabpanel" hidden></section>
+      <section id="panel-policy" class="mc-panel" role="tabpanel" hidden></section>
+    </main>
+
+    <script type="module" src="./src/mission-control/main.ts"></script>
+  </body>
+</html>

@@ -16,6 +16,7 @@ export default defineConfig({
         input: {
           index: resolve(import.meta.dirname, "src/preload/index.ts"),
           settings: resolve(import.meta.dirname, "src/preload/settings.ts"),
+          missionControl: resolve(import.meta.dirname, "src/preload/missionControl.ts"),
         },
         // A sandboxed preload script has to be CommonJS.
         output: { format: "cjs", entryFileNames: "[name].cjs" },
@@ -30,6 +31,7 @@ export default defineConfig({
         input: {
           index: resolve(import.meta.dirname, "src/renderer/index.html"),
           settings: resolve(import.meta.dirname, "src/renderer/settings.html"),
+          missionControl: resolve(import.meta.dirname, "src/renderer/mission-control.html"),
         },
       },
     },

@@ -149,6 +149,59 @@ export function parseSubAgentSummary(raw: string, domain: SpecialistDomain): Sub
   };
 }
 
+export function inferSpecialistDomain(prompt: string): SpecialistDomain | null {
+  const lower = prompt.toLowerCase();
+  if (
+    /\b(?:ssh|systemd|journalctl|uptime|disk|df\b|nas|server|remote\b|fleet|systemctl|daemon|port\s+\d+|firewall)\b/.test(
+      lower,
+    )
+  ) {
+    return "fleet-systems";
+  }
+  if (
+    /\b(?:agenda|calendar|schedule|appointment|meeting|reminder|alarm|timer|mission|tomorrow|friday|next\s+week)\b/.test(
+      lower,
+    )
+  ) {
+    return "logistics-scheduling";
+  }
+  if (
+    /\b(?:research|compare|sources?|cite|summarize\s+the\s+web|documentation|look\s+up|article)\b/.test(
+      lower,
+    )
+  ) {
+    return "research-synthesis";
+  }
+  if (
+    /\b(?:script|refactor|diff|typescript|python|patch|unit\s+test|git\s+|grep|codebase|compile|build)\b/.test(
+      lower,
+    )
+  ) {
+    return "automation-code";
+  }
+  return null;
+}
+
+/** Rough prompt-token footprint saved when delegating to a domain-scoped specialist instead of all 36 tools. */
+export function estimateSpecialistPromptTokens(domain: SpecialistDomain): {
+  specialistTools: number;
+  estimatedPromptTokens: number;
+  fullToolSetBaselineTokens: number;
+  tokensSaved: number;
+} {
+  const spec = SPECIALIST_SPECS[domain];
+  const specialistTools = spec.allowedTools.length;
+  // Instructions (~110 tokens) + ~135 tokens per domain-scoped tool definition.
+  const estimatedPromptTokens = 110 + specialistTools * 135;
+  const fullToolSetBaselineTokens = 5278;
+  return {
+    specialistTools,
+    estimatedPromptTokens,
+    fullToolSetBaselineTokens,
+    tokensSaved: Math.max(0, fullToolSetBaselineTokens - estimatedPromptTokens),
+  };
+}
+
 /** Manages hot-swappable specialist LoRA adapters stored under `<modelsDir>/adapters/`. */
 export class LoraAdapterRegistry {
   private readonly adaptersDir: string;

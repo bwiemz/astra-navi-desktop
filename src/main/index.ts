@@ -57,6 +57,8 @@ import { Learner, quietTimeFor, withoutSecrets, type Learned } from "../core/lea
 import { tidyDeviceName } from "../core/station.ts";
 import { describeRoutine, RoutineWatch } from "../core/routines.ts";
 import { Recall } from "../core/recall.ts";
+import { EpisodicGraph } from "../core/episodic.ts";
+import { CompiledSkillStore } from "../core/skillCompiler.ts";
 import { HerStore } from "../core/store.ts";
 import {
   actionsFile,
@@ -121,6 +123,7 @@ import { startsAtLogin } from "./loginStart.ts";
 import { createModelFiles } from "./modelFiles.ts";
 import { globalShortcut } from "electron";
 import { createReports } from "./reports.ts";
+import { createMissionControlController } from "./missionControlIpc.ts";
 import { createSettingsController } from "./settingsIpc.ts";
 import { StartupGuard, type BootStartStatus } from "../core/safeMode.ts";
 import { programShown } from "./shown.ts";
@@ -190,6 +193,10 @@ let brain: Brain | null = null;
 let engine: LocalEngine | null = null;
 let memoryStore: MemoryStore | null = null;
 let store: HerStore | null = null;
+let episodicGraph: EpisodicGraph | null = null;
+let compiledSkills: CompiledSkillStore | null = null;
+let recallRef: Recall | null = null;
+let workspaceRoot = workspaceDir();
 let sight: Sight | null = null;
 let research: ResearchDesk | null = null;
 let reach: Reach | null = null;
@@ -712,6 +719,7 @@ const settings = createSettingsController({
   applyStageOptions,
   beforeProfileRestore: async () => {
     await actions?.flush().catch(() => undefined);
+    episodicGraph = null;
     store?.close();
     store = null;
   },
@@ -724,6 +732,22 @@ const settings = createSettingsController({
   importModel,
   sendToWindow,
   rebuildTrayMenu: () => rebuildTrayMenu(),
+});
+
+const missionControl = createMissionControlController({
+  appOrigin: APP_ORIGIN,
+  config,
+  dataDir,
+  workspaceDir: workspaceRoot,
+  board: () => board,
+  approvalDesk: () => approvalDesk,
+  memoryStore: () => memoryStore,
+  episodic: () => episodicGraph,
+  orders: () => orders,
+  skills: () => compiledSkills,
+  traces,
+  recall: () => recallRef,
+  brain: () => brain,
 });
 
 // The badge and its menu are laid out in tray.ts; what each entry does is done here.
@@ -742,6 +766,7 @@ const { rebuildTrayMenu, createTray } = createTrayMenu({
   nameRequired: () => voice.nameRequired(),
   showWindow,
   openSettings: () => settings.openSettings(),
+  openMissionControl: () => missionControl.open(),
   sendToWindow,
   chooseBrain,
   chooseLanguage,
@@ -1371,6 +1396,7 @@ async function main(): Promise<void> {
 
   try {
     store = new HerStore(storeFile());
+    episodicGraph = new EpisodicGraph(store);
   } catch (error) {
     dialog.showErrorBox(
       "Astra Navi's records could not be opened",
@@ -1380,7 +1406,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  compiledSkills = new CompiledSkillStore(join(dataDir(), "compiled-skills.json"));
+  await compiledSkills.load();
+
   const environment = await detectEnvironment(workspaceDir());
+  workspaceRoot = environment.workspace;
   startShipServices(environment.workspace);
   engine = new LocalEngine({
     modelsDir: modelsDir(),
@@ -1396,6 +1426,7 @@ async function main(): Promise<void> {
   const routines = new RoutineWatch(routinesFile());
   await routines.load();
   const recall = new Recall(memory, new LocalEmbedder(join(modelsDir(), "speech")), store);
+  recallRef = recall;
   const learner = new Learner({
     memory,
     recall,
@@ -1633,6 +1664,7 @@ async function main(): Promise<void> {
     importModelFile,
   });
   settings.registerSettingsIpc();
+  missionControl.registerIpc();
   registerFleetIpc({
     config,
     fleet: () => fleet,

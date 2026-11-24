@@ -75,6 +75,19 @@ export class ApprovalDesk {
       .map((entry) => ({ ...entry.card }));
   }
 
+  /** All open approval cards (including sensitive ones), strictly for local PC inspection. */
+  allCards(): ApprovalCard[] {
+    return [...this.waiting.values()].map((entry) => ({ ...entry.card }));
+  }
+
+  /** Settles an open approval card directly from the local PC (e.g. Mission Control). */
+  answerFromPc(id: string, allowed: boolean): boolean {
+    const entry = this.waiting.get(id);
+    if (!entry) return false;
+    entry.settle({ allowed, by: { from: "pc" } });
+    return true;
+  }
+
   /**
    * An answer given on a device. True when it settled the question; false when there
    * is no such question (it was answered already, or never was one a device may answer).

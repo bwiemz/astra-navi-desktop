@@ -594,8 +594,8 @@ const VISION_MODE_FPS: Record<VisionStreamMode, number> = {
   coaching: 4,
 };
 
-const SENSITIVE_WINDOW_RE =
-  /\b(?:keepass|1password|bitwarden|lastpass|private\s+browsing|incognito|inprivate|password|passkey)\b/i;
+export const SENSITIVE_WINDOW_RE =
+  /\b(?:keepass(?:xc)?|1password|bitwarden|lastpass|private\s+browsing|incognito|inprivate|password|passkey)\b/i;
 
 /** Downsamples a grayscale frame into an `8x8` (or `cols x rows`) average luminance grid. */
 export function computeBlockGridLuma(

@@ -192,3 +192,52 @@ _Generated locally by `npm run benchmark:catalog -- --write-report` (2026-11-24)
 
 - **Indirect Prompt-Injection & Taint Fuzzer (`evals/fuzz.ts`, seed `20261122`):** **500/500 passed** (`0` unauthorized allows, `0` unseen leaks).
 - **Grammar & Loop-Breaker Stress Suite (`scripts/benchmark-catalog.ts`):** **24/24 passed** (nested JSON GBNF compilation, strict `additionalProperties: false` enforcement, streaming repetition abort, exact repeat breaker, `A <-> B` oscillation detector, consecutive failure breaker, and turn cap).
+
+---
+
+## 7. Experimental Branch R&D Benchmarks (Post-v1)
+
+_Collected on the isolated `experimental` branch (`main` remains frozen for v1 release)._
+
+### 7.1 `Qwen3.5` Template-Aligned Router LoRA v2 vs. v1 & Baseline (`163` Cases)
+
+Aligning `src/core/trainingExport.ts` (`chatTemplate: "qwen3.5"`) with `node-llama-cpp`'s `QwenChatWrapper` `# Tools` / `<think>\n\n</think>\n\n<function=NAME>` format and filtering exports strictly to modern `--fitting-tools` trajectories (`276` train / `15` held-out, rank `8`, alpha `16`, `lr=3e-5`, `1.5` epochs, `15.2M` trainable params in `bfloat16`) dropped initial held-out loss from `2.2258` (v1) to `1.0116` (step 0) -> **`0.4065`** (step 52 best checkpoint):
+
+| Category / Metric | `bench-small-distilled` (v1) | `exp-small-lora-v2` (v2) | `post-ux-small` (Base 4B) | Delta (v2 vs Base) |
+| --- | --- | --- | --- | --- |
+| Tool choice and arguments | `28%` | `81%` | **`91%`** (`resisted 100%`) | `-11 pts` |
+| Follow-through honesty | `20%` | `80%` | **`87%`** | `-7 pts` (within noise) |
+| Safe under injected text | `20%` | `67%` (`did not try: 100%`) | **`87%`** (`did not try: 93%`) | `-20 pts` |
+| Character and form | `78%` | **`83%`** | `78%` | **`+6 pts`** (within noise) |
+| Using what she knows | `53%` | **`76%`** | `71%` | **`+6 pts`** (within noise) |
+| Reasoning and knowledge | `89%` | **`97%`** | **`97%`** | `0 pts` |
+| Multi-step | `0%` | `63%` | **`81%`** | `-19 pts` |
+| **Overall (mean of categories)** | `41%` | `78%` (`+37 pts` over v1) | **`85%`** | **-6 pts** |
+| **Nothing leaked** | `100%` | `98%` | **`100%`** | **-2 pts** |
+| **Median TTFT / Writing speed** | `1.27 s` / `133 tok/s` | `1.76 s` / `145 tok/s` | **`1.06 s` / `183 tok/s`** | `+0.69 s` / `-37 tok/s` |
+| **Own VRAM (loaded / peak)** | `4,222 MiB` peak | `4,154 / 4,164 MiB` | **`3,992 / 4,000 MiB`** | `+164 MiB` peak |
+
+- **Shipping Gate Outcome:** Although template alignment recovered **+37 pts** (`41% -> 78%`) and gained +6 pts on Character & Memory, `exp-small-lora-v2` still trailed `post-ux-small` (`78% < 85%`) and slipped to `98%` Nothing Leaked (`-2 pts`, failing `injection/ja-page-reminder` and two other safety edge cases). **Per the shipping gate, no LoRA weights are shipped to `astra-navi-supporter`.** Next iteration should expand individual parameter tags beyond single `<parameter=params>` wrapping during SFT export.
+
+### 7.2 Hot-Swappable Domain Specialist Adapters (`scripts/benchmark-lora-agents.ts`)
+
+Benchmarked live on RTX PRO 4500 against frozen `Qwen3.5-4B-Q4_K_M.gguf` (`795 ms` base load) with `fleet-systems.lora.gguf` (`97` train / `5` held-out, loss `0.9793 -> 0.7170`, `59 MiB`) and `logistics-scheduling.lora.gguf` (`105` train / `6` held-out, loss `0.9100 -> 0.5155`, `59 MiB`):
+
+| Domain Adapter | Scoped Tools | Est. Prompt Tokens (vs `5,278` All-Tools) | Swap Latency | Task Accuracy (Frozen Base vs Hot-Swapped) |
+| --- | --- | --- | --- | --- |
+| `fleet-systems` | `4` | **`650` tokens (`-4,628`, `-87.7%`)** | `10–20 ms` | `1/2` vs `1/2` (`remote` vs `run_command` choice) |
+| `logistics-scheduling` | `6` | **`920` tokens (`-4,358`, `-82.6%`)** | `10–21 ms` | `2/2` vs `2/2` |
+| **Total (4 tasks)** | `4–6` | **-82.6% to -87.7% prompt budget** | **`15 ms` avg** | **`3/4` vs `3/4`** (`0` swap failures) |
+
+### 7.3 Zero-Python CPU Voice R&D (`scripts/benchmark-voice-rd.ts`)
+
+Measured on CPU-only (zero Python subprocess, `0 MB` GPU VRAM) with cached `onnx-community/Kokoro-82M-v1.0-ONNX` (`q8`) via `UltraLightOnnxVoice` + `extractExpressiveCues()`:
+
+| Metric | Measured CPU Value (`kokoro-82m` `q8`) |
+| --- | --- |
+| Cold model load (`warm()`) | `412.8 ms` |
+| First-audio clause latency | `1,990.9 ms` (`2` streamed clauses) |
+| Total synthesis time vs audio duration | `4,751.6 ms` for `8,175.0 ms` audio |
+| **Real-Time Factor (RTF)** | **`0.581`** (faster than real-time on CPU) |
+| Expressive cue extraction (`20 ms` hops) | **`3.322 ms` / sec of audio** (`409` cue frames) |
+| Process RSS memory | `481 MB` |

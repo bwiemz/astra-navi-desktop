@@ -1139,6 +1139,55 @@ export class MissionBoard {
     return true;
   }
 
+  /** Pauses a planned/running/awaiting mission into `blocked` state without discarding progress. */
+  async pause(id: string): Promise<boolean> {
+    const mission = this.missions.find((entry) => entry.id === id);
+    if (
+      !mission ||
+      mission.state === "completed" ||
+      mission.state === "cancelled" ||
+      mission.state === "blocked"
+    ) {
+      return false;
+    }
+    this.halt(id);
+    for (const step of mission.steps) {
+      if (step.state === "running") step.state = "interrupted";
+      else if (step.state === "asking") step.state = "waiting";
+    }
+    mission.state = "blocked";
+    mission.note = "Paused from Mission Control.";
+    this.pushThread(mission, { from: "pc" }, "state", "Paused from Mission Control.");
+    await this.save();
+    if (mission.pinnedToDevices) this.notifyPinned();
+    return true;
+  }
+
+  /** Rolls incomplete/failed steps (or the last completed step) back to waiting checkpoint state. */
+  async rollback(id: string): Promise<boolean> {
+    const mission = this.missions.find((entry) => entry.id === id);
+    if (!mission || mission.steps.length === 0) return false;
+    this.halt(id);
+    const firstNotDone = mission.steps.findIndex((s) => s.state !== "done");
+    const resetFrom = firstNotDone === -1 ? mission.steps.length - 1 : firstNotDone;
+    for (let i = resetFrom; i < mission.steps.length; i += 1) {
+      const step = mission.steps[i];
+      if (!step) continue;
+      step.state = "waiting";
+      step.tried = 0;
+      step.output = "";
+      step.approved = null;
+      step.finishedAt = null;
+    }
+    mission.state = "blocked";
+    mission.finishedAt = null;
+    mission.note = `Rolled back to step ${resetFrom + 1} checkpoint.`;
+    this.pushThread(mission, { from: "pc" }, "state", mission.note);
+    await this.save();
+    if (mission.pinnedToDevices) this.notifyPinned();
+    return true;
+  }
+
   private halt(id: string): void {
     this.working.get(id)?.abort();
     this.working.delete(id);

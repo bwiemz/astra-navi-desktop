@@ -719,3 +719,63 @@ export function isBoundsOnAnyDisplay(
     return overlapW >= Math.min(minVisiblePx, bounds.width) && overlapH >= Math.min(minVisiblePx, bounds.height);
   });
 }
+
+export interface DeferredNotice {
+  id: string;
+  text: string;
+  urgent: boolean;
+  atMs: number;
+}
+
+/**
+ * Coordinates desktop notification delivery with opt-in local presence state:
+ * delivers urgent alerts immediately, holds non-urgent alerts while stepped away,
+ * and flushes queued notices upon sit-down wake.
+ */
+export class PresenceNotificationGate {
+  private present: boolean;
+  private readonly maxQueue: number;
+  private readonly queue: DeferredNotice[] = [];
+
+  constructor(options: { initialPresent?: boolean; maxQueue?: number } = {}) {
+    this.present = options.initialPresent ?? true;
+    this.maxQueue = Math.max(1, options.maxQueue ?? 50);
+  }
+
+  get isPresent(): boolean {
+    return this.present;
+  }
+
+  get pendingCount(): number {
+    return this.queue.length;
+  }
+
+  updatePresence(present: boolean): { wokeUp: boolean; flushed: DeferredNotice[] } {
+    const wokeUp = !this.present && present;
+    this.present = present;
+    if (!wokeUp) {
+      return { wokeUp: false, flushed: [] };
+    }
+    return { wokeUp: true, flushed: this.flushDeferred() };
+  }
+
+  enqueue(notice: DeferredNotice): {
+    deliverNow: boolean;
+    held: boolean;
+    notice: DeferredNotice;
+  } {
+    if (notice.urgent || this.present) {
+      return { deliverNow: true, held: false, notice };
+    }
+    if (this.queue.length >= this.maxQueue) {
+      this.queue.shift();
+    }
+    this.queue.push(notice);
+    return { deliverNow: false, held: true, notice };
+  }
+
+  flushDeferred(): DeferredNotice[] {
+    if (this.queue.length === 0) return [];
+    return this.queue.splice(0, this.queue.length);
+  }
+}
