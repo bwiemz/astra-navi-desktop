@@ -331,7 +331,7 @@ export async function runMicroSandbox(
   deps: MicroSandboxDeps = {},
 ): Promise<MicroSandboxResult> {
   if (!request.enabled) {
-    return failBlocked("Micro-sandbox is disabled in Tier 10 settings.");
+    return failBlocked("Micro-sandbox is disabled in Experimental options.");
   }
   if (!request.code.trim()) {
     return failBlocked("Micro-sandbox script cannot be empty.");

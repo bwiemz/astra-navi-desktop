@@ -46,7 +46,7 @@ On first launch, Astra opens the **60-Second Setup Wizard** (`src/renderer/setti
 1. **Hardware & Brain Tier:** Probes GPU VRAM, memory bandwidth, and system RAM (`modelBundle.ts` / `hardwareTuner.ts` / `models.ts`) and recommends Small (`4B`), Standard (`9B`), Large (`27B`), or Workstation tiers.
 2. **Character, Stage & Voice:** Choose language (`en`, `ja`, `zh`), audition zero-Python built-in **ONNX (`Kokoro-82M`)** or optional Designed voices, dock the spatial stage across monitors, or import `.vrm` / `.pmx` avatars from the tray.
 3. **Wake Word & Local Setup Helpers:** Toggle hands-free wake word (`"Astra"` / `"Astra Navi"`), and configure optional local helpers (Fast ONNX OCR, Desktop App Launcher, Browser DOM Native Host `app.astranavi.dom_bridge`, and optional Python `Qwen3-TTS`) without needing a terminal.
-4. **Safety & Ready Check:** Runs an instant policy audit (`auditSecurityRules`) confirming default-safe permissions and experimental Tier 10 switches remain off.
+4. **Safety & Ready Check:** Runs an instant policy audit (`auditSecurityRules`) confirming default-safe permissions and experimental options remain off.
 
 ### Cross-Platform CLI Setup & Backup Helpers
 

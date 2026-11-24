@@ -367,7 +367,7 @@ export class PluginRegistry {
     runBundledEval?: () => Promise<{ ok: boolean; reason?: string }>;
   }): Promise<PluginVerifyResult> {
     if (!this.enabled) {
-      return { ok: false, reason: "Signed plugins are disabled in Tier 10 settings." };
+      return { ok: false, reason: "Signed plugins are disabled in Experimental options." };
     }
     const verified = await verifyPluginBundle({
       ...options,

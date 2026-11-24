@@ -176,7 +176,7 @@ export class StationFederation {
     nowMs = Date.now(),
   ): FederationEnvelope {
     if (!this.enabled) {
-      throw new Error("Station-to-station federation is disabled in Tier 10 settings.");
+      throw new Error("Station-to-station federation is disabled in Experimental options.");
     }
     const peer = this.peers.get(peerId);
     if (!peer || !peer.enabled) {

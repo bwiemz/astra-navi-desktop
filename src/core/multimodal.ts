@@ -183,7 +183,7 @@ export class LocalSpeechToSpeechSession {
 
   async handleTurn(pcm16k: Float32Array): Promise<SpeechToSpeechTurnResult> {
     if (!this.enabled) {
-      throw new Error("Native speech-to-speech is disabled in Tier 10 settings.");
+      throw new Error("Native speech-to-speech is disabled in Experimental options.");
     }
     const started = performance.now();
     const cue = inferParalinguisticCue(pcm16k);

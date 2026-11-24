@@ -93,7 +93,7 @@ export function canRunHygieneWindow(input: HygieneWindowInput): {
   reason: string;
 } {
   if (!input.enabled) {
-    return { allowed: false, reason: "Nightly hygiene is disabled in Tier 10 settings." };
+    return { allowed: false, reason: "Nightly hygiene is disabled in Experimental options." };
   }
   if (!input.onAcPower) {
     return { allowed: false, reason: "Deferred: system is on battery/UPS power." };
