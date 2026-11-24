@@ -235,7 +235,7 @@ function setReply(text: string, isError = false): void {
   reply.classList.toggle("is-error", isError);
   reply.innerHTML = renderMarkdown(text);
   enhanceCodeBlocks(reply, (code) => bridge.copyText(code));
-  liveFooter.hidden = text === "" || busy || isError;
+  liveFooter.hidden = true;
   // Something put up whole (an error, the notice) is read out once; a reply that is
   // being written is read out when it is finished, not as each word lands.
   if (text && (isError || !busy)) replyAloud.textContent = reply.textContent ?? "";
@@ -486,7 +486,7 @@ permissionCard.addEventListener("keydown", (event) => {
     lastPermissionKey = event.key;
     window.setTimeout(() => {
       if (lastPermissionKey === event.key) lastPermissionKey = undefined;
-    }, 50);
+    }, 300);
   }
 });
 permissionCard.addEventListener("pointerdown", (event) => {
@@ -1083,7 +1083,13 @@ window.addEventListener("drop", (event) => {
       notices.push(...res.notes);
     }
     if (notices.length > 0) {
-      setReply(notices.join("\n\n"));
+      if (busy || permissionQueue.length > 0) {
+        caution.textContent = notices.join(" ");
+        caution.hidden = false;
+        showBalloon();
+      } else {
+        setReply(notices.join("\n\n"));
+      }
     }
   });
 });

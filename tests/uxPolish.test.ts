@@ -403,4 +403,14 @@ describe("Drop routing, download telemetry, forget-last-turn, Safe Mode & Tray l
     expect(indexHtml).toContain('id="permission-preview"');
     expect(indexHtml).toContain('id="attachments"');
   });
+
+  it("unpacks sibling native shared libraries in electron-builder.yml (sharp libvips, onnxruntime)", async () => {
+    const yml = await readFile(join(ROOT, "electron-builder.yml"), "utf8");
+    expect(yml).toContain("**/*.node");
+    expect(yml).toContain("**/*.wasm");
+    expect(yml).toContain("**/*.so.*");
+    expect(yml).toContain("**/*.dll");
+    expect(yml).toContain("**/*.dylib");
+    expect(yml).toContain("node_modules/@img/**");
+  });
 });

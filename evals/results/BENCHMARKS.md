@@ -75,6 +75,24 @@ Re-ran the full 163-case RTX PRO 4500 evaluation with GBNF schema hardening (`ad
 - **Overall (mean of categories):** **`85%`** *(Tools `91%`, Follow-through `73%`, Safe under injected text **`100%`**, Character `78%`, Using what she knows **`82%`**, Reasoning & knowledge **`97%`**, Multi-step `75%`)* — **+1.7 pts over the unguarded 9B baseline (`83.3% -> 85%`)** with **`100%` Nothing Leaked** and **`100%` resistance under injected text**.
 - **Latency & footprint:** `1.3 s` load, **`1.85 s` median TTFT**, **`116 tok/s`** writing speed, `6,262 / 6,270 MiB` own VRAM (`3,285 MiB` RSS).
 
+### Post-UX-Sprint Live GPU Regression Re-Verification (`post-ux-standard` & `post-ux-small`)
+
+After updating `src/core/engine.ts`, `src/core/brain.ts`, `src/core/permissions.ts`, and posture/rollback/cancellation hooks, re-ran both full 163-case RTX PRO 4500 GPU evaluations (`--fitting-tools`):
+
+| Category / Metric | `post-ux-small` (Qwen3.5 4B vs `bench-small-base`) | `post-ux-standard` (Qwen3.5 9B vs `standard-grammar-live`) |
+| --- | --- | --- |
+| Tool choice & arguments | **`91%`** (`0 pts`, resisted **`100%`**) | `83%` (resisted **`100%`**) |
+| Follow-through honesty | **`87%`** (`+27 pts`) | `67%` (`-7 pts`, within noise) |
+| Safe under injected text | `87%` (did not try `93%`, `+7 pts`) | **`100%`** (did not try **`100%`**) |
+| Character & form | `78%` (`+11 pts`, within noise) | **`94%`** (`+17 pts`) |
+| Using what she knows | `71%` (`-12 pts`, within noise) | `82%` (`0 pts`) |
+| Reasoning & knowledge | **`97%`** (`0 pts`) | **`100%`** (`+3 pts`) |
+| Multi-step | `81%` (`-6 pts`, within noise) | `69%` (`-6 pts`, within noise) |
+| **Overall (mean)** | **`85%`** (**`+3 pts`**) | **`85%`** (`0 pts`) |
+| **Nothing leaked** | **`100%`** (`0 pts`) | **`100%`** (`0 pts`) |
+| **Median TTFT / Speed** | **`1.06 s`** / **`183 tok/s`** (`-0.08 s` / `+12 tok/s`) | **`1.97 s`** / **`107 tok/s`** |
+| **Own VRAM (peak) / RSS** | `3,992 / 4,000 MiB` / `3,103 MiB` (`-180 MiB`) | `6,262 / 6,270 MiB` / `3,118 MiB` (`-167 MiB`) |
+
 ### Latency, Throughput & Resource Footprint
 
 | Metric | `bench-small-base` (4B) | `bench-standard` (9B) | `bench-large` (27B) |
@@ -137,7 +155,8 @@ We executed an end-to-end distillation run on the RTX PRO 4500 GPU using real tr
 
 ### Verified on This Linux Workstation
 
-- **Packaged Electron Bundle (`electron-builder --linux dir`):** Verified unpacked `dist/linux-unpacked/` resolves native Rust `linux-hands` from `resources/hands/linux-hands-native/bin/linux-hands` (`pong`, JSON-RPC `hello` `ok:true`), while omitting `win_hands.ps1`, `ai-navigator.blend`, `store/`, `tests/`, `evals/`, and `ios-app/`.
+- **Packaged Electron Bundle (`electron-builder --linux dir`):** Boot-testing `dist/linux-unpacked/astra-navi-desktop` inside `scripts/test-desktop.sh` (`kwin_wayland`) initially caught `ERR_DLOPEN_FAILED: libvips-cpp.so.8.17.3` because `@img/sharp-libvips-linux-x64` stayed inside `app.asar`; extending `electron-builder.yml` `asarUnpack` with `**/*.so`, `**/*.so.*`, `**/*.dll`, `**/*.dylib`, and `node_modules/@img/**` resolved packaged boot with **0 uncaught exceptions**, unpacked `libvips-cpp.so.8.17.3`, resolved native Rust `linux-hands` (`pong`, `linux-hands 1.0.0`), verified compiled renderer symbols in `app.asar`, and omitted `win_hands.ps1`, `ai-navigator.blend`, `store/`, `tests/`, `evals/`, and `ios-app/`.
+- **Live Interactive Wayland Chromium UX Checks (`scripts/test-desktop.sh`):** Verified multi-turn chat `.code-copy-btn` -> `"Copied"` + Electron async `clipboard.writeText`/`readText` round-trip, `.log-turn-actions` (`Edit & Resend` and `Forget Last Turn`), `High-Impact` risk badge + raw command preview + `Enter`-confirm refusal with guard hint + `Esc` deny, and non-destructive `files:drop` attachment/notice routing.
 - **Live End-to-End Integration Dogfooding:** Verified on RTX PRO 4500 Linux host: `Qwen3.5-9B` driving two real stdio MCP subprocesses (`localfs`, `gitinfo`) under `grammarGuard.ts` + `ToolLoopGuard`, `profileBackup.ts` export/wipe/restore parity, `StartupGuard` (`safeMode.ts`) two-crash recovery (`0600`), and zero-Python `OnnxVoice` (`Kokoro-82M`) synthesis (`63,600` finite samples @ `24 kHz`).
 - **Android Companion APK (`scripts/build-android.sh`):** Compiled and locally signed `phone-app/build/astra-navi.apk` (`56K`, `app.astranavi.station`, deep link `astranavi://station`).
 - **Live Ephemeral SSH Enrollment (`scripts/test-fleet-askpass.sh`):** Spawned an unprivileged local `/usr/bin/sshd`, ran interactive `SSH_ASKPASS` (`LET_IN`) key enrollment with a passphrase-protected ED25519 bootstrap key, and verified subsequent key-based SSH login (`exit 0`).
@@ -156,7 +175,7 @@ We executed an end-to-end distillation run on the RTX PRO 4500 GPU using real tr
 
 ## 6. Rolling Model Catalog, Vetted One-Click Presets & Grammar/Loop Stress Gates
 
-_Generated locally by `npm run benchmark:catalog -- --write-report` (2026-11-23). Live GPU metrics reflect real RTX PRO 4500 Blackwell runs; newer MoE/72B presets remain marked `pending_gpu` until measured on live GPU hardware._
+_Generated locally by `npm run benchmark:catalog -- --write-report` (2026-11-24). Live GPU metrics reflect real RTX PRO 4500 Blackwell runs; newer MoE/72B presets remain marked `pending_gpu` until measured on live GPU hardware._
 
 ### Rolling Open-Weight Catalog & Sizing Matrix
 

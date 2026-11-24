@@ -9,6 +9,11 @@ asar: true
 asarUnpack:
   - "**/*.node"
   - "**/*.wasm"
+  - "**/*.so"
+  - "**/*.so.*"
+  - "**/*.dll"
+  - "**/*.dylib"
+  - "node_modules/@img/**"
 files:
   - out/**/*
   - package.json
