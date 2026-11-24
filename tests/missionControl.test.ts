@@ -18,11 +18,14 @@ import {
 } from "../src/shared/missionControl.ts";
 
 const ipcHandlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+let windowCreateCount = 0;
 let lastCreatedWindow: {
   webContents: {
     id: number;
     setWindowOpenHandler: (fn: unknown) => void;
     on: (ev: string, fn: unknown) => void;
+    once: (ev: string, fn: () => void) => void;
+    send: (ch: string, ...args: unknown[]) => void;
   };
   removeMenu: () => void;
   once: (ev: string, fn: () => void) => void;
@@ -45,6 +48,8 @@ vi.mock("electron", () => ({
       id: 42,
       setWindowOpenHandler: () => undefined,
       on: () => undefined,
+      once: (_ev: string, fn: () => void) => fn(),
+      send: () => undefined,
     };
     removeMenu = () => undefined;
     once = () => undefined;
@@ -54,6 +59,7 @@ vi.mock("electron", () => ({
     show = () => undefined;
     focus = () => undefined;
     setWindowInstance(win: typeof lastCreatedWindow): void {
+      windowCreateCount += 1;
       lastCreatedWindow = win;
     }
     constructor() {
@@ -74,6 +80,7 @@ async function makeTempDir(): Promise<string> {
 afterEach(async () => {
   ipcHandlers.clear();
   lastCreatedWindow = null;
+  windowCreateCount = 0;
   while (openStores.length > 0) {
     openStores.pop()?.close();
   }
@@ -254,9 +261,8 @@ describe("Mission Control & Memory Inspector backend", () => {
       tokens: { read: 100, written: 20, held: 120 },
     });
 
-    const { buildMissionControlSnapshot, createMissionControlController } = await import(
-      "../src/main/missionControlIpc.ts"
-    );
+    const { buildMissionControlSnapshot } = await import("../src/main/missionControlIpc.ts");
+    const { createWorkbenchController } = await import("../src/main/workbenchIpc.ts");
 
     const deps = {
       appOrigin: "astranavi://app",
@@ -283,10 +289,14 @@ describe("Mission Control & Memory Inspector backend", () => {
     expect(snap.compiledSkills[0]?.status).toBe("revoked");
     expect(snap.recentTurns).toHaveLength(1);
 
-    const controller = createMissionControlController(deps);
+    const controller = createWorkbenchController(deps);
     controller.registerIpc();
-    controller.open();
+    controller.open("missions");
+    controller.open("avatar");
     expect(lastCreatedWindow).not.toBeNull();
+    // Opening different Workbench tabs reuses ONE BrowserWindow instance
+    expect(windowCreateCount).toBe(1);
+    expect(controller.activeTab()).toBe("avatar");
 
     // Unauthorized sender must be rejected
     const fakeSender = { sender: { id: 999 } };

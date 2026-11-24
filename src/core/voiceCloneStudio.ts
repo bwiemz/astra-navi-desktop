@@ -4,6 +4,7 @@ import {
   packSignedCharacterBundle,
   type CharacterBundleManifest,
 } from "./characterBundle.ts";
+import { scrubSecretsForSync } from "./peerSync.ts";
 
 /**
  * Opt-In 10-Second Voice Cloning Studio (`experimental`).
@@ -32,7 +33,7 @@ export function analyzeVoiceReferenceClip(
   sampleRate: number,
 ): VoiceReferenceQualityReport {
   const issues: string[] = [];
-  if (samples.length === 0 || !Number.isFinite(sampleRate) || sampleRate < 8_000) {
+  if (samples.length === 0 || !Number.isFinite(sampleRate) || sampleRate < 8_000 || sampleRate > 192_000) {
     return {
       ok: false,
       durationSec: 0,
@@ -40,7 +41,7 @@ export function analyzeVoiceReferenceClip(
       noiseFloorDbFs: -96,
       snrDb: 0,
       clippingRatio: 0,
-      issues: ["Empty or invalid sample rate (expected >= 8 kHz PCM audio)."],
+      issues: ["Empty or invalid sample rate (expected 8–192 kHz PCM audio)."],
     };
   }
 
@@ -51,7 +52,18 @@ export function analyzeVoiceReferenceClip(
   let sumSq = 0;
   let clipped = 0;
   for (let i = 0; i < samples.length; i += 1) {
-    const s = samples[i] ?? 0;
+    const s = samples[i];
+    if (s === undefined || !Number.isFinite(s)) {
+      return {
+        ok: false,
+        durationSec,
+        rmsDbFs: -96,
+        noiseFloorDbFs: -96,
+        snrDb: 0,
+        clippingRatio: 0,
+        issues: ["Non-finite PCM sample detected (NaN/Infinity)."],
+      };
+    }
     sumSq += s * s;
     if (Math.abs(s) >= 0.985) clipped += 1;
   }
@@ -128,10 +140,17 @@ export async function packageClonedVoiceArchive(options: {
   manifest: CharacterBundleManifest;
   outBundleFile: string;
   privateKeyPem?: string;
+  consentConfirmed?: boolean;
 }): Promise<{
   quality: VoiceReferenceQualityReport;
   packed: { files: number; bytes: number };
 }> {
+  if (options.consentConfirmed === false) {
+    throw new Error("Explicit speaker consent is required for voice cloning.");
+  }
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(options.manifest.id)) {
+    throw new Error(`Unsafe character manifest id "${options.manifest.id}".`);
+  }
   const quality = analyzeVoiceReferenceClip(options.samples, options.sampleRate);
   if (!quality.ok) {
     throw new Error(`Voice reference failed quality gate: ${quality.issues.join("; ")}`);
@@ -140,7 +159,7 @@ export async function packageClonedVoiceArchive(options: {
   const wavRel = "voice-ref.wav";
   const txtRel = "voice-ref.txt";
   await writeFile(join(options.bundleDir, wavRel), encodePcm16Wav(options.samples, options.sampleRate));
-  await writeFile(join(options.bundleDir, txtRel), options.transcript.trim(), "utf8");
+  await writeFile(join(options.bundleDir, txtRel), scrubSecretsForSync(options.transcript).trim().slice(0, 2000), "utf8");
 
   const nextManifest: CharacterBundleManifest = {
     ...options.manifest,

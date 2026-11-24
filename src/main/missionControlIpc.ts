@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
-import { app, BrowserWindow, ipcMain } from "electron";
-import { join, resolve } from "node:path";
+import { ipcMain } from "electron";
+import { resolve } from "node:path";
 import type { Brain } from "../core/brain.ts";
 import type { ConfigStore } from "../core/config.ts";
 import type { EpisodicGraph } from "../core/episodic.ts";
@@ -66,6 +66,8 @@ export interface MissionControlDeps extends MissionControlSnapshotDeps {
   workspaceDir: string;
   recall(): Recall | null;
   brain(): Brain | null;
+  /** External sender-authorization guard provided by the single Workbench window controller. */
+  isAuthorizedSender?(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean;
 }
 
 function summarizeOrderTarget(order: StandingOrder): string {
@@ -299,60 +301,17 @@ export function buildMissionControlSnapshot(
   };
 }
 
-export interface MissionControlController {
-  window(): BrowserWindow | null;
-  open(): void;
+export interface MissionControlIpcController {
   registerIpc(): void;
-  fromMissionControlWindow(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean;
 }
 
-export function createMissionControlController(deps: MissionControlDeps): MissionControlController {
-  let mcWindow: BrowserWindow | null = null;
+export function createMissionControlIpc(deps: MissionControlDeps): MissionControlIpcController {
   let ipcRegistered = false;
-
-  function open(): void {
-    if (mcWindow && !mcWindow.isDestroyed()) {
-      mcWindow.show();
-      mcWindow.focus();
-      return;
-    }
-    const window = new BrowserWindow({
-      width: 1120,
-      height: 760,
-      minWidth: 720,
-      minHeight: 520,
-      show: false,
-      autoHideMenuBar: true,
-      backgroundColor: "#0f172a",
-      title: "Astra Navi — Mission Control & Memory Inspector",
-      webPreferences: {
-        preload: join(import.meta.dirname, "../preload/missionControl.cjs"),
-        contextIsolation: true,
-        sandbox: true,
-        nodeIntegration: false,
-        webSecurity: true,
-        devTools: !app.isPackaged,
-      },
-    });
-    mcWindow = window;
-    window.removeMenu();
-    window.once("ready-to-show", () => window.show());
-    window.on("closed", () => {
-      if (mcWindow === window) mcWindow = null;
-    });
-    window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    window.webContents.on("will-navigate", (event) => event.preventDefault());
-    void window.loadURL(`${deps.appOrigin}/mission-control.html`);
-  }
 
   function fromMissionControlWindow(
     event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent,
   ): boolean {
-    return (
-      mcWindow !== null &&
-      !mcWindow.isDestroyed() &&
-      event.sender === mcWindow.webContents
-    );
+    return deps.isAuthorizedSender ? deps.isAuthorizedSender(event) : false;
   }
 
   function defaultPolicyContext(): PolicyContext {
@@ -588,9 +547,6 @@ export function createMissionControlController(deps: MissionControlDeps): Missio
   }
 
   return {
-    window: () => mcWindow,
-    open,
     registerIpc,
-    fromMissionControlWindow,
   };
 }

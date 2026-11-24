@@ -27,7 +27,8 @@ afterEach(async () => {
 
 describe("Pillar 7: Zero-Python runtime (ONNX voice, Rust linux-hands, Python-free bootstrap)", () => {
   it("synthesizes speech through OnnxVoice without spawning Python processes", async () => {
-    expect(resolveOnnxVoicePreset("astra", "ja").kokoroVoice).toBe("jf_alpha");
+    expect(resolveOnnxVoicePreset("astra", "en").kokoroVoice).toBe("af_heart");
+    expect(resolveOnnxVoicePreset("jf_alpha", "ja").kokoroVoice).toBe("jf_alpha");
     expect(resolveOnnxVoicePreset("bright", "en").speedMultiplier).toBeGreaterThan(1);
 
     const calls: { text: string; voice: string; speed?: number }[] = [];
@@ -44,7 +45,8 @@ describe("Pillar 7: Zero-Python runtime (ONNX voice, Rust linux-hands, Python-fr
     });
 
     expect(voice.supports("en")).toBe(true);
-    expect(voice.supports("ja")).toBe(true);
+    expect(voice.supports("ja")).toBe(false);
+    expect(voice.supports("zh")).toBe(false);
     await voice.warm();
     const out = await voice.synthesize("Ready for takeoff.", "en");
     expect(out.sampleRate).toBe(24_000);

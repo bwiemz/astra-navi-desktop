@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'"
+    />
+    <title>Astra Navi — Workbench</title>
+  </head>
+  <body>
+    <div class="wb-shell">
+      <aside class="wb-rail" aria-label="Workbench Sections">
+        <div class="wb-brand">
+          <strong>Astra Workbench</strong>
+          <span>Consolidated Tools</span>
+        </div>
+        <nav class="wb-nav" role="tablist" aria-orientation="vertical">
+          <button type="button" class="wb-nav-btn active" data-tab="missions" role="tab" aria-selected="true">
+            <span class="wb-nav-title">Missions</span>
+            <span class="wb-nav-desc">DAGs &amp; checkpoints</span>
+          </button>
+          <button type="button" class="wb-nav-btn" data-tab="memory" role="tab" aria-selected="false">
+            <span class="wb-nav-title">Memory Graph</span>
+            <span class="wb-nav-desc">Semantic &amp; episodic notes</span>
+          </button>
+          <button type="button" class="wb-nav-btn" data-tab="policy" role="tab" aria-selected="false">
+            <span class="wb-nav-title">Policy Composer</span>
+            <span class="wb-nav-desc">Orders, audit &amp; replay</span>
+          </button>
+          <button type="button" class="wb-nav-btn" data-tab="xray" role="tab" aria-selected="false">
+            <span class="wb-nav-title">Turn X-Ray</span>
+            <span class="wb-nav-desc">Latency, tokens &amp; conflicts</span>
+          </button>
+          <button type="button" class="wb-nav-btn" data-tab="avatar" role="tab" aria-selected="false">
+            <span class="wb-nav-title">Avatar Studio</span>
+            <span class="wb-nav-desc">Framing, lighting &amp; props</span>
+          </button>
+        </nav>
+      </aside>
+
+      <div class="wb-content">
+        <header class="wb-header">
+          <div>
+            <h1 id="wb-title">Missions</h1>
+            <p id="wb-subtitle" class="wb-subtitle">Loading workbench state…</p>
+          </div>
+          <div class="wb-actions">
+            <span id="wb-status" class="wb-status" role="status" aria-live="polite">Ready</span>
+            <button id="wb-refresh" type="button" class="btn-primary">Refresh</button>
+          </div>
+        </header>
+
+        <main class="wb-main">
+          <section id="panel-missions" class="wb-panel" role="tabpanel"></section>
+          <section id="panel-memory" class="wb-panel" role="tabpanel" hidden></section>
+          <section id="panel-policy" class="wb-panel" role="tabpanel" hidden></section>
+          <section id="panel-xray" class="wb-panel" role="tabpanel" hidden></section>
+          <section id="panel-avatar" class="wb-panel" role="tabpanel" hidden></section>
+        </main>
+      </div>
+    </div>
+
+    <script type="module" src="./src/workbench/main.ts"></script>
+  </body>
+</html>

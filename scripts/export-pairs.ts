@@ -16,6 +16,7 @@ import type { ChatSessionModelFunctions } from "node-llama-cpp";
 import { loadReport } from "../evals/files.ts";
 import { createTools, type ToolHost } from "../src/core/agentTools.ts";
 import { createDesktopTools } from "../src/core/desktopTools.ts";
+import { detectEnvironment } from "../src/core/environment.ts";
 import { createFleetTools } from "../src/core/fleetTools.ts";
 import { createHandsTools } from "../src/core/handsTools.ts";
 import { createKnowledgeTools } from "../src/core/knowledgeTools.ts";
@@ -25,6 +26,7 @@ import {
   type SpecialistDomain,
 } from "../src/core/loraAgents.ts";
 import { createNoticeTools } from "../src/core/noticeTools.ts";
+import { buildSystemPrompt, EVERY_ABILITY, FORM_TYPED } from "../src/core/persona.ts";
 import { createPhoneTools } from "../src/core/phoneTools.ts";
 import { createShipTools } from "../src/core/shipTools.ts";
 import { cleanExamples, correctedPairs, type TurnTrace } from "../src/core/trace.ts";
@@ -129,6 +131,11 @@ if (reports.length === 0 && traceFiles.length === 0) {
 }
 
 const toolSchemas = chatTemplate === "qwen3.5" ? buildCatalogSchemas() : undefined;
+const sftSystemPrompt =
+  chatTemplate === "qwen3.5"
+    ? buildSystemPrompt(await detectEnvironment(process.cwd()), "", "en", 1, EVERY_ABILITY)
+    : undefined;
+const sftUserSuffix = chatTemplate === "qwen3.5" ? `\n\n${FORM_TYPED}` : undefined;
 
 const rawLines: Line[] = [];
 const pairs: PreferencePair[] = [];
@@ -144,6 +151,8 @@ for (const name of reports) {
   const report = await loadReport(name);
   const extracted = extractReportTrainingData(report, {
     teacherOnlyForClean: teacherOnly,
+    systemPrompt: sftSystemPrompt,
+    userSuffix: sftUserSuffix,
     chatTemplate,
     toolSchemas,
   });
@@ -188,6 +197,8 @@ for (const file of traceFiles) {
     from: file,
     includeClean: true,
     teacherOnlyForClean: teacherOnly,
+    systemPrompt: sftSystemPrompt,
+    userSuffix: sftUserSuffix,
     chatTemplate,
     toolSchemas,
   });

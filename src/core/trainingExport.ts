@@ -134,6 +134,7 @@ export function formatQwenSft(params: {
   id: string;
   system?: string;
   prompt: string;
+  userSuffix?: string;
   offered: readonly string[];
   calls: readonly TracedCall[];
   reply: string;
@@ -141,9 +142,10 @@ export function formatQwenSft(params: {
   chatTemplate?: SftTemplate;
   toolSchemas?: Record<string, ToolSchemaSummary>;
 }): SftExample | null {
-  const prompt = params.prompt.trim();
+  const rawPrompt = params.prompt.trim();
   const reply = params.reply.trim();
-  if (!prompt || !reply) return null;
+  if (!rawPrompt || !reply) return null;
+  const prompt = params.userSuffix ? `${rawPrompt}${params.userSuffix}` : rawPrompt;
 
   const template: SftTemplate = params.chatTemplate ?? "qwen3";
   const baseSystem = (params.system ?? "").trim() || DEFAULT_SYSTEM_PROMPT;
@@ -171,18 +173,8 @@ export function formatQwenSft(params: {
     const start = cursor;
     if (template === "qwen3.5") {
       const argObj = parseJsonInput(call.input);
-      const entries = Object.entries(argObj).filter(([k]) => k !== "raw");
-      const paramBlocks =
-        entries.length > 0
-          ? entries
-              .map(([k, v]) => {
-                const rendered = typeof v === "string" ? v : JSON.stringify(v);
-                return `<parameter=${k}>\n${rendered}\n</parameter>`;
-              })
-              .join("\n")
-          : `<parameter=params>\n${JSON.stringify(argObj)}\n</parameter>`;
       append(
-        `<think>\n\n</think>\n\n<tool_call>\n<function=${call.tool}>\n${paramBlocks}\n</function>\n</tool_call><|im_end|>`,
+        `<tool_call>\n<function=${call.tool}>\n<parameter=params>\n${JSON.stringify(argObj)}\n</parameter>\n</function>\n</tool_call><|im_end|>`,
       );
     } else {
       const payload = JSON.stringify({
@@ -193,16 +185,13 @@ export function formatQwenSft(params: {
     }
     const end = cursor;
     spans.push([start, end]);
-    append(`\n<|im_start|>user\n<tool_response>\n${call.result}\n</tool_response><|im_end|>\n`);
+    const toolResult = template === "qwen3.5" ? JSON.stringify(call.result) : call.result;
+    append(`\n<|im_start|>user\n<tool_response>\n${toolResult}\n</tool_response><|im_end|>\n`);
   }
 
   append("<|im_start|>assistant\n");
   const replyStart = cursor;
-  if (template === "qwen3.5") {
-    append(`<think>\n\n</think>\n\n${reply}<|im_end|>`);
-  } else {
-    append(`${reply}<|im_end|>`);
-  }
+  append(`${reply}<|im_end|>`);
   const replyEnd = cursor;
   spans.push([replyStart, replyEnd]);
 
@@ -224,6 +213,7 @@ export interface ExtractTrainingOptions {
   /** When true, only distill clean examples from Standard/Large teacher brains. */
   teacherOnlyForClean?: boolean;
   systemPrompt?: string;
+  userSuffix?: string;
   chatTemplate?: SftTemplate;
   toolSchemas?: Record<string, ToolSchemaSummary>;
 }
@@ -260,6 +250,7 @@ export function extractTrainingData(
       id: `${id}-sft`,
       system: options.systemPrompt,
       prompt: pair.said,
+      userSuffix: options.userSuffix,
       offered: pair.offered,
       calls: pair.accepted.calls,
       reply: pair.accepted.reply,
@@ -278,6 +269,7 @@ export function extractTrainingData(
         id,
         system: options.systemPrompt,
         prompt: clean.said,
+        userSuffix: options.userSuffix,
         offered: clean.offered,
         calls: clean.calls,
         reply: clean.reply,
@@ -310,6 +302,7 @@ export function extractReportTrainingData(
   options: {
     teacherOnlyForClean?: boolean;
     systemPrompt?: string;
+    userSuffix?: string;
     chatTemplate?: SftTemplate;
     toolSchemas?: Record<string, ToolSchemaSummary>;
   } = {},
@@ -333,6 +326,7 @@ export function extractReportTrainingData(
         includeClean: run.pass,
         teacherOnlyForClean: options.teacherOnlyForClean,
         systemPrompt: options.systemPrompt,
+        userSuffix: options.userSuffix,
         chatTemplate: options.chatTemplate,
         toolSchemas: options.toolSchemas,
       });

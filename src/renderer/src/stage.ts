@@ -56,6 +56,7 @@ import {
   type VowelViseme,
 } from "../../shared/visemes.ts";
 import { loadVrmIntoScene, type LoadedVrmRig } from "./vrmLoader.ts";
+import { StageLayerManager, type StageLayer } from "./stageLayers.ts";
 
 export { GESTURES, evaluateGestureMotion, type Gesture, type GestureMotionSample };
 
@@ -193,6 +194,7 @@ export class Stage {
   private readonly presenceTracker = new PresenceTracker({ enabled: false });
   private webcamStream: MediaStream | null = null;
   private webcamTimer: number | null = null;
+  private readonly layers = new StageLayerManager();
 
   private mood: Mood = "neutral";
   private thinking = false;
@@ -291,6 +293,13 @@ export class Stage {
     // Our motion has to be written to the bones before the runtime reads them each frame.
     this.scene.onBeforeAnimationsObservable.add(() => this.animate());
     this.mmdRuntime.register(this.scene);
+    this.layers.attachHost({
+      canvas: this.canvas,
+      scene: this.scene,
+      camera: this.camera,
+      skyLight: this.skyLight,
+      sunLight: this.sunLight,
+    });
 
     this.frameRequest = requestAnimationFrame(this.tick);
     new ResizeObserver(() => {
@@ -1016,7 +1025,10 @@ export class Stage {
     const dt = Math.min(0.1, this.engine.getDeltaTime() / 1000);
     this.clock += dt;
     const rig = this.rig;
-    if (!rig) return;
+    if (!rig) {
+      this.runStageLayers(dt);
+      return;
+    }
     const t = this.clock;
 
     // --- face ---------------------------------------------------------------
@@ -1282,10 +1294,48 @@ export class Stage {
       ),
     );
 
+    this.runStageLayers(dt);
     rig.stepPhysics(dt);
   }
 
+  /** Registers an optional feature-flagged stage layer onto the render loop. */
+  registerLayer(layer: StageLayer): void {
+    this.layers.register(layer);
+    this.stir();
+  }
+
+  /** Unregisters a stage layer by ID. */
+  unregisterLayer(id: string): boolean {
+    return this.layers.unregister(id);
+  }
+
+  private runStageLayers(dtSec: number): void {
+    if (this.layers.list().length === 0) return;
+    this.layers.update({
+      dtSec,
+      elapsedSec: this.clock,
+      mood: this.mood,
+      thinking: this.thinking,
+      listening: this.listening,
+      asleep: this.asleep,
+      voiceLevel: this.voiceLevel,
+      mouthOpen: this.mouthOpen,
+      hasModel: this.rig !== null,
+      setBoneRotation: (bone, quat) => {
+        this.rig?.setBoneRotation(
+          bone as RigBoneKey,
+          new Quaternion(quat[0], quat[1], quat[2], quat[3]),
+        );
+      },
+      setMorphWeight: (name, weight) => {
+        this.rig?.setMorphWeight(name, weight);
+      },
+      applyLighting: (state) => this.applyLightingState(state),
+    });
+  }
+
   dispose(): void {
+    this.layers.dispose();
     this.stopWebcamPresence();
     this.disposeRoomScene();
     this.clearModel();

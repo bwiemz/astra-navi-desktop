@@ -92,7 +92,7 @@ if (process.argv.includes("--plugin")) {
     process.exit(2);
   }
   const { PluginManifestSchema, runPluginBundledEvals } = await import("../src/core/pluginSdk.ts");
-  const raw = JSON.parse(await readFile(join(pluginDir, "plugin.json"), "utf8")) as unknown;
+  const raw = JSON.parse(await readFile(join(pluginDir, "manifest.json"), "utf8")) as unknown;
   const manifest = PluginManifestSchema.parse(raw);
   const res = await runPluginBundledEvals(manifest, {
     workspace: process.cwd(),

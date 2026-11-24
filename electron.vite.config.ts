@@ -16,8 +16,7 @@ export default defineConfig({
         input: {
           index: resolve(import.meta.dirname, "src/preload/index.ts"),
           settings: resolve(import.meta.dirname, "src/preload/settings.ts"),
-          missionControl: resolve(import.meta.dirname, "src/preload/missionControl.ts"),
-          studioTools: resolve(import.meta.dirname, "src/preload/studioTools.ts"),
+          workbench: resolve(import.meta.dirname, "src/preload/workbench.ts"),
         },
         // A sandboxed preload script has to be CommonJS.
         output: { format: "cjs", entryFileNames: "[name].cjs" },
@@ -32,10 +31,7 @@ export default defineConfig({
         input: {
           index: resolve(import.meta.dirname, "src/renderer/index.html"),
           settings: resolve(import.meta.dirname, "src/renderer/settings.html"),
-          missionControl: resolve(import.meta.dirname, "src/renderer/mission-control.html"),
-          avatarStudio: resolve(import.meta.dirname, "src/renderer/avatar-studio.html"),
-          turnXray: resolve(import.meta.dirname, "src/renderer/turn-xray.html"),
-          policyComposer: resolve(import.meta.dirname, "src/renderer/policy-composer.html"),
+          workbench: resolve(import.meta.dirname, "src/renderer/workbench.html"),
         },
       },
     },

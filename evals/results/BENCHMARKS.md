@@ -310,4 +310,40 @@ Executed against newly provisioned Proxmox test VMs (`293` and `294`) on `192.16
   - `dumpsys package app.astranavi.station` confirmed `.MainActivity`, `.VoiceWidgetProvider`, and `.PushToTalkTileService (permission android.permission.BIND_QUICK_SETTINGS_TILE)` registered.
   - `am start -W -n app.astranavi.station/.MainActivity --ez app.astranavi.station.START_VOICE true` cold-launched cleanly (`Status: ok`, `LaunchState: COLD`, `TotalTime: 772` ms, `WaitTime: 776` ms, `PID=4030` in `mResumedActivity`), LAN ping returned `pong-from-lan`, and `logcat -d -s AndroidRuntime:E` had zero fatal exceptions.
 
+---
+
+## 9. Consolidation, 2-Winner Voice Pruning, Security Audit & LoRA v3 (`experimental`)
+
+### 9.1 `QwenChatWrapper`-Exact LoRA v3 (`exp-small-lora-v3`) vs. v2, v1 & Baseline (`163` Cases)
+
+Aligning `src/core/trainingExport.ts` + `scripts/export-pairs.ts` byte-for-byte with runtime `QwenChatWrapper({ variation: "3.5" })` (`<parameter=params>\n{JSON}\n</parameter>`, `JSON.stringify` `<tool_response>`, real `buildSystemPrompt`, and `[form]` typed suffix without forced empty `<think>\n\n</think>`) and training with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True --max-tokens 6144` (`276` train / `15` held-out, `36` > `6144` skipped, rank `8`, alpha `16`, `lr=1.5e-5`, `1.5` epochs, `15.2M` trainable params in `bfloat16`) reduced held-out loss monotonically from **`1.1843`** (step 0) -> **`0.5076`** (step 52 best, exported to `59 MB` / `400`-tensor GGUF):
+
+| Category / Metric | `bench-small-distilled` (v1) | `exp-small-lora-v2` (v2) | `exp-small-lora-v3` (v3) | `post-ux-small` (Base 4B) | Delta (v3 vs Base) |
+| --- | --- | --- | --- | --- | --- |
+| Tool choice and arguments | `28%` | `81%` | `83%` (`resisted 100%`) | **`91%`** (`resisted 100%`) | `-9 pts` |
+| Follow-through honesty | `20%` | `80%` | **`93%`** | `87%` | **`+7 pts`** (within noise) |
+| Safe under injected text | `20%` | `67%` | **`87%`** (`did not try: 93%`) | **`87%`** (`did not try: 93%`) | `0 pts` |
+| Character and form | `78%` | **`83%`** | `67%` | `78%` | `-11 pts` (within noise) |
+| Using what she knows | `53%` | **`76%`** | `71%` | `71%` | `0 pts` |
+| Reasoning and knowledge | `89%` | **`97%`** | **`97%`** | **`97%`** | `0 pts` |
+| Multi-step | `0%` | `63%` | **`88%`** | `81%` | **`+6 pts`** (within noise) |
+| **Overall (mean of categories)** | `41%` | `78%` | `84%` (`+6 pts` vs v2) | **`85%`** | **-1 pt** |
+| **Nothing leaked** | `100%` | `98%` | **`100%`** (`+2 pts` vs v2) | **`100%`** | **`0 pts`** |
+| **Median TTFT / Writing speed** | `1.27 s` / `133 tok/s` | `1.76 s` / `145 tok/s` | `1.32 s` / `148 tok/s` | **`1.06 s` / `183 tok/s`** | `+0.26 s` / `-35 tok/s` |
+| **Own VRAM (loaded / peak)** | `4,222 MiB` peak | `4,154 / 4,164 MiB` | `4,154 / 4,164 MiB` | **`3,992 / 4,000 MiB`** | `+164 MiB` peak |
+
+- **Shipping Gate Outcome:** LoRA v3 recovered `+6 pts` overall (`78% -> 84%`), `+13 pts` Follow-through Honesty (`80% -> 93%`), `+20 pts` Injection Safety (`67% -> 87%`), `+25 pts` Multi-step (`63% -> 88%`), and restored **`100%` Nothing Leaked**. Because overall mean `84%` remains 1 pt below the `>= 85%` shipping bar, **`overlay/assets/lora/` stays omitted in `astra-navi-supporter`**.
+
+### 9.2 Pruned 2-Winner Voice Shootout & Real-Hardware Re-Runs
+
+- **Pruned 2-Winner Voice Architecture (`scripts/benchmark-voice-shootout.ts`, CPU `0 MB` VRAM):** Deleted `experimentalUltraLightVoice.ts`, `llamaSpeechBackend.ts`, and `scripts/benchmark-voice-rd.ts`. Live Kokoro (`kokoro-js` `q8`) verified EN-only (`kokoroEnSupported: true`, `kokoroJaSupported: false`, `kokoroZhSupported: false`; JA/ZH route to `qwen3-tts-0.6b`):
+  - `astra` (`af_heart`, `q8`): `232.1 ms` load, `1,684.3 ms` TTFA, `3,431.8 ms` synth / `6,500 ms` audio (**`0.528` RTF**), `2` clauses, `326` cue frames (`3.39 ms/s`), `469 MB` RSS, RMS `-23.7 dB`, peak `0.588`, clipped `0`.
+  - `bright` (`af_bella`, `q8`): `217.1 ms` load, `1,869.7 ms` TTFA, `2,739.6 ms` synth / `6,450 ms` audio (**`0.425` RTF**), `2` clauses, `323` cue frames (`3.097 ms/s`), `727 MB` RSS, RMS `-23.3 dB`, peak `0.529`, clipped `0`.
+  - `calm` (`bf_emma`, `q8`): `221 ms` load, `2,226.9 ms` TTFA, `2,245.2 ms` synth / `5,275 ms` audio (**`0.426` RTF**), `1` clause, `264` cue frames (`3.461 ms/s`), `982 MB` RSS, RMS `-21.2 dB`, peak `0.627`, clipped `0`.
+  - `Qwen3StreamingTtsBackend` loopback PCM16 transport: `8` chunks (`24,000` samples), `5.6 ms` TTFA, `52.1 ms` total; `detectCodeSwitchSpans` split EN/JA cleanly (`[{en:"Hello"},{ja:"世界"},{en:"and"},{ja:"こんにちは!"}]`).
+- **GPU KV & Speculative Shootout Re-Run (`scripts/benchmark-speculative-kv.ts`):** `9B FP16 KV` (`2,528 ms` load, `5,698 MiB` VRAM, `44 ms` TTFT, `115.2 tok/s`), `9B Q8_0 KV` (`908 ms` load, `5,580 MiB`, `44 ms`, **`115.4 tok/s`**), `9B Q4_0 KV` (`989 ms` load, `5,514 MiB`, `44 ms`, `110.4 tok/s`), `9B + 4B` draft (`98 ms` TTFT, `48 tok/s`).
+- **Proxmox 3-Node LAN Sync (`scripts/test-proxmox-multinode.ts`, CTs `291`/`292`):** Converged in **`58 ms`**, tampered & rogue rejected (`403`), WAN `8.8.8.8` blocked pre-connect, `zpool` `online`; CTs destroyed afterwards.
+- **Workbench, Seams & Security Suite:** Consolidated 4 pop-outs into `workbench.html`; added `TurnHookPipeline` & `StageLayerManager` seams (`tests/integrationSeams.test.ts`); hardened `peerSync.ts`, `vaultRag.ts`, `lanVisionOffload.ts`, and `voiceCloneStudio.ts` (`tests/experimentalSecurityAudit.test.ts`). Full suite: **`125/125` test files (`2,496/2,496` tests)**, **`175/175` native hands chaos frames**, **`5/5` multi-turn scenarios (`42` turns)**, and **`7/7` plugins** (`4/4` or `5/5` per plugin).
+
+
 

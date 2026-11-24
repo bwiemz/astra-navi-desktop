@@ -123,13 +123,12 @@ import { startsAtLogin } from "./loginStart.ts";
 import { createModelFiles } from "./modelFiles.ts";
 import { globalShortcut } from "electron";
 import { createReports } from "./reports.ts";
-import { createMissionControlController } from "./missionControlIpc.ts";
 import { createSettingsController } from "./settingsIpc.ts";
-import { createStudioToolsController } from "./studioToolsIpc.ts";
 import { StartupGuard, type BootStartStatus } from "../core/safeMode.ts";
 import { programShown } from "./shown.ts";
 import { createTrayMenu } from "./tray.ts";
 import { createVoiceController } from "./voiceControl.ts";
+import { createWorkbenchController } from "./workbenchIpc.ts";
 
 const SCHEME = "astranavi";
 const LEGACY_SCHEME = "aichan";
@@ -735,7 +734,7 @@ const settings = createSettingsController({
   rebuildTrayMenu: () => rebuildTrayMenu(),
 });
 
-const missionControl = createMissionControlController({
+const workbench = createWorkbenchController({
   appOrigin: APP_ORIGIN,
   config,
   dataDir,
@@ -749,15 +748,6 @@ const missionControl = createMissionControlController({
   traces,
   recall: () => recallRef,
   brain: () => brain,
-});
-
-const studioTools = createStudioToolsController({
-  appOrigin: APP_ORIGIN,
-  config,
-  memoryStore: () => memoryStore,
-  orders: () => orders,
-  skills: () => compiledSkills,
-  traces,
 });
 
 // The badge and its menu are laid out in tray.ts; what each entry does is done here.
@@ -776,10 +766,7 @@ const { rebuildTrayMenu, createTray } = createTrayMenu({
   nameRequired: () => voice.nameRequired(),
   showWindow,
   openSettings: () => settings.openSettings(),
-  openMissionControl: () => missionControl.open(),
-  openAvatarStudio: () => studioTools.open("avatar-studio"),
-  openTurnXray: () => studioTools.open("turn-xray"),
-  openPolicyComposer: () => studioTools.open("policy-composer"),
+  openWorkbench: (tab) => workbench.open(tab),
   sendToWindow,
   chooseBrain,
   chooseLanguage,
@@ -1677,8 +1664,7 @@ async function main(): Promise<void> {
     importModelFile,
   });
   settings.registerSettingsIpc();
-  missionControl.registerIpc();
-  studioTools.registerIpc();
+  workbench.registerIpc();
   registerFleetIpc({
     config,
     fleet: () => fleet,

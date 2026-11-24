@@ -1,18 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { UltraLightOnnxVoice } from "../src/core/voice/experimentalUltraLightVoice.ts";
 import {
   detectCodeSwitchSpans,
   Qwen3AsrMultilingualClient,
   Qwen3StreamingTtsBackend,
 } from "../src/core/voice/experimentalMultilingualVoice.ts";
 import { extractExpressiveCues } from "../src/core/voice/expressiveAudio.ts";
+import {
+  ONNX_SHOOTOUT_CATALOG,
+  OnnxVoice,
+  splitStreamingClauses,
+} from "../src/core/voice/onnxVoice.ts";
 import { blendExpressiveGesture, evaluateGestureMotion } from "../src/shared/gestures.ts";
 import { sampleExpressiveCue } from "../src/shared/visemes.ts";
 
 describe("Expressive Audio Cue Extraction & Blending", () => {
   it("extracts F0 pitch, pause regions, emphasis, and periodic laughter modulation", () => {
     const sr = 16_000;
-    // 0.6s silence -> 0.4s pitched tone (200Hz, high amp) -> 0.8s bursty 5Hz laugh modulation
     const samples = new Float32Array(sr * 2);
     for (let i = Math.floor(sr * 0.6); i < Math.floor(sr * 1.1); i += 1) {
       samples[i] = 0.45 * Math.sin((2 * Math.PI * 200 * i) / sr);
@@ -25,15 +28,12 @@ describe("Expressive Audio Cue Extraction & Blending", () => {
 
     const cues = extractExpressiveCues(samples, sr, 20);
     expect(cues.length).toBeGreaterThan(80);
-    // Silence region marked pause
     const silentCue = sampleExpressiveCue(cues, 200);
     expect(silentCue.pause).toBe(true);
-    // Pitched region detects F0 near 200 Hz and active voice
     const voicedCue = sampleExpressiveCue(cues, 850);
     expect(voicedCue.pause).toBe(false);
     expect(voicedCue.pitchHz).toBeGreaterThan(170);
     expect(voicedCue.pitchHz).toBeLessThan(230);
-    // Bursty laugh region raises laugh modulation
     const maxLaugh = Math.max(...cues.slice(65).map((c) => c.laugh));
     expect(maxLaugh).toBeGreaterThan(0.15);
 
@@ -53,25 +53,36 @@ describe("Expressive Audio Cue Extraction & Blending", () => {
   });
 });
 
-describe("Experimental Ultra-Light CPU & Multilingual Streaming Backends", () => {
-  it("streams Phonon-31M runtime chunks with zero Python and attaches expressive cues", async () => {
+describe("Zero-Python CPU Clause Streaming & Multilingual Streaming Backends", () => {
+  it("streams multi-clause OnnxVoice audio with expressive cues across EN/JA/ZH", async () => {
     const sr = 24_000;
     const tone = new Float32Array(sr * 0.25);
     for (let i = 0; i < tone.length; i += 1) {
       tone[i] = 0.25 * Math.sin((2 * Math.PI * 180 * i) / sr);
     }
-    const voice = new UltraLightOnnxVoice({
-      engine: "phonon-31m",
-      cacheDir: "/tmp",
-      phononRuntime: {
-        async *synthesizeStream() {
-          yield { samples: tone, sampleRate: sr };
-          yield { samples: tone, sampleRate: sr };
+    const calls: { text: string; voice: string }[] = [];
+    const voice = new OnnxVoice({
+      cacheDir: "/tmp/speech",
+      voice: "astra",
+      speed: 1.0,
+      quantization: "q8",
+      loadEngine: async () => ({
+        generate: async (text, opts) => {
+          calls.push({ text, voice: opts.voice });
+          return { audio: tone, sampling_rate: sr };
         },
-      },
+      }),
     });
     expect(voice.supports("en")).toBe(true);
     expect(voice.supports("ja")).toBe(false);
+    expect(voice.supports("zh")).toBe(false);
+    expect(new OnnxVoice({ cacheDir: "/tmp/speech", voice: "jf_alpha", speed: 1.0 }).supports("ja")).toBe(
+      true,
+    );
+    expect(splitStreamingClauses("First clause. Second clause!")).toEqual([
+      "First clause.",
+      "Second clause!",
+    ]);
 
     const chunks = [];
     for await (const c of voice.synthesizeStream("First clause. Second clause!", "en")) {
@@ -79,9 +90,11 @@ describe("Experimental Ultra-Light CPU & Multilingual Streaming Backends", () =>
     }
     expect(chunks).toHaveLength(2);
     expect(chunks[0]?.cues.length).toBeGreaterThan(0);
+    expect(calls.map((c) => c.text)).toEqual(["First clause.", "Second clause!"]);
 
     const full = await voice.synthesize("First clause. Second clause!", "en");
     expect(full.samples.length).toBe(tone.length * 2);
+    expect(ONNX_SHOOTOUT_CATALOG.map((e) => e.id)).toEqual(["kokoro-82m", "qwen3-tts-0.6b"]);
   });
 
   it("blocks public SSRF hosts and streams chunked PCM16 + 3s voice clone on private LAN", async () => {
@@ -103,7 +116,7 @@ describe("Experimental Ultra-Light CPU & Multilingual Streaming Backends", () =>
         capturedBody = String(init?.body ?? "");
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(pcm.subarray(0, 7)); // odd byte boundary split
+            controller.enqueue(pcm.subarray(0, 7));
             controller.enqueue(pcm.subarray(7));
             controller.close();
           },

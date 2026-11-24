@@ -24,6 +24,7 @@ import {
   ToolLoopGuard,
 } from "./grammarGuard.ts";
 import { clipForTrace, type TracedCall, type TracedCheck, type TurnTrace } from "./trace.ts";
+import type { TurnHookContext } from "./turnHooks.ts";
 import {
   AWAY_MARK,
   buildSystemPrompt,
@@ -649,6 +650,34 @@ export class Brain {
       const abilities = JSON.stringify(this.abilities());
       if (this.instructedFor !== null && this.instructedFor !== abilities) deps.engine.refresh();
       this.instructedFor = abilities;
+      const hookPipeline = deps.engine.hooks?.() ?? null;
+      const hookCtx: TurnHookContext | null =
+        hookPipeline && hookPipeline.list().length > 0
+          ? {
+              userText: message.text,
+              spoken: message.spoken === true,
+              isEvent: message.event === true,
+              away: this.turnAway,
+              readOutsideText: this.readOutsideText,
+              handsOff: deps.config.value.handsOff,
+              offeredTools: [],
+              usedTools: [],
+              replyText: "",
+              falseClaim: false,
+              flags: {},
+            }
+          : null;
+      let routedOfferedOverride: string[] | undefined;
+      if (hookCtx && hookPipeline) {
+        const routed = await hookPipeline.runBeforeRoute(hookCtx);
+        routedOfferedOverride = routed.offeredTools;
+        if (routed.shortCircuitReply !== undefined) {
+          this.openReply();
+          this.moodStream.push(routed.shortCircuitReply);
+          this.moodStream.flush();
+          return;
+        }
+      }
       const session = await deps.engine.session(this.instructions());
       if (signal.aborted) return;
 
@@ -685,8 +714,15 @@ export class Brain {
             };
       const everyTool = deps.lab?.tools ? deps.lab.tools(usual, host) : usual;
       const loopGuard = new ToolLoopGuard();
+      const fitted = await this.fitting(everyTool, message);
+      const selectedTools =
+        routedOfferedOverride && !message.event
+          ? Object.fromEntries(
+              Object.entries(fitted).filter(([name]) => routedOfferedOverride.includes(name)),
+            )
+          : fitted;
       const functions = hardenFunctionsForGrammar(
-        await this.fitting(everyTool, message),
+        selectedTools,
         loopGuard,
         undefined,
         (entry) =>
@@ -703,6 +739,7 @@ export class Brain {
       );
       if (signal.aborted) return;
       this.offeredNow = Object.keys(functions);
+      if (hookCtx) hookCtx.offeredTools = [...this.offeredNow];
       // So that a later change to the conversation does not cost reading the
       // instructions again; see the engine.
       await deps.engine.anchor(functions, signal);
@@ -819,6 +856,15 @@ export class Brain {
           }
         },
       });
+      if (hookCtx && hookPipeline && !signal.aborted) {
+        hookCtx.usedTools = this.turnTools.map((record) => record.tool);
+        hookCtx.replyText = this.replyText;
+        hookCtx.falseClaim = falseClaim;
+        if (this.tracedCalls.length > 0) {
+          hookCtx.flags.lastToolInput = this.tracedCalls[this.tracedCalls.length - 1]?.input;
+        }
+        await hookPipeline.runAfterPlan(hookCtx);
+      }
       for (const followUp of followUps) {
         this.tracedChecks.push({ found: followUp.found, did: followUp.did });
         if (followUp.notice !== undefined) {
@@ -874,6 +920,12 @@ export class Brain {
           };
         }
         this.journal(message, falseClaim);
+      }
+      if (hookCtx && hookPipeline && !signal.aborted) {
+        hookCtx.usedTools = this.turnTools.map((record) => record.tool);
+        hookCtx.replyText = this.replyText;
+        hookCtx.falseClaim = falseClaim;
+        await hookPipeline.runBeforeCommit(hookCtx);
       }
       if (!signal.aborted && deps.onTrace) {
         const meterAfter = deps.engine.meter();

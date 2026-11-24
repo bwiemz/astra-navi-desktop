@@ -23,6 +23,7 @@ import {
   downloadModelResumable,
   probeDiskSpace,
 } from "./modelBundle.ts";
+import type { TurnHookPipeline } from "./turnHooks.ts";
 import {
   BRAIN_MODELS,
   isDownloaded,
@@ -108,6 +109,8 @@ export interface EngineOptions {
   hardwareProfile?: () => Promise<HardwareProfile>;
   /** How soon after a reply the model is put away while a game is running. */
   yieldAfterMs?: number;
+  /** Optional feature-flagged turn hook pipeline (`turnHooks.ts`). */
+  turnHooks?: TurnHookPipeline;
   onStatus(status: EngineStatus): void;
   onDownloadUpdate?(state: ModelDownloadState): void;
 }
@@ -285,6 +288,11 @@ export class LocalEngine {
 
   constructor(options: EngineOptions) {
     this.options = options;
+  }
+
+  /** Optional turn hook pipeline registered on the engine (null by default). */
+  hooks(): TurnHookPipeline | null {
+    return this.options.turnHooks ?? null;
   }
 
   /** Registers or replaces an observer for background model download progress. */

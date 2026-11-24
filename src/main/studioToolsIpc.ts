@@ -1,5 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
-import { join } from "node:path";
+import { ipcMain } from "electron";
 import type { Config, ConfigStore } from "../core/config.ts";
 import { detectFactContradictions } from "../core/hygiene.ts";
 import type { MemoryStore } from "../core/memory.ts";
@@ -23,14 +22,12 @@ import {
   type PolicyComposerSnapshot,
   type StandingOrderDraft,
   type StandingOrderPreviewResult,
-  type StudioToolWindowKind,
   type TurnXraySnapshot,
 } from "../shared/studioTools.ts";
 
 /**
- * Backend IPC controller and hardened BrowserWindow manager for the three
- * standalone Power-User Studio & Diagnostic windows (`avatar-studio.html`,
- * `turn-xray.html`, `policy-composer.html`).
+ * Backend IPC handlers and snapshot builders for the Turn X-Ray, Policy Composer,
+ * and Avatar Studio tabs inside the consolidated Workbench window (`workbench.html`).
  */
 
 export interface StudioToolsSnapshotDeps {
@@ -43,31 +40,8 @@ export interface StudioToolsSnapshotDeps {
 
 export interface StudioToolsDeps extends StudioToolsSnapshotDeps {
   appOrigin: string;
+  isAuthorizedSender?(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean;
 }
-
-const WINDOW_META: Record<
-  StudioToolWindowKind,
-  { page: string; title: string; width: number; height: number }
-> = {
-  "avatar-studio": {
-    page: "avatar-studio.html",
-    title: "Astra Navi — Avatar & Stage Studio",
-    width: 980,
-    height: 700,
-  },
-  "turn-xray": {
-    page: "turn-xray.html",
-    title: "Astra Navi — Turn X-Ray & Provenance Inspector",
-    width: 1080,
-    height: 740,
-  },
-  "policy-composer": {
-    page: "policy-composer.html",
-    title: "Astra Navi — Visual Policy & Standing-Order Composer",
-    width: 1040,
-    height: 740,
-  },
-};
 
 export function buildAvatarStudioSnapshot(
   deps: Pick<StudioToolsSnapshotDeps, "config">,
@@ -272,63 +246,17 @@ export function buildPolicyComposerSnapshot(
   };
 }
 
-export interface StudioToolsController {
-  open(kind: StudioToolWindowKind): void;
-  window(kind: StudioToolWindowKind): BrowserWindow | null;
+export interface StudioToolsIpcController {
   registerIpc(): void;
-  fromStudioToolsWindow(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean;
 }
 
-export function createStudioToolsController(deps: StudioToolsDeps): StudioToolsController {
-  const windows = new Map<StudioToolWindowKind, BrowserWindow>();
+export function createStudioToolsIpc(deps: StudioToolsDeps): StudioToolsIpcController {
   let ipcRegistered = false;
-
-  function open(kind: StudioToolWindowKind): void {
-    const existing = windows.get(kind);
-    if (existing && !existing.isDestroyed()) {
-      existing.show();
-      existing.focus();
-      return;
-    }
-    const meta = WINDOW_META[kind];
-    const win = new BrowserWindow({
-      width: meta.width,
-      height: meta.height,
-      minWidth: 700,
-      minHeight: 500,
-      show: false,
-      autoHideMenuBar: true,
-      backgroundColor: "#0f172a",
-      title: meta.title,
-      webPreferences: {
-        preload: join(import.meta.dirname, "../preload/studioTools.cjs"),
-        contextIsolation: true,
-        sandbox: true,
-        nodeIntegration: false,
-        webSecurity: true,
-        devTools: !app.isPackaged,
-      },
-    });
-    windows.set(kind, win);
-    win.removeMenu();
-    win.once("ready-to-show", () => win.show());
-    win.on("closed", () => {
-      if (windows.get(kind) === win) windows.delete(kind);
-    });
-    win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    win.webContents.on("will-navigate", (event) => event.preventDefault());
-    void win.loadURL(`${deps.appOrigin}/${meta.page}`);
-  }
 
   function fromStudioToolsWindow(
     event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent,
   ): boolean {
-    for (const win of windows.values()) {
-      if (!win.isDestroyed() && event.sender === win.webContents) {
-        return true;
-      }
-    }
-    return false;
+    return deps.isAuthorizedSender ? deps.isAuthorizedSender(event) : false;
   }
 
   function registerIpc(): void {
@@ -512,9 +440,6 @@ export function createStudioToolsController(deps: StudioToolsDeps): StudioToolsC
   }
 
   return {
-    open,
-    window: (kind) => windows.get(kind) ?? null,
     registerIpc,
-    fromStudioToolsWindow,
   };
 }

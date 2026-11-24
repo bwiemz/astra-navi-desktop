@@ -64,7 +64,13 @@ export function scrubSecretsForSync(text: string): string {
   return text
     .replace(/\bsk-(?:live-|proj-)?[A-Za-z0-9_-]{12,}\b/g, "[redacted-secret]")
     .replace(/\b(?:ghp|gho|github_pat)_[A-Za-z0-9_]{16,}\b/g, "[redacted-secret]")
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[redacted-aws-key]")
     .replace(/\bBearer\s+[A-Za-z0-9._-]{12,}\b/gi, "Bearer [redacted-token]")
+    .replace(/\bBasic\s+[A-Za-z0-9+/=]{12,}\b/gi, "Basic [redacted-token]")
+    .replace(
+      /\b((?:api[_-]?key|access[_-]?token|auth[_-]?token|password)\s*[:=]\s*["']?)[^\s"',}]{8,}(["']?)/gi,
+      "$1[redacted-secret]$2",
+    )
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted-key]");
 }
 
@@ -124,6 +130,7 @@ export class PeerStateSyncEngine {
   private readonly privateKeyPem: string;
   private readonly trustedPeers = new Map<string, string>();
   private readonly records = new Map<string, SyncRecord>();
+  private readonly seenEnvelopeNonces = new Map<string, number>();
   private readonly now: () => number;
   private readonly maxClockSkewMs: number;
 
@@ -306,9 +313,21 @@ export class PeerStateSyncEngine {
       return { ok: false, applied: 0, records: [], reason: "Invalid Ed25519 envelope signature." };
     }
 
+    const cutoffMs = this.now() - this.maxClockSkewMs;
+    for (const [k, seenAtMs] of this.seenEnvelopeNonces.entries()) {
+      if (seenAtMs < cutoffMs) this.seenEnvelopeNonces.delete(k);
+    }
+    const nonceKey = `${envelope.senderNodeId}:${envelope.ivB64}:${envelope.tagB64}`;
+    if (this.seenEnvelopeNonces.has(nonceKey)) {
+      return { ok: false, applied: 0, records: [], reason: "Replayed sync envelope rejected." };
+    }
+
     try {
       const iv = Buffer.from(envelope.ivB64, "base64");
       const tag = Buffer.from(envelope.tagB64, "base64");
+      if (iv.length !== 12 || tag.length !== 16) {
+        return { ok: false, applied: 0, records: [], reason: "Invalid AES-GCM IV or tag length." };
+      }
       const ciphertext = Buffer.from(envelope.ciphertextB64, "base64");
       const decipher = createDecipheriv("aes-256-gcm", this.sharedKey, iv);
       decipher.setAAD(envelopeAad(envelope));
@@ -319,6 +338,12 @@ export class PeerStateSyncEngine {
       const parsed: unknown = JSON.parse(decrypted);
       if (!Array.isArray(parsed)) {
         return { ok: false, applied: 0, records: [], reason: "Decrypted sync payload is not an array." };
+      }
+      this.seenEnvelopeNonces.set(nonceKey, envelope.sentAtMs);
+      while (this.seenEnvelopeNonces.size > 4096) {
+        const oldest = this.seenEnvelopeNonces.keys().next().value;
+        if (oldest !== undefined) this.seenEnvelopeNonces.delete(oldest);
+        else break;
       }
       const valid = parsed.filter(isValidSyncRecord);
       const applied = this.mergeRecords(valid);

@@ -8,6 +8,7 @@ import type { Reach } from "../core/reach.ts";
 import type { VoiceBackend } from "../core/voice/backend.ts";
 import { FullVoice } from "../core/voice/fullVoice.ts";
 import { LightVoice } from "../core/voice/lightVoice.ts";
+import type { WorkbenchTab } from "../shared/workbench.ts";
 import { setStartAtLogin } from "./loginStart.ts";
 
 /**
@@ -58,10 +59,7 @@ export interface TrayDeps {
   nameRequired(): boolean;
   showWindow(focusInput: boolean): void;
   openSettings(): void;
-  openMissionControl?: () => void;
-  openAvatarStudio?: () => void;
-  openTurnXray?: () => void;
-  openPolicyComposer?: () => void;
+  openWorkbench?: (tab?: WorkbenchTab) => void;
   sendToWindow(channel: string, payload?: unknown): void;
   chooseBrain(choice: string): void;
   chooseLanguage(language: LanguageCode): void;
@@ -117,26 +115,8 @@ export function createTrayMenu(deps: TrayDeps): TrayMenu {
       Menu.buildFromTemplate([
         { label: "Talk to Astra Navi", click: () => deps.showWindow(true) },
         { label: "Settings…", click: deps.openSettings },
-        ...(deps.openMissionControl
-          ? [{ label: "Mission Control…", click: deps.openMissionControl }]
-          : []),
-        ...(deps.openAvatarStudio || deps.openTurnXray || deps.openPolicyComposer
-          ? [
-              {
-                label: "Studio & Diagnostics",
-                submenu: [
-                  ...(deps.openAvatarStudio
-                    ? [{ label: "Avatar & Stage Studio…", click: deps.openAvatarStudio }]
-                    : []),
-                  ...(deps.openTurnXray
-                    ? [{ label: "Turn X-Ray & Provenance…", click: deps.openTurnXray }]
-                    : []),
-                  ...(deps.openPolicyComposer
-                    ? [{ label: "Policy & Standing-Order Composer…", click: deps.openPolicyComposer }]
-                    : []),
-                ],
-              },
-            ]
+        ...(deps.openWorkbench
+          ? [{ label: "Workbench…", click: () => deps.openWorkbench?.("missions") }]
           : []),
         {
           label: "Show or hide",

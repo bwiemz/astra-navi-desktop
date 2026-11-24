@@ -1,6 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,16 +9,11 @@ import {
 } from "../src/core/acousticEvents.ts";
 import { openSignedCharacterBundle } from "../src/core/characterBundle.ts";
 import { ShipEars, SHIP_EARS_RATE } from "../src/core/shipEars.ts";
-import {
-  ChatterboxNanoVoice,
-  decodeWavPcm16,
-  LlamaCppSpeechBackend,
-} from "../src/core/voice/llamaSpeechBackend.ts";
+import { Qwen3StreamingTtsBackend } from "../src/core/voice/experimentalMultilingualVoice.ts";
 import { ONNX_SHOOTOUT_CATALOG } from "../src/core/voice/onnxVoice.ts";
 import { cleanForSpeech, parseProsodyScript } from "../src/core/voice/speechText.ts";
 import {
   analyzeVoiceReferenceClip,
-  encodePcm16Wav,
   packageClonedVoiceArchive,
 } from "../src/core/voiceCloneStudio.ts";
 
@@ -36,57 +30,11 @@ describe("Post-v1 Voice, Prosody & Acoustic Intelligence R&D (Track 2)", () => {
     expect(parsed.cues.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("enforces LAN-only SSRF guard and synthesizes PCM16 WAV via LlamaCppSpeechBackend + ChatterboxNanoVoice", async () => {
+  it("enforces LAN-only SSRF guard on Qwen3StreamingTtsBackend and verifies pruned shootout catalog", () => {
     expect(
-      () => new LlamaCppSpeechBackend({ endpointUrl: "https://8.8.8.8/v1/audio/speech" }),
-    ).toThrow(/Refusing non-LAN/);
-
-    const samples = new Float32Array(2400);
-    for (let i = 0; i < samples.length; i += 1) {
-      samples[i] = Math.sin((2 * Math.PI * 440 * i) / 24_000) * 0.35;
-    }
-    const wavBytes = encodePcm16Wav(samples, 24_000);
-    const decoded = decodeWavPcm16(wavBytes);
-    expect(decoded.sampleRate).toBe(24_000);
-    expect(decoded.samples.length).toBe(2400);
-
-    const srv = createServer((req, res) => {
-      if (req.url === "/health") {
-        res.writeHead(200);
-        res.end("ok");
-        return;
-      }
-      res.writeHead(200, { "Content-Type": "audio/wav" });
-      res.end(wavBytes);
-    });
-    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
-    const addr = srv.address();
-    const port = typeof addr === "object" && addr ? addr.port : 0;
-    try {
-      const backend = new LlamaCppSpeechBackend({
-        endpointUrl: `http://127.0.0.1:${port}`,
-        voice: "af_heart",
-      });
-      await backend.warm();
-      const audio = await backend.synthesize("Hello Captain.", "en");
-      expect(audio.sampleRate).toBe(24_000);
-      expect(audio.samples.length).toBe(2400);
-    } finally {
-      await new Promise<void>((resolve) => srv.close(() => resolve()));
-    }
-
-    const cb = new ChatterboxNanoVoice({
-      exaggeration: 1.5,
-      runtime: {
-        synthesize: async (inp) => ({
-          samples: new Float32Array(Math.round(inp.exaggeration * 1000)),
-          sampleRate: 24_000,
-        }),
-      },
-    });
-    const cbOut = await cb.synthesize("Nice!", "en");
-    expect(cbOut.samples.length).toBe(1000); // clamped exaggeration=1.0
-    expect(ONNX_SHOOTOUT_CATALOG.length).toBeGreaterThanOrEqual(4);
+      () => new Qwen3StreamingTtsBackend({ endpointUrl: "https://8.8.8.8/v1/tts/stream" }),
+    ).toThrow(/non-LAN/i);
+    expect(ONNX_SHOOTOUT_CATALOG.map((e) => e.id)).toEqual(["kokoro-82m", "qwen3-tts-0.6b"]);
   });
 
   it("classifies silence vs high-pitch chime/alarm & routes ShipEars.classifyRecent into reactions", async () => {

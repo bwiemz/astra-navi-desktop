@@ -18,12 +18,10 @@ const PLUGIN_IDS = [
 
 describe("Post-v1 Signed Opt-In Plugin Ecosystem Pack (Track 4)", () => {
   it.each(PLUGIN_IDS)(
-    "validates manifest.json == plugin.json, exact SHA-256 of index.ts, and 5/5 evals for %s",
+    "validates canonical manifest.json, exact SHA-256 of index.ts, and 5/5 evals for %s",
     async (id) => {
       const dir = join(process.cwd(), "plugins", id);
       const manifestRaw = readFileSync(join(dir, "manifest.json"), "utf8");
-      const pluginJsonRaw = readFileSync(join(dir, "plugin.json"), "utf8");
-      expect(pluginJsonRaw).toBe(manifestRaw);
 
       const manifest = PluginManifestSchema.parse(JSON.parse(manifestRaw));
       expect(manifest.defaultEnabled).toBe(false);

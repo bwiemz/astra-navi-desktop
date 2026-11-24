@@ -442,13 +442,15 @@ describe("Qwen3.5 SFT template & specialist domain routing", () => {
     });
     expect(ex).not.toBeNull();
     if (!ex) throw new Error("expected Qwen3.5 SFT example");
-    expect(ex.text).toContain("<think>\n\n</think>\n\n<tool_call>\n<function=ship_status>\n<parameter=detail>\n");
-    expect(ex.text).toContain("full");
-    expect(ex.text).toContain("</parameter>\n</function>\n</tool_call><|im_end|>");
+    expect(ex.text).toContain(
+      '<tool_call>\n<function=ship_status>\n<parameter=params>\n{"detail":"full"}\n</parameter>\n</function>\n</tool_call><|im_end|>',
+    );
+    expect(ex.text).toContain('<tool_response>\n"OK"\n</tool_response>');
+    expect(ex.text).not.toContain("<think>\n\n</think>");
     expect(ex.spans).toHaveLength(2);
     for (const [start, end] of ex.spans) {
       expect(end).toBeGreaterThan(start);
-      expect(Array.from(ex.text).slice(start, end).join("")).toContain("<think>\n\n</think>");
+      expect(Array.from(ex.text).slice(start, end).join("")).not.toContain("<think>\n\n</think>");
     }
 
     expect(inferSpecialistDomain("Check CPU load on proxmox node over SSH")).toBe("fleet-systems");

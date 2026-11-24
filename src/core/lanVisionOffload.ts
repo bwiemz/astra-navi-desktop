@@ -230,6 +230,12 @@ export class LanVisionOffloadServer {
       throw new Error("LAN vision shared secret must be at least 16 characters.");
     }
     const parsed = new URL(options.vlmEndpointUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error(`Refusing unsupported VLM protocol "${parsed.protocol}"; expected http: or https:.`);
+    }
+    if (parsed.username || parsed.password) {
+      throw new Error("Refusing VLM endpoint URL with embedded credentials.");
+    }
     if (!isPrivateLanHost(parsed.hostname)) {
       throw new Error(
         `Refusing non-LAN VLM endpoint "${parsed.hostname}"; secondary vision server must reside on private LAN.`,
@@ -255,9 +261,24 @@ export class LanVisionOffloadServer {
     if (packet.seq <= prevSeq) {
       return { accepted: false, reason: `Stale replay sequence ${packet.seq} <= ${prevSeq}.` };
     }
+    if (
+      !Array.isArray(packet.changedIndices) ||
+      packet.changedIndices.length > 64 ||
+      !Array.isArray(packet.dirtyTiles) ||
+      packet.dirtyTiles.length > 64
+    ) {
+      return { accepted: false, reason: "Tile payload exceeds 8x8 grid bounds." };
+    }
     if (SENSITIVE_WINDOW_RE.test(packet.app) || SENSITIVE_WINDOW_RE.test(packet.title)) {
       return { accepted: false, reason: "Sensitive window refused on offload server." };
     }
+    const sanitizeWindowField = (val: string): string =>
+      Array.from(val, (ch) => (ch.charCodeAt(0) < 32 ? " " : ch))
+        .join("")
+        .replace(/<\|[^|>]*\|>/g, "")
+        .slice(0, 120);
+    const safeApp = sanitizeWindowField(packet.app);
+    const safeTitle = sanitizeWindowField(packet.title);
 
     this.lastSeqByNode.set(packet.nodeId, packet.seq);
     const grid = this.reconstructedGridByNode.get(packet.nodeId) ?? new Uint8Array(64);
@@ -268,7 +289,7 @@ export class LanVisionOffloadServer {
     }
     this.reconstructedGridByNode.set(packet.nodeId, grid);
 
-    let summary = `[${packet.app}] ${packet.title}: ${packet.changedIndices.length} tile(s) updated on LAN co-pilot.`;
+    let summary = `[${safeApp}] ${safeTitle}: ${packet.changedIndices.length} tile(s) updated on LAN co-pilot.`;
     try {
       const chatUrl = new URL("/v1/chat/completions", this.vlmEndpointUrl);
       const res = await this.fetchImpl(chatUrl.toString(), {
@@ -284,7 +305,7 @@ export class LanVisionOffloadServer {
             },
             {
               role: "user",
-              content: `App=${packet.app}; Title=${packet.title}; ChangedTiles=${packet.changedIndices.join(",")}; MeanLuma=${Math.round(grid.reduce((s, v) => s + v, 0) / 64)}`,
+              content: `App=${safeApp}; Title=${safeTitle}; ChangedTiles=${packet.changedIndices.join(",")}; MeanLuma=${Math.round(grid.reduce((s, v) => s + v, 0) / 64)}`,
             },
           ],
         }),
@@ -304,8 +325,8 @@ export class LanVisionOffloadServer {
       accepted: true,
       cue: {
         atMs: packet.sentAtMs,
-        app: packet.app,
-        title: packet.title,
+        app: safeApp,
+        title: safeTitle,
         summary,
         changedRegions: [...packet.changedIndices],
         outsideText: true,
