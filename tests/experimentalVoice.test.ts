@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   detectCodeSwitchSpans,
   Qwen3AsrMultilingualClient,
@@ -12,6 +12,10 @@ import {
 } from "../src/core/voice/onnxVoice.ts";
 import { blendExpressiveGesture, evaluateGestureMotion } from "../src/shared/gestures.ts";
 import { sampleExpressiveCue } from "../src/shared/visemes.ts";
+
+vi.mock("electron", () => ({
+  app: { getAppPath: () => process.cwd() },
+}));
 
 describe("Expressive Audio Cue Extraction & Blending", () => {
   it("extracts F0 pitch, pause regions, emphasis, and periodic laughter modulation", () => {
@@ -207,5 +211,125 @@ describe("Zero-Python CPU Clause Streaming & Multilingual Streaming Backends", (
       "Calibration sequence completed across every node with zero timeouts reported today.",
     );
     expect((forcedClauses[0] ?? "").split(/\s+/).length).toBeLessThanOrEqual(6);
+  });
+
+  it("yields Qwen3-TTS GPU memory on game start and falls back seamlessly to CPU Kokoro for English", async () => {
+    const calls: string[] = [];
+    const tone = new Float32Array(1200);
+    for (let i = 0; i < tone.length; i += 1) {
+      tone[i] = 0.2 * Math.sin((2 * Math.PI * 240 * i) / 24_000);
+    }
+
+    const fallback = new OnnxVoice({
+      cacheDir: "/tmp/yield-fallback-test",
+      voice: "astra",
+      speed: 1.0,
+      shareSession: false,
+      loadEngine: async () => ({
+        generate: async () => ({ audio: tone, sampling_rate: 24_000 }),
+      }),
+    });
+
+    const pcm = Buffer.alloc(4);
+    pcm.writeInt16LE(9000, 0);
+    pcm.writeInt16LE(-9000, 2);
+
+    const backend = new Qwen3StreamingTtsBackend({
+      endpointUrl: "http://127.0.0.1:9095",
+      yieldFallbackBackend: fallback,
+      fetchImpl: async (url) => {
+        calls.push(String(url));
+        if (String(url).endsWith("/v1/tts/unload")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response(pcm, { status: 200 });
+      },
+    });
+
+    expect(backend.supports("ja")).toBe(true);
+    await backend.yieldGpu();
+    expect(backend.isGpuYielded()).toBe(true);
+    expect(calls.some((u) => u.endsWith("/v1/tts/unload"))).toBe(true);
+    expect(backend.supports("en")).toBe(true);
+    expect(backend.supports("ja")).toBe(false);
+
+    const enOut = await backend.synthesize("Game mode fallback works.", "en");
+    expect(enOut.samples.length).toBeGreaterThan(0);
+    expect(calls.filter((u) => u.endsWith("/v1/tts/stream"))).toHaveLength(0);
+
+    await expect(backend.synthesize("こんにちは", "ja")).rejects.toThrow(/fullscreen game/i);
+
+    backend.resumeGpu();
+    expect(backend.isGpuYielded()).toBe(false);
+    expect(backend.supports("ja")).toBe(true);
+    const jaOut = await backend.synthesize("こんにちは", "ja");
+    expect(jaOut.samples.length).toBe(2);
+    expect(calls.some((u) => u.endsWith("/v1/tts/stream"))).toBe(true);
+    await backend.dispose();
+  });
+
+  it("releases shared ONNX sessions on voiceController idle sleep, toggle-off, backend switch, and shutdown", async () => {
+    const { createVoiceController } = await import("../src/main/voiceControl.ts");
+    const spy = vi.spyOn(OnnxVoice, "disposeSharedEngines");
+
+    let currentVoiceCfg = {
+      engine: "light" as "full" | "light",
+      design: "astra",
+      name: "astra",
+      speed: 1.0,
+      speak: "always" as "always" | "when-spoken-to" | "never",
+      needsName: false,
+      alwaysListening: false,
+      otherNames: [],
+    };
+    const controller = createVoiceController({
+      config: {
+        value: {
+          language: "en",
+          idleUnloadMinutes: 5,
+          get voice() {
+            return currentVoiceCfg;
+          },
+        },
+        update: async (patch: { voice?: typeof currentVoiceCfg }) => {
+          if (patch.voice) currentVoiceCfg = patch.voice;
+        },
+      } as never,
+      mainWindow: () => null,
+      brain: () => null,
+      sendToWindow: () => undefined,
+      interruptBrain: () => undefined,
+      rebuildTrayMenu: () => undefined,
+    });
+
+    await controller.createVoice();
+    expect(controller.voiceBackend()).toBeInstanceOf(OnnxVoice);
+
+    await controller.releaseIdleMemory();
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    process.env["ASTRA_NAVI_QWEN3_TTS_URL"] = "http://127.0.0.1:9099";
+    try {
+      currentVoiceCfg = { ...currentVoiceCfg, engine: "full" };
+      await controller.createVoice();
+      expect(controller.voiceBackend()).toBeInstanceOf(Qwen3StreamingTtsBackend);
+      expect(spy).toHaveBeenCalledTimes(2);
+
+      await controller.yieldForGame("Cyberpunk 2077");
+      const qwen = controller.voiceBackend() as Qwen3StreamingTtsBackend;
+      expect(qwen.isGpuYielded()).toBe(true);
+      await controller.resumeAfterGame();
+      expect(qwen.isGpuYielded()).toBe(false);
+    } finally {
+      delete process.env["ASTRA_NAVI_QWEN3_TTS_URL"];
+    }
+
+    currentVoiceCfg = { ...currentVoiceCfg, engine: "light", speak: "never" };
+    await controller.createVoice();
+    expect(spy).toHaveBeenCalledTimes(3);
+
+    await controller.dispose();
+    expect(spy).toHaveBeenCalledTimes(4);
+    spy.mockRestore();
   });
 });

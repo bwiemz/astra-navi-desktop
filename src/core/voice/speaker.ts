@@ -46,6 +46,11 @@ export class Speaker {
     return this.options.backend.supports(this.options.language);
   }
 
+  /** True when nothing is currently speaking or queued to be spoken. */
+  get quiet(): boolean {
+    return !this.working && this.queue.length === 0;
+  }
+
   warm(): Promise<void> {
     return this.canSpeak ? this.options.backend.warm() : Promise.resolve();
   }

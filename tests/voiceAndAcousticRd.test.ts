@@ -12,6 +12,7 @@ import { ShipEars, SHIP_EARS_RATE } from "../src/core/shipEars.ts";
 import { Qwen3StreamingTtsBackend } from "../src/core/voice/experimentalMultilingualVoice.ts";
 import { ONNX_SHOOTOUT_CATALOG } from "../src/core/voice/onnxVoice.ts";
 import { cleanForSpeech, parseProsodyScript } from "../src/core/voice/speechText.ts";
+import { evaluateRoomCalibration, generateCalibrationTone } from "../src/core/voice/aec.ts";
 import {
   analyzeVoiceReferenceClip,
   packageClonedVoiceArchive,
@@ -139,5 +140,40 @@ describe("Post-v1 Voice, Prosody & Acoustic Intelligence R&D (Track 2)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("evaluates live-room NLMS AEC ERLE and multilingual EN/JA/ZH wake gating + TV rejection", () => {
+    const sampleRate = 16_000;
+    const reference = generateCalibrationTone(sampleRate, 1.0);
+    expect(reference.length).toBe(sampleRate);
+    for (const s of reference) {
+      expect(Math.abs(s)).toBeLessThanOrEqual(0.6);
+    }
+
+    // Delayed two-tap room echo + low ambient room hum
+    const recorded = new Float32Array(reference.length);
+    for (let i = 0; i < reference.length; i += 1) {
+      const e1 = i >= 10 ? 0.5 * (reference[i - 10] ?? 0) : 0;
+      const e2 = i >= 28 ? 0.22 * (reference[i - 28] ?? 0) : 0;
+      const hum = 0.006 * Math.sin((2 * Math.PI * 60 * i) / sampleRate);
+      recorded[i] = Math.max(-1, Math.min(1, e1 + e2 + hum));
+    }
+
+    const report = evaluateRoomCalibration({
+      reference,
+      recorded,
+      sampleRate,
+      otherNames: ["Computer"],
+    });
+    expect(report.erleDb).toBeGreaterThanOrEqual(10);
+    expect(report.bargeInReady).toBe(true);
+    expect(report.residualRms).toBeLessThan(report.rawMicRms);
+    expect(report.recommendedMinSnrDb).toBeGreaterThanOrEqual(6);
+    expect(report.recommendedMinResidualRms).toBeGreaterThanOrEqual(0.01);
+    expect(report.pipewireAecCommand).toContain("module-echo-cancel");
+    expect(report.wakePassRate).toBe(1);
+    expect(report.wakeChecks.some((w) => w.phrase.includes("アストラナビ") && w.accepted)).toBe(true);
+    expect(report.wakeChecks.some((w) => w.phrase.includes("星航") && w.accepted)).toBe(true);
+    expect(report.wakeChecks.some((w) => w.phrase.includes("TV news") && !w.accepted)).toBe(true);
   });
 });

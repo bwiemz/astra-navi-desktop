@@ -6,6 +6,7 @@ import type { ConfigStore } from "../core/config.ts";
 import { LANGUAGES, type LanguageCode } from "../core/languages.ts";
 import { modelsDir, resolveBundledRoot, voiceEnvPython } from "../core/paths.ts";
 import type { VoiceBackend } from "../core/voice/backend.ts";
+import { Qwen3StreamingTtsBackend } from "../core/voice/experimentalMultilingualVoice.ts";
 import { FullVoice } from "../core/voice/fullVoice.ts";
 import { Listener } from "../core/voice/listener.ts";
 import { OnnxVoice } from "../core/voice/onnxVoice.ts";
@@ -76,6 +77,9 @@ export interface VoiceController {
   designedVoices(): string[];
   fullVoiceReady(): boolean;
   beginShutdown(): void;
+  releaseIdleMemory(): Promise<void>;
+  yieldForGame(game: string): Promise<void>;
+  resumeAfterGame(): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -136,6 +140,9 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       listener.reset();
       stopSpeaking();
       sendVoice({ type: "state", state: "off" });
+      if (deps.config.value.voice.speak === "never") {
+        void OnnxVoice.disposeSharedEngines().catch(() => undefined);
+      }
       return;
     }
     sendVoice({ type: "state", state: "starting" });
@@ -192,9 +199,20 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       fullVoiceReady &&
       voice.engine === "full" &&
       process.env["ASTRA_NAVI_LEGACY_PYTHON_VOICE"] === "1";
+    const qwenTtsUrl = process.env["ASTRA_NAVI_QWEN3_TTS_URL"]?.trim();
     voiceBackend = useLegacyPython
       ? new FullVoice(full)
-      : new OnnxVoice({ cacheDir, voice: voice.design || voice.name, speed: voice.speed });
+      : qwenTtsUrl && voice.engine === "full"
+        ? new Qwen3StreamingTtsBackend({
+            endpointUrl: qwenTtsUrl,
+            speaker: voice.design || voice.name,
+            yieldFallbackBackend: new OnnxVoice({
+              cacheDir,
+              voice: voice.design || voice.name,
+              speed: voice.speed,
+            }),
+          })
+        : new OnnxVoice({ cacheDir, voice: voice.design || voice.name, speed: voice.speed });
 
     speaker = new Speaker({
       backend: voiceBackend,
@@ -254,12 +272,16 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
 
   async function rebuildVoice(): Promise<void> {
     const wasListening = listening;
+    const prevWasOnnx = voiceBackend instanceof OnnxVoice;
     if (wasListening) setListening(false);
     stopSpeaking();
     rebuildingVoice = true;
     try {
       await voiceBackend?.dispose();
       await buildVoice();
+      if ((prevWasOnnx && !(voiceBackend instanceof OnnxVoice)) || deps.config.value.voice.speak === "never") {
+        await OnnxVoice.disposeSharedEngines();
+      }
     } finally {
       rebuildingVoice = false;
     }
@@ -337,9 +359,35 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     listening = false;
   }
 
+  async function releaseIdleMemory(): Promise<void> {
+    if (speaker && !speaker.quiet) return;
+    await speaker?.restIfQuiet().catch(() => undefined);
+    if (voiceBackend instanceof OnnxVoice) {
+      await OnnxVoice.disposeSharedEngines();
+    } else if (voiceBackend instanceof Qwen3StreamingTtsBackend) {
+      await voiceBackend.yieldGpu();
+    }
+  }
+
+  async function yieldForGame(): Promise<void> {
+    stopSpeaking();
+    if (voiceBackend instanceof Qwen3StreamingTtsBackend) {
+      await voiceBackend.yieldGpu();
+    } else if (voiceBackend instanceof FullVoice) {
+      await voiceBackend.rest().catch(() => undefined);
+    }
+  }
+
+  async function resumeAfterGame(): Promise<void> {
+    if (voiceBackend instanceof Qwen3StreamingTtsBackend) {
+      voiceBackend.resumeGpu();
+    }
+  }
+
   async function dispose(): Promise<void> {
     await voiceRebuild.catch(() => undefined);
     await voiceBackend?.dispose();
+    await OnnxVoice.disposeSharedEngines();
   }
 
   return {
@@ -359,6 +407,9 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     designedVoices: () => designedVoices,
     fullVoiceReady: () => fullVoiceReady,
     beginShutdown,
+    releaseIdleMemory,
+    yieldForGame,
+    resumeAfterGame,
     dispose,
   };
 }

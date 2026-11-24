@@ -335,6 +335,19 @@ describe("Mission Control & Memory Inspector backend", () => {
     expect(badPathRes.ok).toBe(false);
     expect(badPathRes.message).toContain("Refused");
 
+    // Audio & AEC calibration handler enforces sender authorization & returns clean report
+    const aecHandler = ipcHandlers.get("studio:run-room-calibration");
+    if (!aecHandler) throw new Error("missing studio:run-room-calibration handler");
+    expect(() => aecHandler(fakeSender, { mode: "synthetic" })).toThrow("Unauthorized");
+    const aecRes = aecHandler(authorizedEvent, { mode: "synthetic" }) as {
+      erleDb: number;
+      bargeInReady: boolean;
+      wakePassRate: number;
+    };
+    expect(aecRes.erleDb).toBeGreaterThanOrEqual(10);
+    expect(aecRes.bargeInReady).toBe(true);
+    expect(aecRes.wakePassRate).toBe(1);
+
     if (deskResolve) (deskResolve as (ans: boolean | null) => void)(false);
     await board.dispose();
   });

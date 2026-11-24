@@ -13,6 +13,8 @@ import type {
   AvatarStudioConfigPatch,
   AvatarStudioSnapshot,
   PolicyComposerSnapshot,
+  RoomCalibrationReport,
+  RoomCalibrationRequest,
   StandingOrderDraft,
   StandingOrderPreviewResult,
   StudioToolsBridge,
@@ -74,6 +76,8 @@ const studioTools: StudioToolsBridge = {
       ok: boolean;
       message: string;
     }>,
+  runRoomCalibration: (request: RoomCalibrationRequest) =>
+    ipcRenderer.invoke("studio:run-room-calibration", request) as Promise<RoomCalibrationReport>,
 };
 
 const workbench: WorkbenchBridge = {

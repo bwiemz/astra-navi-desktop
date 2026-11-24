@@ -11,6 +11,7 @@ import {
   type StandingOrders,
 } from "../core/standingOrders.ts";
 import type { TraceKeeper } from "../core/trace.ts";
+import { evaluateRoomCalibration, generateCalibrationTone } from "../core/voice/aec.ts";
 import {
   buildTurnTokenBudget,
   buildTurnWaterfall,
@@ -20,9 +21,12 @@ import {
   type AvatarStudioConfigPatch,
   type AvatarStudioSnapshot,
   type PolicyComposerSnapshot,
+  type RoomCalibrationReport,
+  type RoomCalibrationRequest,
   type StandingOrderDraft,
   type StandingOrderPreviewResult,
   type TurnXraySnapshot,
+  type WakeCalibrationSample,
 } from "../shared/studioTools.ts";
 
 /**
@@ -435,6 +439,75 @@ export function createStudioToolsIpc(deps: StudioToolsDeps): StudioToolsIpcContr
           ok: true,
           message: `${EXPERIMENTAL_OPTION_DESCRIPTIONS[flag].title} ${enabled ? "enabled" : "disabled"}.`,
         };
+      },
+    );
+
+    ipcMain.handle(
+      "studio:run-room-calibration",
+      (event, request: RoomCalibrationRequest): RoomCalibrationReport => {
+        if (!fromStudioToolsWindow(event)) {
+          throw new Error("Unauthorized IPC sender for Audio Calibration.");
+        }
+        const rawRate = typeof request?.sampleRate === "number" ? request.sampleRate : 16_000;
+        const sampleRate = Math.max(
+          8_000,
+          Math.min(48_000, Math.round(Number.isFinite(rawRate) ? rawRate : 16_000)),
+        );
+        const toBoundedPcm = (arr: unknown): Float32Array => {
+          if (!Array.isArray(arr)) return new Float32Array(0);
+          const cap = Math.min(48_000, arr.length);
+          const out = new Float32Array(cap);
+          for (let i = 0; i < cap; i += 1) {
+            const v = Number(arr[i]);
+            out[i] = Number.isFinite(v) ? Math.max(-1, Math.min(1, v)) : 0;
+          }
+          return out;
+        };
+
+        let reference: Float32Array;
+        let recorded: Float32Array;
+        if (request?.mode === "live") {
+          reference = toBoundedPcm(request.referenceSamples);
+          recorded = toBoundedPcm(request.recordedSamples);
+        } else {
+          reference = generateCalibrationTone(sampleRate, 1.0);
+          recorded = new Float32Array(reference.length);
+          for (let i = 0; i < reference.length; i += 1) {
+            const directEcho = i >= 8 ? 0.45 * (reference[i - 8] ?? 0) : 0;
+            const bounceEcho = i >= 22 ? 0.2 * (reference[i - 22] ?? 0) : 0;
+            const ambient =
+              0.008 * Math.sin((2 * Math.PI * 63 * i) / sampleRate + (i % 7) * 0.25);
+            recorded[i] = Math.max(-1, Math.min(1, directEcho + bounceEcho + ambient));
+          }
+        }
+
+        const wakeSamples: WakeCalibrationSample[] = Array.isArray(request?.wakeTranscripts)
+          ? request.wakeTranscripts
+              .slice(0, 20)
+              .filter(
+                (entry): entry is WakeCalibrationSample =>
+                  Boolean(entry) && typeof entry.phrase === "string",
+              )
+              .map((entry) => ({
+                phrase: entry.phrase.slice(0, 200),
+                expectedWake: Boolean(entry.expectedWake),
+                ...(typeof entry.signalRms === "number" && Number.isFinite(entry.signalRms)
+                  ? { signalRms: Math.max(1e-6, Math.min(1, entry.signalRms)) }
+                  : {}),
+                ...(typeof entry.speakerCosine === "number" &&
+                Number.isFinite(entry.speakerCosine)
+                  ? { speakerCosine: Math.max(-1, Math.min(1, entry.speakerCosine)) }
+                  : {}),
+              }))
+          : [];
+
+        return evaluateRoomCalibration({
+          reference,
+          recorded,
+          sampleRate,
+          otherNames: deps.config.value.voice.otherNames,
+          ...(wakeSamples.length > 0 ? { wakeSamples } : {}),
+        });
       },
     );
   }

@@ -101,6 +101,8 @@ jobs:
         run: |
           ./dist/win-hands-native/win-hands.exe ping
           ./dist/win-hands-native/win-hands.exe version
+          '{}' | ./dist/win-hands-native/win-hands.exe volume-get
+          '{"id":"1","verb":"ping"}' | ./dist/win-hands-native/win-hands.exe --serve | Select-String '"ok":true'
 
       - uses: actions/upload-artifact@v4
         with:

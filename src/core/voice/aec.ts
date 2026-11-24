@@ -256,3 +256,254 @@ export function evaluateWakeRoomGate(input: WakeRoomGateInput): WakeRoomGateResu
   }
   return { accepted: true, remainder, snrDb };
 }
+
+export interface WakeCalibrationSample {
+  phrase: string;
+  expectedWake: boolean;
+  signalRms?: number;
+  speakerCosine?: number;
+}
+
+export interface WakeCalibrationResult {
+  phrase: string;
+  expectedWake: boolean;
+  accepted: boolean;
+  passed: boolean;
+  remainder: string | null;
+  snrDb: number;
+  reason?: string;
+}
+
+export interface RoomCalibrationReport {
+  sampleRate: number;
+  samplesAnalyzed: number;
+  rawMicRms: number;
+  residualRms: number;
+  erleDb: number;
+  noiseFloorRms: number;
+  recommendedMinSnrDb: number;
+  recommendedMinResidualRms: number;
+  pipewireAecCommand: string;
+  bargeInReady: boolean;
+  wakeChecks: WakeCalibrationResult[];
+  wakePassRate: number;
+  notes: string[];
+}
+
+export const DEFAULT_WAKE_CALIBRATION_SAMPLES: readonly WakeCalibrationSample[] = [
+  { phrase: "Hey Astra, check my agenda", expectedWake: true },
+  { phrase: "アストラナビ、今日の予定は？", expectedWake: true },
+  { phrase: "星航，打开音乐", expectedWake: true },
+  { phrase: "The TV news anchor said hello", expectedWake: false },
+  { phrase: "Astra, pause the music", expectedWake: true },
+];
+
+/**
+ * Generates a swept multi-band formant + chirp calibration probe for live-room AEC testing.
+ * Keeps amplitude bounded inside `[-0.55, 0.55]` with 20ms raised-cosine fades to avoid speaker clipping.
+ */
+export function generateCalibrationTone(sampleRate = 16_000, durationSec = 1.2): Float32Array {
+  const sr = Math.max(8_000, Math.min(48_000, Math.round(sampleRate)));
+  const dur = Math.max(0.2, Math.min(5, durationSec));
+  const length = Math.round(sr * dur);
+  const out = new Float32Array(length);
+  const fadeSamples = Math.min(Math.floor(length / 4), Math.round(sr * 0.02));
+  const f0 = 180;
+  const f1 = 1650;
+  let chirpPhase = 0;
+
+  for (let i = 0; i < length; i += 1) {
+    const t = i / sr;
+    const progress = length > 1 ? i / (length - 1) : 0;
+    const instFreq = f0 * Math.pow(f1 / f0, progress);
+    chirpPhase += (2 * Math.PI * instFreq) / sr;
+    const voiceHarmonics =
+      0.55 * Math.sin(chirpPhase) +
+      0.28 * Math.sin(2 * Math.PI * 220 * t) +
+      0.17 * Math.sin(2 * Math.PI * 520 * t);
+
+    let env = 0.5;
+    if (fadeSamples > 0 && i < fadeSamples) {
+      env *= 0.5 * (1 - Math.cos((Math.PI * i) / fadeSamples));
+    } else if (fadeSamples > 0 && i >= length - fadeSamples) {
+      env *= 0.5 * (1 - Math.cos((Math.PI * (length - 1 - i)) / fadeSamples));
+    }
+    out[i] = voiceHarmonics * env;
+  }
+  return out;
+}
+
+function estimateCoarseCausalLag(
+  reference: Float32Array,
+  recorded: Float32Array,
+  sampleRate: number,
+): number {
+  const len = Math.min(reference.length, recorded.length);
+  const maxLag = Math.min(len - 512, Math.round(sampleRate * 0.2));
+  if (maxLag <= 0 || computeRms(reference) < 1e-5) return 0;
+
+  const stride = 4;
+  let bestCoarseLag = 0;
+  let bestScore = -1;
+  for (let lag = 0; lag <= maxLag; lag += stride) {
+    let dot = 0;
+    let energy = 0;
+    for (let i = lag; i < len; i += stride) {
+      const r = reference[i - lag] ?? 0;
+      const m = recorded[i] ?? 0;
+      dot += r * m;
+      energy += r * r;
+    }
+    const score = Math.abs(dot) / Math.sqrt(energy + 1e-9);
+    if (score > bestScore) {
+      bestScore = score;
+      bestCoarseLag = lag;
+    }
+  }
+
+  let bestLag = bestCoarseLag;
+  let refinedBest = -1;
+  const start = Math.max(0, bestCoarseLag - 8);
+  const end = Math.min(maxLag, bestCoarseLag + 8);
+  for (let lag = start; lag <= end; lag += 1) {
+    let dot = 0;
+    let energy = 0;
+    for (let i = lag; i < len; i += 2) {
+      const r = reference[i - lag] ?? 0;
+      const m = recorded[i] ?? 0;
+      dot += r * m;
+      energy += r * r;
+    }
+    const score = Math.abs(dot) / Math.sqrt(energy + 1e-9);
+    if (score > refinedBest) {
+      refinedBest = score;
+      bestLag = lag;
+    }
+  }
+  return Math.max(0, bestLag - 8);
+}
+
+/**
+ * Runs software NLMS residual echo cancellation and multilingual wake-word gate validation
+ * against recorded + reference room audio, returning recommended barge-in & SNR thresholds.
+ */
+export function evaluateRoomCalibration(input: {
+  reference: Float32Array;
+  recorded: Float32Array;
+  sampleRate?: number;
+  otherNames?: readonly string[];
+  wakeSamples?: readonly WakeCalibrationSample[];
+}): RoomCalibrationReport {
+  const sampleRate = Math.max(8_000, Math.min(48_000, Math.round(input.sampleRate ?? 16_000)));
+  const len = Math.min(input.reference.length, input.recorded.length);
+  const mic = input.recorded.subarray(0, len);
+  const ref = input.reference.subarray(0, len);
+
+  const lagOffset = estimateCoarseCausalLag(ref, mic, sampleRate);
+  const alignedRef = new Float32Array(len);
+  for (let i = lagOffset; i < len; i += 1) {
+    alignedRef[i] = ref[i - lagOffset] ?? 0;
+  }
+
+  const aec = new NlmsEchoCanceller({ filterLength: 128, stepSize: 0.45 });
+  const residual = new Float32Array(len);
+  const frameSize = 512;
+  for (let offset = 0; offset < len; offset += frameSize) {
+    const end = Math.min(len, offset + frameSize);
+    const out = aec.process(mic.subarray(offset, end), alignedRef.subarray(offset, end));
+    residual.set(out, offset);
+  }
+
+  const settleStart = Math.min(len, Math.floor(len * 0.4));
+  const micEval = len > 64 ? mic.subarray(settleStart) : mic;
+  const resEval = len > 64 ? residual.subarray(settleStart) : residual;
+  const rawMicRms = Number(computeRms(micEval).toFixed(5));
+  const residualRms = Number(computeRms(resEval).toFixed(5));
+  const erleDb = Number(computeErleDb(micEval, resEval).toFixed(2));
+
+  const frameRmsList: number[] = [];
+  for (let offset = 0; offset < residual.length; offset += frameSize) {
+    const slice = residual.subarray(offset, Math.min(residual.length, offset + frameSize));
+    if (slice.length > 0) frameRmsList.push(computeRms(slice));
+  }
+  frameRmsList.sort((a, b) => a - b);
+  const p15 = frameRmsList[Math.floor(frameRmsList.length * 0.15)] ?? residualRms;
+  const noiseFloorRms = Number(Math.max(1e-4, p15).toFixed(5));
+
+  const baseSnr = erleDb >= 12 ? 7 : erleDb >= 8 ? 9 : 12;
+  const noisyPenalty = noiseFloorRms >= 0.03 ? 2 : 0;
+  const recommendedMinSnrDb = Math.max(6, Math.min(18, baseSnr + noisyPenalty));
+  const recommendedMinResidualRms = Number(
+    Math.max(0.01, Math.min(0.08, residualRms * 1.6 + 0.008)).toFixed(4),
+  );
+  const bargeInReady = erleDb >= 6;
+  const pipewireAec = buildPipeWireAecArgs();
+  const pipewireAecCommand = `${pipewireAec.program} ${pipewireAec.args.join(" ")}`;
+
+  const wakeInput =
+    input.wakeSamples && input.wakeSamples.length > 0
+      ? input.wakeSamples
+      : DEFAULT_WAKE_CALIBRATION_SAMPLES;
+  const defaultSignalRms = Math.min(0.9, Math.max(0.08, noiseFloorRms * 4.5));
+  const wakeChecks: WakeCalibrationResult[] = wakeInput.map((sample) => {
+    const res = evaluateWakeRoomGate({
+      text: sample.phrase,
+      otherNames: input.otherNames ?? [],
+      signalRms: sample.signalRms ?? defaultSignalRms,
+      noiseFloorRms,
+      speakerCosine: sample.speakerCosine,
+      minSnrDb: recommendedMinSnrDb,
+    });
+    return {
+      phrase: sample.phrase,
+      expectedWake: sample.expectedWake,
+      accepted: res.accepted,
+      passed: res.accepted === sample.expectedWake,
+      remainder: res.remainder,
+      snrDb: Number(res.snrDb.toFixed(2)),
+      ...(res.reason ? { reason: res.reason } : {}),
+    };
+  });
+
+  const passedCount = wakeChecks.filter((w) => w.passed).length;
+  const wakePassRate =
+    wakeChecks.length > 0 ? Number((passedCount / wakeChecks.length).toFixed(4)) : 1;
+
+  const notes: string[] = [];
+  if (len === 0) {
+    notes.push("No audio samples provided; run live speaker/mic probe or synthetic self-test.");
+  } else if (erleDb >= 12) {
+    notes.push(
+      `Strong echo suppression (${erleDb.toFixed(1)} dB ERLE, aligned lag ${lagOffset} samples); full-duplex barge-in ready.`,
+    );
+  } else if (erleDb >= 6) {
+    notes.push(
+      `Moderate echo suppression (${erleDb.toFixed(1)} dB ERLE); barge-in usable, consider lowering speaker volume or loading PipeWire WebRTC AEC.`,
+    );
+  } else {
+    notes.push(
+      `Low ERLE (${erleDb.toFixed(1)} dB); load PipeWire module-echo-cancel before unattended hands-free barge-in.`,
+    );
+  }
+  if (passedCount < wakeChecks.length) {
+    notes.push(
+      `${wakeChecks.length - passedCount} wake calibration check(s) did not match expectation; inspect room SNR or wake aliases.`,
+    );
+  }
+
+  return {
+    sampleRate,
+    samplesAnalyzed: len,
+    rawMicRms,
+    residualRms,
+    erleDb,
+    noiseFloorRms,
+    recommendedMinSnrDb,
+    recommendedMinResidualRms,
+    pipewireAecCommand,
+    bargeInReady,
+    wakeChecks,
+    wakePassRate,
+    notes,
+  };
+}

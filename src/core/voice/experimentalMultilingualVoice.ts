@@ -30,6 +30,8 @@ export interface Qwen3StreamingTtsOptions {
   sampleRate?: number;
   authToken?: string;
   fetchImpl?: typeof fetch;
+  /** Optional CPU fallback (e.g. `OnnxVoice`) used for English while GPU VRAM is yielded to games. */
+  yieldFallbackBackend?: VoiceBackend;
 }
 
 export interface Qwen3StreamChunk extends SpokenAudio {
@@ -124,7 +126,9 @@ export class Qwen3StreamingTtsBackend implements VoiceBackend {
   private readonly sampleRate: number;
   private readonly authToken?: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly yieldFallbackBackend?: VoiceBackend;
   private referenceVoice: Qwen3VoiceCloneReference | null = null;
+  private gpuYielded = false;
 
   constructor(options: Qwen3StreamingTtsOptions) {
     this.baseUrl = assertPrivateEndpoint(options.endpointUrl);
@@ -134,10 +138,36 @@ export class Qwen3StreamingTtsBackend implements VoiceBackend {
     this.sampleRate = options.sampleRate ?? 24_000;
     this.authToken = options.authToken;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.yieldFallbackBackend = options.yieldFallbackBackend;
   }
 
   supports(language: LanguageCode): boolean {
+    if (this.gpuYielded) {
+      return Boolean(this.yieldFallbackBackend?.supports(language));
+    }
     return language in LANGUAGES;
+  }
+
+  isGpuYielded(): boolean {
+    return this.gpuYielded;
+  }
+
+  async yieldGpu(): Promise<void> {
+    this.gpuYielded = true;
+    const url = new URL("/v1/tts/unload", this.baseUrl);
+    try {
+      await this.fetchImpl(url.toString(), {
+        method: "POST",
+        headers: this.authHeaders(),
+        body: JSON.stringify({ model: this.tier }),
+      });
+    } catch {
+      // Best-effort unload: server may already be stopped or omit /v1/tts/unload.
+    }
+  }
+
+  resumeGpu(): void {
+    this.gpuYielded = false;
   }
 
   /** Registers an up-to-3-second reference clip for zero-shot Qwen3-TTS voice cloning. */
@@ -156,6 +186,7 @@ export class Qwen3StreamingTtsBackend implements VoiceBackend {
   }
 
   async warm(): Promise<void> {
+    this.gpuYielded = false;
     const url = new URL("/health", this.baseUrl);
     const res = await this.fetchImpl(url.toString(), {
       method: "GET",
@@ -196,6 +227,38 @@ export class Qwen3StreamingTtsBackend implements VoiceBackend {
   ): AsyncGenerator<Qwen3StreamChunk> {
     const clean = sentence.trim();
     if (!clean) return;
+    if (this.gpuYielded) {
+      if (!this.yieldFallbackBackend?.supports(language)) {
+        throw new Error(`${this.label} is paused while a fullscreen game is active.`);
+      }
+      const streamable = this.yieldFallbackBackend as VoiceBackend & {
+        synthesizeStream?(
+          text: string,
+          lang: LanguageCode,
+        ): AsyncIterable<{ chunkIndex?: number; samples: Float32Array; sampleRate: number; cues?: ExpressiveCueFrame[] }>;
+      };
+      if (typeof streamable.synthesizeStream === "function") {
+        let fallbackIndex = 0;
+        for await (const chunk of streamable.synthesizeStream(clean, language)) {
+          yield {
+            chunkIndex: chunk.chunkIndex ?? fallbackIndex,
+            samples: chunk.samples,
+            sampleRate: chunk.sampleRate,
+            cues: chunk.cues ?? extractExpressiveCues(chunk.samples, chunk.sampleRate),
+          };
+          fallbackIndex += 1;
+        }
+        return;
+      }
+      const spoken = await this.yieldFallbackBackend.synthesize(clean, language);
+      yield {
+        chunkIndex: 0,
+        samples: spoken.samples,
+        sampleRate: spoken.sampleRate,
+        cues: extractExpressiveCues(spoken.samples, spoken.sampleRate),
+      };
+      return;
+    }
     const url = new URL("/v1/tts/stream", this.baseUrl);
     const spans = detectCodeSwitchSpans(clean);
     const res = await this.fetchImpl(url.toString(), {
@@ -257,11 +320,13 @@ export class Qwen3StreamingTtsBackend implements VoiceBackend {
   }
 
   async rest(): Promise<void> {
-    // Stateless HTTP streaming client; worker manages model memory on LAN host.
+    await this.yieldGpu();
   }
 
   async dispose(): Promise<void> {
     this.referenceVoice = null;
+    await this.yieldGpu();
+    await this.yieldFallbackBackend?.dispose().catch(() => undefined);
   }
 }
 

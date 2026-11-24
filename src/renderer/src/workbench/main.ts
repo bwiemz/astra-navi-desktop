@@ -10,6 +10,7 @@ import { renderMemoryPanel } from "../mission-control/memory.ts";
 import { renderMissionsPanel } from "../mission-control/missions.ts";
 import {
   createWorkbenchAvatarPanel,
+  renderWorkbenchAudioPanel,
   renderWorkbenchPolicyPanel,
   renderWorkbenchXrayPanel,
 } from "./panels.ts";
@@ -35,6 +36,7 @@ const panelMap: Record<WorkbenchTab, HTMLElement> = {
   memory: requireEl<HTMLElement>("panel-memory"),
   policy: requireEl<HTMLElement>("panel-policy"),
   xray: requireEl<HTMLElement>("panel-xray"),
+  audio: requireEl<HTMLElement>("panel-audio"),
   avatar: requireEl<HTMLElement>("panel-avatar"),
 };
 const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".wb-nav-btn"));
@@ -94,6 +96,11 @@ function renderAll(): void {
     const res = await window.workbench.missionControl.actMission(id, action);
     setStatus(res.message);
     await refresh();
+    if (res.ok && (action === "approve" || action === "resume")) {
+      setTimeout(() => {
+        if (!refreshBtn.disabled) void refresh();
+      }, 450);
+    }
   });
 
   renderMemoryPanel(panelMap.memory, lastMc.memories, lastMc.episodes, lastMc.thresholds, {
@@ -180,6 +187,8 @@ async function refresh(): Promise<void> {
 refreshBtn.addEventListener("click", () => {
   void refresh();
 });
+
+renderWorkbenchAudioPanel(panelMap.audio, window.workbench.studioTools, setStatus);
 
 selectTab(activeTab);
 void refresh();

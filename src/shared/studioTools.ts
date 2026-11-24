@@ -4,6 +4,17 @@ import type { Memory, MemoryKind } from "../core/memory.ts";
 import type { RuleAuditFinding, RuleAuditSeverity } from "../core/ruleAudit.ts";
 import type { TellWhen } from "../core/standingOrders.ts";
 import type { CallGate, CallOutcome, TurnTrace } from "../core/trace.ts";
+import type { RoomCalibrationReport, WakeCalibrationSample } from "../core/voice/aec.ts";
+
+export type { RoomCalibrationReport, WakeCalibrationSample };
+
+export interface RoomCalibrationRequest {
+  mode: "live" | "synthetic";
+  sampleRate?: number;
+  referenceSamples?: number[];
+  recordedSamples?: number[];
+  wakeTranscripts?: WakeCalibrationSample[];
+}
 
 /**
  * Shared types and pure visual/diagnostic helpers for the three standalone
@@ -202,6 +213,7 @@ export interface StudioToolsBridge {
     flag: keyof Config["tier10"],
     enabled: boolean,
   ): Promise<{ ok: boolean; message: string }>;
+  runRoomCalibration(request: RoomCalibrationRequest): Promise<RoomCalibrationReport>;
 }
 
 /** Human-friendly descriptions for experimental toggles so non-technical users understand each one. */

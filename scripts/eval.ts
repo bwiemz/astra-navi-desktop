@@ -185,8 +185,14 @@ import { Recall, type Recalled, type RelevantOptions } from "../src/core/recall.
 import { ReminderStore } from "../src/core/reminders.ts";
 import { ResearchDesk } from "../src/core/research.ts";
 import { ShipEars } from "../src/core/shipEars.ts";
+import { SemanticCommandCache } from "../src/core/semanticCache.ts";
 import { Sight } from "../src/core/sight.ts";
 import { extractReportTrainingData, isTeacherBrain } from "../src/core/trainingExport.ts";
+import {
+  createPlanConsensusHook,
+  createSemanticCacheHook,
+  TurnHookPipeline,
+} from "../src/core/turnHooks.ts";
 import type { BrainEvent } from "../src/shared/ipc.ts";
 
 const run = promisify(execFile);
@@ -219,6 +225,8 @@ interface Options {
   itsToolsOnly: boolean;
   /** Switch on the app's own choosing of tools per message (its "fitting tools" setting). */
   fittingTools: boolean;
+  /** Enable experimental TurnHookPipeline (`semanticCache` + `planConsensus`) + repeat-query bench. */
+  turnHooks: boolean;
   /** Run on the processor alone with this many threads; null runs on the graphics card. */
   cpu: number | null;
   lora: string | null;
@@ -251,6 +259,7 @@ function readOptions(args: readonly string[]): Options {
     plainWords: false,
     itsToolsOnly: false,
     fittingTools: false,
+    turnHooks: false,
     cpu: null,
     lora: null,
     force: false,
@@ -300,6 +309,7 @@ function readOptions(args: readonly string[]): Options {
     else if (flag === "--plain-words") options.plainWords = true;
     else if (flag === "--its-tools-only") options.itsToolsOnly = true;
     else if (flag === "--fitting-tools") options.fittingTools = true;
+    else if (flag === "--turn-hooks") options.turnHooks = true;
     else if (flag === "--cpu") options.cpu = Math.min(16, Math.floor(count(flag, 1)));
     else if (flag === "--lora") options.lora = value(flag);
     else if (flag === "--force") options.force = true;
@@ -557,6 +567,127 @@ const memory = new MemoryStore(memoryFile());
 await memory.load();
 const environment = await detectEnvironment(workspaceDir());
 
+const embedder = new LocalEmbedder(join(models, "speech"));
+let benchHooksEnabled = false;
+const semanticCache = options.turnHooks ? new SemanticCommandCache({ embedder }) : null;
+const turnHooksPipeline = options.turnHooks ? new TurnHookPipeline() : null;
+const hookTelemetry = {
+  beforeRouteCalls: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+  cacheBypassTainted: 0,
+  cacheBypassHandsOff: 0,
+  cacheNumberMismatch: 0,
+  cacheStoreEligible: 0,
+  uniqueCachedEntries: 0,
+  consensusChecks: 0,
+  consensusAgreed: 0,
+  consensusManualReview: 0,
+  hookTimeMs: 0,
+};
+const HIGH_RISK_HOOK_TOOLS = new Set<string>([
+  TOOLS.runCommand,
+  TOOLS.writeFile,
+  TOOLS.planMission,
+  TOOLS.startMission,
+  TOOLS.remote,
+  TOOLS.operate,
+]);
+if (turnHooksPipeline && semanticCache) {
+  let cacheSizeBefore = 0;
+  turnHooksPipeline.register({
+    id: "eval-telemetry-begin",
+    beforeRoute(ctx) {
+      ctx.flags.__hookT0 = performance.now();
+      return undefined;
+    },
+    afterPlan(ctx) {
+      ctx.flags.__hookT0 = performance.now();
+      return undefined;
+    },
+    beforeCommit(ctx) {
+      ctx.flags.__hookT0 = performance.now();
+      cacheSizeBefore = semanticCache.size;
+    },
+  });
+  turnHooksPipeline.register(
+    createSemanticCacheHook(semanticCache, () => options.turnHooks && benchHooksEnabled),
+  );
+  turnHooksPipeline.register(
+    createPlanConsensusHook(
+      () => options.turnHooks && benchHooksEnabled,
+      (ctx) => {
+        const risky = ctx.usedTools.filter((tool) => HIGH_RISK_HOOK_TOOLS.has(tool));
+        if (risky.length === 0) return null;
+        let parsedInput: Record<string, unknown> = {};
+        if (typeof ctx.flags.lastToolInput === "string") {
+          try {
+            const obj = JSON.parse(ctx.flags.lastToolInput) as unknown;
+            if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+              parsedInput = obj as Record<string, unknown>;
+            }
+          } catch {
+            // Ignore non-JSON truncated traced input.
+          }
+        }
+        const cmd =
+          typeof parsedInput["command"] === "string"
+            ? parsedInput["command"]
+            : risky[risky.length - 1] ?? "";
+        const targetPath = typeof parsedInput["path"] === "string" ? parsedInput["path"] : "";
+        const targetCtrl = typeof parsedInput["name"] === "string" ? parsedInput["name"] : "";
+        const candidate = {
+          commands: [cmd],
+          ...(targetCtrl ? { targetControls: [targetCtrl] } : {}),
+          ...(targetPath ? { targetPaths: [targetPath] } : {}),
+        };
+        return [candidate, candidate];
+      },
+    ),
+  );
+  turnHooksPipeline.register({
+    id: "eval-telemetry",
+    beforeRoute(ctx) {
+      if (!benchHooksEnabled) return undefined;
+      if (typeof ctx.flags.__hookT0 === "number") {
+        hookTelemetry.hookTimeMs += performance.now() - ctx.flags.__hookT0;
+      }
+      hookTelemetry.beforeRouteCalls += 1;
+      const reason = ctx.cachedHit?.reason;
+      if (ctx.cachedHit?.hit) hookTelemetry.cacheHits += 1;
+      else if (reason === "bypass_tainted") hookTelemetry.cacheBypassTainted += 1;
+      else if (reason === "bypass_hands_off") hookTelemetry.cacheBypassHandsOff += 1;
+      else if (reason === "number_mismatch") hookTelemetry.cacheNumberMismatch += 1;
+      else hookTelemetry.cacheMisses += 1;
+      return undefined;
+    },
+    afterPlan(ctx) {
+      if (!benchHooksEnabled) return undefined;
+      if (typeof ctx.flags.__hookT0 === "number") {
+        hookTelemetry.hookTimeMs += performance.now() - ctx.flags.__hookT0;
+      }
+      if (ctx.consensusVerdict) {
+        hookTelemetry.consensusChecks += 1;
+        if (ctx.consensusVerdict.agreed) hookTelemetry.consensusAgreed += 1;
+        if (ctx.consensusVerdict.requireManualReview) hookTelemetry.consensusManualReview += 1;
+      }
+      return undefined;
+    },
+    beforeCommit(ctx) {
+      if (!benchHooksEnabled) return undefined;
+      if (typeof ctx.flags.__hookT0 === "number") {
+        hookTelemetry.hookTimeMs += performance.now() - ctx.flags.__hookT0;
+      }
+      if (!ctx.isEvent && !ctx.falseClaim && !ctx.readOutsideText && !ctx.handsOff && ctx.usedTools.length === 1) {
+        hookTelemetry.cacheStoreEligible += 1;
+      }
+      if (semanticCache.size > cacheSizeBefore) {
+        hookTelemetry.uniqueCachedEntries = semanticCache.size;
+      }
+    },
+  });
+}
+
 /** When loading began and ended, and how long it took the first time. */
 const loading: { started: number; readyAt: number; seconds: number | null; label: string } = {
   started: 0,
@@ -572,6 +703,7 @@ const engine = new LocalEngine({
   lean: options.lean,
   ...(loraPath === null ? {} : { adapterFor: () => loraPath }),
   ...(options.cpu === null ? {} : { processorOnly: { threads: options.cpu } }),
+  ...(turnHooksPipeline ? { turnHooks: turnHooksPipeline } : {}),
   idleUnloadMs: 0,
   onStatus(status): void {
     if (status.stage === "downloading") {
@@ -607,7 +739,7 @@ if (!(await isDownloaded(wanted))) {
 const reminders = new ReminderStore(remindersFile(), () => undefined);
 await reminders.start();
 const missions = new MissionControl(environment.workspace, () => undefined);
-const recall = new LabRecall(memory, new LocalEmbedder(join(models, "speech")));
+const recall = new LabRecall(memory, embedder);
 const sight = new Sight(join(models, "speech"), scratchDir());
 
 // What is being looked at right now: the case, which of its messages, and what has been seen.
@@ -999,6 +1131,7 @@ try {
   // finished before it is saved as a part-report, as when stopped between cases.
   gameWatch = setInterval(() => void yieldToGame(), GAME_LOOK_EVERY_MS);
   gameWatch.unref();
+  benchHooksEnabled = true;
   for (const test of cases) {
     if (stopping) break;
     const runs: (Score & Seen)[] = [];
@@ -1139,6 +1272,121 @@ try {
     } catch (exportError) {
       console.warn("[eval] could not auto-export training pairs:", exportError);
     }
+  }
+  if (options.turnHooks && turnHooksPipeline && semanticCache && !partial && !stopping) {
+    hookTelemetry.uniqueCachedEntries = semanticCache.size;
+    const avgHookMs =
+      hookTelemetry.beforeRouteCalls > 0
+        ? Number((hookTelemetry.hookTimeMs / hookTelemetry.beforeRouteCalls).toFixed(3))
+        : 0;
+    console.log(
+      `\n[turnHooks] ${JSON.stringify({
+        ...hookTelemetry,
+        hookTimeMs: Number(hookTelemetry.hookTimeMs.toFixed(2)),
+        avgHookMsPerTurn: avgHookMs,
+      })}`,
+    );
+
+    const repeatCache = new SemanticCommandCache({ embedder });
+    type RepeatLookupSnap = {
+      hit: boolean;
+      reason: string;
+      similarity: number | null;
+      tool?: string;
+    };
+    const lookupBox: { value: RepeatLookupSnap | null } = { value: null };
+    const setLookup = (next: RepeatLookupSnap | null): void => {
+      lookupBox.value = next;
+    };
+    const getLookup = (): RepeatLookupSnap | null => lookupBox.value;
+    turnHooksPipeline.register(
+      createSemanticCacheHook(repeatCache, () => true, (hit) => {
+        setLookup({
+          hit: true,
+          reason: hit.reason,
+          similarity: hit.similarity ?? 1,
+          tool: hit.tool,
+        });
+        return `[cached:${hit.reason}] ${hit.tool ?? "tool"} ${JSON.stringify(hit.args ?? {})}`;
+      }),
+    );
+    turnHooksPipeline.register({
+      id: "eval-telemetry",
+      beforeRoute(ctx) {
+        if (ctx.cachedHit) {
+          setLookup({
+            hit: ctx.cachedHit.hit,
+            reason: ctx.cachedHit.reason,
+            similarity: ctx.cachedHit.similarity ?? null,
+            tool: ctx.cachedHit.tool,
+          });
+        }
+        return undefined;
+      },
+    });
+
+    const repeatQueries = [
+      "Pause the music",
+      "Set the volume to 40",
+      "What is on my agenda today?",
+      "Pause the music",
+      "Please pause playback",
+      "Set the volume to 80",
+    ];
+    const repeatRows: {
+      index: number;
+      query: string;
+      ms: number;
+      hit: boolean;
+      reason: string;
+      similarity: number | null;
+      calls: string[];
+      replyPreview: string;
+    }[] = [];
+    for (let i = 0; i < repeatQueries.length; i += 1) {
+      const q = repeatQueries[i] ?? "";
+      setLookup(null);
+      await prepare({ id: `repeat-${i + 1}`, category: "tools", turns: [q], expect: {} });
+      seen = blank();
+      turn = 0;
+      current = {
+        id: `repeat-${i + 1}`,
+        category: "tools",
+        turns: [q],
+        expect: { calls: [{ tool: [TOOLS.sound, TOOLS.agenda] }] },
+      };
+      const t0 = performance.now();
+      await say(q);
+      const elapsedMs = Number((performance.now() - t0).toFixed(2));
+      current = null;
+      const snap = getLookup();
+      repeatRows.push({
+        index: i + 1,
+        query: q,
+        ms: elapsedMs,
+        hit: snap?.hit ?? false,
+        reason: snap?.reason ?? "unknown",
+        similarity: snap?.similarity ?? null,
+        calls: seen.calls.map((c) => c.tool),
+        replyPreview: (seen.replies[0] ?? "").replace(/\s+/g, " ").trim().slice(0, 140),
+      });
+    }
+    const coldMs = repeatRows.filter((r) => r.index <= 3).map((r) => r.ms);
+    const hitMs = repeatRows.filter((r) => r.hit).map((r) => r.ms);
+    const coldMed = median(coldMs);
+    const hitMed = median(hitMs);
+    console.log(
+      `[turnHooks:repeat] ${JSON.stringify({
+        queries: repeatRows,
+        cacheSize: repeatCache.size,
+        coldMedianMs: coldMed,
+        warmHitMedianMs: hitMed,
+        speedupX:
+          coldMed !== null && hitMed !== null && hitMed > 0
+            ? Number((coldMed / hitMed).toFixed(1))
+            : null,
+      })}`,
+    );
   }
   await finish(partial ? stopCode : 0);
 } catch (error) {

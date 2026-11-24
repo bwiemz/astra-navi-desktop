@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -525,7 +526,7 @@ async function forceReleaseVram(): Promise<void> {
   interruptBrain();
   await brain?.whenIdle();
   await engine?.unload();
-  await voice.speaker()?.restIfQuiet().catch(() => undefined);
+  await voice.releaseIdleMemory().catch(() => undefined);
   sendPresence();
 }
 
@@ -852,13 +853,10 @@ function onEngineStatus(status: EngineStatus): void {
     sendPresence();
   }
   if (status.stage === "resting") {
-    // Her voice holds graphics memory too. Given back with her brain, but never mid-sentence.
-    if (status.game !== undefined) {
-      void voice
-        .speaker()
-        ?.restIfQuiet()
-        .catch((error: unknown) => console.warn("[voice] could not be put away:", error));
-    }
+    // Her voice holds GPU/ORT memory too; restIfQuiet avoids cutting her off mid-sentence.
+    void Promise.resolve(voice.speaker()?.restIfQuiet())
+      .then(() => voice.releaseIdleMemory())
+      .catch((error: unknown) => console.warn("[voice] could not be put away:", error));
     return;
   }
   sendToWindow("brain:event", {
@@ -932,7 +930,13 @@ function startShipServices(workspace: string): void {
   gameWatch = new GameWatch({
     file: playLogFile(),
     store: store ?? undefined,
+    onStarted: (game) => {
+      if (config.value.yieldToGames) {
+        void voice.yieldForGame(game).catch(() => undefined);
+      }
+    },
     onEnded: (game, minutes) => {
+      void voice.resumeAfterGame().catch(() => undefined);
       initiative?.gameEnded(game, minutes);
       // What was held for the game goes on.
       board?.nudge();
@@ -1247,6 +1251,11 @@ async function askAboutStep(
     noLink: true,
     signal,
   };
+  if (process.env["ASTRA_NAVI_DOGFOOD_WORKBENCH"] === "1") {
+    return await new Promise<boolean | null>((resolve) => {
+      signal.addEventListener("abort", () => resolve(null), { once: true });
+    });
+  }
   const { response } = mainWindow
     ? await dialog.showMessageBox(mainWindow, options)
     : await dialog.showMessageBox(options);
@@ -1697,7 +1706,27 @@ async function main(): Promise<void> {
     console.warn(`[hotkeys] Failed to register: ${hotkeyStatus.failed.join(", ")}`);
   }
   createTray();
+  const dogfoodWorkbench = process.env["ASTRA_NAVI_DOGFOOD_WORKBENCH"] === "1";
+  if (dogfoodWorkbench) {
+    try {
+      const seedTraceFile = join(dataDir(), "dogfood-traces.json");
+      if (existsSync(seedTraceFile)) {
+        const parsed = JSON.parse(await readFile(seedTraceFile, "utf8")) as unknown;
+        if (Array.isArray(parsed)) {
+          for (const entry of parsed) {
+            if (entry && typeof entry === "object") traces.add(entry as TurnTrace);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn("[dogfood] could not load seeded traces:", error);
+    }
+    await orders?.start().catch((error: unknown) => console.warn("[dogfood-orders]", error));
+    await board?.load().catch((error: unknown) => console.warn("[dogfood-missions]", error));
+    workbench.open("missions");
+  }
   if (
+    !dogfoodWorkbench &&
     (!config.value.onboardingComplete || safeModeBoot.safeMode) &&
     !process.env["AI_CHAN_DEBUG_CAPTURE"] &&
     !process.env["AI_CHAN_DEBUG_SETTINGS"]
@@ -1741,10 +1770,12 @@ async function main(): Promise<void> {
     () => void reminders?.start().catch((error: unknown) => console.warn("[reminders]", error)),
     5000,
   );
-  setTimeout(
-    () => void orders?.start().catch((error: unknown) => console.warn("[orders]", error)),
-    6000,
-  );
+  if (!dogfoodWorkbench) {
+    setTimeout(
+      () => void orders?.start().catch((error: unknown) => console.warn("[orders]", error)),
+      6000,
+    );
+  }
   setTimeout(
     () => void gameWatch?.start().catch((error: unknown) => console.warn("[games]", error)),
     7000,
@@ -1760,10 +1791,12 @@ async function main(): Promise<void> {
     8000,
   );
   // Missions left from before she was closed are taken up where they stood.
-  setTimeout(
-    () => void board?.load().catch((error: unknown) => console.warn("[missions]", error)),
-    5000,
-  );
+  if (!dogfoodWorkbench) {
+    setTimeout(
+      () => void board?.load().catch((error: unknown) => console.warn("[missions]", error)),
+      5000,
+    );
+  }
 }
 
 void main().catch((error: unknown) => {

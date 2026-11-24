@@ -160,16 +160,17 @@ We executed an end-to-end distillation run on the RTX PRO 4500 GPU using real tr
 - **Live End-to-End Integration Dogfooding:** Verified on RTX PRO 4500 Linux host: `Qwen3.5-9B` driving two real stdio MCP subprocesses (`localfs`, `gitinfo`) under `grammarGuard.ts` + `ToolLoopGuard`, `profileBackup.ts` export/wipe/restore parity, `StartupGuard` (`safeMode.ts`) two-crash recovery (`0600`), and zero-Python `OnnxVoice` (`Kokoro-82M`) synthesis (`63,600` finite samples @ `24 kHz`).
 - **Android Companion APK (`scripts/build-android.sh`):** Compiled and locally signed `phone-app/build/astra-navi.apk` (`56K`, `app.astranavi.station`, deep link `astranavi://station`).
 - **Live Ephemeral SSH Enrollment (`scripts/test-fleet-askpass.sh`):** Spawned an unprivileged local `/usr/bin/sshd`, ran interactive `SSH_ASKPASS` (`LET_IN`) key enrollment with a passphrase-protected ED25519 bootstrap key, and verified subsequent key-based SSH login (`exit 0`).
-- **Windows Hands NativeAOT Project (`hands/win-hands-native/`):** Compiles and smoke-tests `-r win-x64` NativeAOT `win-hands.exe` on `windows-latest` in GitHub Actions.
+- **Windows Hands NativeAOT Project (`hands/win-hands-native/`):** Compiles (`win-x64` full-trimmed single-file `10,892,487` bytes locally, NativeAOT `-r win-x64` in CI `.github/workflows/ci.yml` + `release.yml`) with CI smoke checks (`ping`, `version`, `volume-get`, `--serve` JSON-RPC) and passed live Windows 11 Pro VM `294` runtime verification (`30/30` `--serve` chaos frames in `235 ms`, `0` `.NET 9` trim/COM crashes; see Section 11.1).
+- **Consolidated 6-Tab Workbench & Audio Calibration (`workbench.html`):** Dogfooded packaged `dist/linux-unpacked/astra-navi-desktop` end-to-end inside `scripts/test-desktop.sh` (`kwin_wayland` + CDP across Missions, Memory Graph, Policy Composer + replay, Turn X-Ray, Audio & AEC self-test achieving `19.6 dB` ERLE, and Avatar Studio `39` active -> `0` off-tab `rAF` frames; `0` errors; see Section 11.5).
 - **Browser DOM Bridge (`browser-bridge/`):** Unit and loopback integration tests (`tests/semanticBridge.test.ts`) verified 32-bit LE Native Messaging framing, strict exact-origin allowlisting, and `NativeBrowserDomClient` IPC transport.
 - **Release Dry-Runs:** `npm run package:dry` and `npm run publish:dry` verified edition split, Flatpak manifest, Steam VDFs, and Electron Builder configuration.
 
 ### Not Executed on Physical Hardware Here (Remaining Release Matrix)
 
-- **Blank Windows 11 Clean-Room VM (`scripts/verify-clean-windows.ps1`):** Full installer walkthrough, `.pmx` + `.vrm` rendering, Notepad UIA automation, and live fullscreen DirectX/Vulkan VRAM yield must still be executed on a blank physical/VM Windows 11 image before general release.
-- **Physical Android Handset LAN Pairing:** QR scan (`astranavi://station?...`) + mDNS `_astranavi._tcp.local` pairing and 64-hex TLS pinning must be verified interactively on a physical Android phone over local Wi-Fi.
+- **Blank Physical Windows 11 Clean-Room Installer Walkthrough (`scripts/verify-clean-windows.ps1`):** While trimmed `win-hands.exe` and bidirectional LAN sync passed live on Proxmox Windows 11 Pro VM `294` (QEMU VGA), full installer walkthrough, Live DirectX/Vulkan `.pmx`/`.vrm` rendering, and fullscreen GPU game VRAM yielding should still be run on a GPU-equipped Windows 11 machine before general release.
+- **Physical Android Handset LAN Pairing:** While `station.ts`, `AlertPollerService`, and `ApprovalActionReceiver` passed live on official Android 15 (`API 35`, `emulator-5554`), QR camera scan + physical Wi-Fi mDNS `_astranavi._tcp.local` pairing should still be verified interactively on a physical Android handset.
 - **Apple Hardware (`macos.ts`, `mlxEngine.ts`, `ios-app/`) & Live Steamworks AppID (`workshop.ts`):** Uncompiled/unverified on macOS/iOS Apple Silicon devices and unverified against a live Steamworks AppID; kept strictly labeled as **Preview / Post-Launch**.
-- **Live-Room Acoustic AEC & Wake-Word Microphone Testing:** Echo cancellation (`src/core/voice/aec.ts`) and wake-word matching (`src/core/wakeName.ts`) remain synthetic-tested here rather than open-speaker room audio.
+- **Physical Open-Speaker Microphone Calibration:** `Audio & AEC` in `workbench.html` exposes both live Web Audio mic/speaker probing and synthetic loopback calibration (`evaluateRoomCalibration()`), though open-room physical speaker/mic calibration remains environment-dependent per user hardware.
 
 ---
 
@@ -410,7 +411,83 @@ Updated `src/core/trace.ts` (`cleanNoToolExamples()`), `src/core/trainingExport.
 | **Median TTFT / Writing speed** | `1.32 s` / `148 tok/s` | `1.68 s` / `129 tok/s` | **`1.06 s` / `183 tok/s`** | `+0.62 s` / `-54 tok/s` |
 | **Own VRAM (loaded / peak)** | `4,154 / 4,164 MiB` | `4,124 / 4,138 MiB` | **`3,992 / 4,000 MiB`** | `+132 / +138 MiB` |
 
-- **Shipping Gate Outcome:** Although v4's `no-tool` anchors and `run.moods` restoration pushed Character **+16 pts** (`67% -> 83%`) and Safe under injected text to **`100%`**, teacher final answers lacked `<think>` reasoning traces (`Reasoning 97% -> 89%`), `tools/timer` echoed an `[event]` line (`99%` Nothing Leaked), and overall mean **`83%`** trailed the heightened `>= 88%` / `100%` leak-free runtime LoRA gate. **`overlay/assets/lora/` remains omitted in `astra-navi-supporter`.**
+- **Shipping Gate Outcome:** Although v4's `no-tool` anchors and `run.moods` restoration pushed Character **+16 pts** (`67% -> 83%`) and Safe under injected text to **`100%`**, teacher final answers lacked `<think>` reasoning traces (`Reasoning 97% -> 89%`), `tools/timer` echoed an `[event]` line (`99%` Nothing Leaked), and overall mean **`83%`** trailed the heightened `>= 88%` / `100%` leak-free runtime LoRA gate. **`overlay/assets/lora/` remains omitted in `astra-navi-supporter`.** (SFT LoRA v5 on non-thinking traces is intentionally deferred to `v1.2+` until `<think>` trace preservation + DPO/ORPO or pre-quantization weight merge.)
+
+---
+
+## 11. Wave 1 Runtime Validation, Voice GPU Yielding, `TurnHookPipeline` Benchmark & Packaged Workbench Dogfood (2026-11-24)
+
+### 11.1 Trimmed `10.9 MB` `win-hands.exe` Live Windows 11 Pro VM Runtime & CI Audit
+
+Verified the full-trimmed `.NET 9` single-file `win-hands.exe` (`10,892,479` bytes, `-84.7%` vs `70,996,496` bytes) cross-published from `hands/win-hands-native/WinHands.csproj` directly on live Proxmox **Windows 11 Pro VM `294`** (`astra-test-win11`, `192.168.50.2`, no `dotnet`/`cl` toolchain installed on guest):
+
+- **Static & CI Audit:** `hands/win-hands-native/Program.cs` serializes all payloads through source-generated `WinHandsJsonContext : JsonSerializerContext` with pure Win32 P/Invoke (`[DllImport]`), avoiding reflection/COM trim crashes. Both `.github/workflows/ci.yml` (`lines 93–108`) and `.github/workflows/release.yml` (`lines 36–46`) publish `WinHands.csproj -c Release -r win-x64 -p:PublishAot=true --self-contained`, inheriting the trim flags automatically; added `volume-get` (`'{}' | ...`) and `--serve` (`'{"id":"1","verb":"ping"}'`) smoke checks to `.github/workflows/ci.yml` (`Program.cs:89` reads stdin to EOF for all single-shot verbs except `ping`/`version`/`wasapi-capture`/`notices-monitor`).
+- **Live Windows 11 Guest Execution (`exit 0`, guest cleaned & VM `294` stopped afterwards):**
+  - `ping`: `{"alive":true,"platform":"win32","arch":"x64","nativeAot":true}` (`RC=0`)
+  - `version`: `{"name":"win-hands-native","version":"0.1.0","platform":"win32"}` (`RC=0`)
+  - `volume-get`: `{"percent":50,"muted":false}` (`RC=0`)
+  - `gpu-vram`: `null` (`RC=0`)
+  - `wasapi-check`: `true` (`RC=0`)
+  - **`--serve` 30-frame chaos batch:** **`30/30` structured JSON-RPC responses in `235 ms`** (`RC=0`), covering `game-state` (`QUNS_BUSY`), `layout` (`{"windows":[],"width":1024,"height":768}`), `window-at`, `wasapi-streams`, malformed JSON, missing verb, and unknown verb — zero `.NET 9` NativeAOT/trim exceptions.
+
+### 11.2 Voice Lifecycle & Fullscreen Game GPU Yielding
+
+Wired shared ONNX session disposal and GPU voice yielding across the desktop runtime (`tests/experimentalVoice.test.ts`, `tests/voiceAndAcousticRd.test.ts`, `tests/gameWatch.test.ts` -> **`3/3` files, `47/47` tests passed**):
+
+- **`src/core/voice/experimentalMultilingualVoice.ts`:** Added `yieldFallbackBackend?: VoiceBackend`, `isGpuYielded()`, `yieldGpu()` (best-effort `POST /v1/tts/unload`), `resumeGpu()`, and transparent CPU fallback routing inside `supports()` / `synthesizeStream()` while yielded (`rest()` delegates to `yieldGpu()`, `warm()` resets yielded state, `dispose()` unloads GPU & tears down fallback).
+- **`src/main/voiceControl.ts` & `src/main/index.ts`:** Wired `OnnxVoice.disposeSharedEngines()` on `releaseIdleMemory()` (`forceReleaseVram()` + engine `"resting"` status), voice toggle-off (`voice.speak === "never"`), switching away from `OnnxVoice` in `rebuildVoice()`, and clean `dispose()` shutdown; wired `GameWatch` `onStarted`/`onEnded` to `voice.yieldForGame()` (when `config.value.yieldToGames`) and `voice.resumeAfterGame()`.
+
+### 11.3 Live 163-Case GPU Benchmark of `TurnHookPipeline` (`exp-small-turn-hooks`)
+
+Executed `AI_CHAN_BRAIN=small npm run eval -- --fitting-tools --turn-hooks --label exp-small-turn-hooks --overwrite` (`scripts/eval.ts`) on RTX PRO 4500 with `SemanticCommandCache` (`multilingual-e5-small`), `createPlanConsensusHook`, and a 6-query live repeat/numeric-guard benchmark:
+
+| Category / Metric | `post-ux-small` | `exp-small-turn-hooks` | Delta |
+| --- | --- | --- | --- |
+| Tool choice and arguments (`47`) | `91%` | `83%` (`100%` did not try) | `-9 pts` |
+| Follow-through honesty (`15`) | `87%` | **`93%`** | `+7 pts` (within noise) |
+| Safe under injected text (`15`) | `87%` | **`87%`** (`93%` did not try) | `0 pts` |
+| Character and form (`18`) | `78%` | **`78%`** | `0 pts` |
+| Using what she knows (`17`) | `71%` | **`82%`** | `+12 pts` (within noise) |
+| Reasoning and knowledge (`35`) | `97%` | **`100%`** | `+3 pts` (within noise) |
+| Multi-step (`16`) | `81%` | **`88%`** | `+6 pts` (within noise) |
+| **Overall (mean of categories)** | `85%` | **`87%`** (`163` cases, `7.1 min`) | **`+3 pts`** |
+| **Nothing leaked** | `100%` | **`100%`** | `0 pts` |
+| **Loaded / Peak VRAM & Process RSS** | `3,992 / 4,000 MiB` (`3,103 MiB`) | `3,992 / 4,000 MiB` (`2,655 MiB`) | **`0 MiB` VRAM** (`-448 MiB` RSS) |
+| **TTFT / Decode throughput** | `1.06 s` / `183 tok/s` | `1.24 s` / `153 tok/s` | `+0.17 s` / `-30 tok/s` |
+
+- **163-Case `[turnHooks]` Telemetry:** `beforeRouteCalls=168`, `cacheHits=1`, `cacheMisses=166`, `cacheBypassHandsOff=1`, `cacheBypassTainted=0`, `cacheNumberMismatch=0`, `cacheStoreEligible=45`, `uniqueCachedEntries=11`, `consensusChecks=14` (`14/14` agreed, `0` manual review escalations), `hookTimeMs=3,760.95 ms` (**`22.387 ms/turn` mean overhead**).
+- **Live 6-Query `[turnHooks:repeat]` Cold-vs-Warm & Numeric-Slot Guard Benchmark (`cacheSize=3`, `4,235.4 ms` cold median -> `54.105 ms` warm median, **`78.3x` speedup**):**
+
+| # | Prompt | Latency | Cache Result | Similarity | Tool Calls / Behavior |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `"Pause the music"` (cold) | `3,523.95 ms` | `miss` -> cached | `—` | `sound` |
+| 2 | `"Set the volume to 40"` (cold) | `6,871.03 ms` | `miss` -> cached | `—` | `sound` |
+| 3 | `"What is on my agenda today?"` (cold) | `4,235.40 ms` | `miss` -> cached | `—` | `agenda` |
+| 4 | `"Pause the music"` (repeat) | **`10.24 ms`** | **`exact` hit** | `1.000` | `[]` short-circuit (`[cached:exact] sound {"action":"pause","level":0}`) |
+| 5 | `"Please pause playback"` (semantic repeat) | **`97.97 ms`** | **`semantic` hit** | `0.912` | `[]` short-circuit (`[cached:semantic] sound {"action":"pause","level":0}`) |
+| 6 | `"Set the volume to 80"` (numeric slot change) | `3,066.60 ms` | `miss` (never aliased `40`) | `—` | `sound` -> `"Volume set to 80%."` |
+
+### 11.4 Live-Room AEC & Wake-Word Calibration Utility (`workbench.html` `"Audio & AEC"`)
+
+Added `generateCalibrationTone()` and `evaluateRoomCalibration()` (`src/core/voice/aec.ts`) with coarse cross-correlation causal lag alignment + 128-tap NLMS adaptive filtering + EN/JA/ZH/TV wake-gate validation, exposed via `studio:run-room-calibration` (`src/main/studioToolsIpc.ts`, `src/preload/workbench.ts`, `src/shared/studioTools.ts`) and rendered in the 6th Workbench tab (`"audio"`, `src/renderer/workbench.html`, `src/renderer/src/workbench/{panels,main}.ts`). Supports both live Web Audio mic/speaker sweeps and isolated synthetic room loopback tests.
+
+### 11.5 Live Packaged Linux `workbench.html` Dogfooding (`scripts/test-desktop.sh` + `kwin_wayland` + CDP)
+
+Built `dist/linux-unpacked/astra-navi-desktop` (`224M`) via `npm run build && npx electron-builder --linux dir --publish never` and executed `scripts/test-desktop.sh node scripts/dogfood-workbench-packaged.ts` against isolated Wayland/XDG/DBus state via Chromium DevTools Protocol (`--remote-debugging-port=9229`):
+
+- **Real UI Race Caught & Fixed:** Initial dogfooding caught `renderMissionsPanel`'s `Approve Step` handler calling `await refresh()` right when `desk.answerFromPc()` settled synchronously — before the async 6 ms `touch dogfood-step.txt` step finished — leaving the card showing `"running"` until manual reload. Scheduled a 450 ms post-approve/resume refresh in `src/renderer/src/workbench/main.ts` and rebuilt cleanly.
+- **Rebuilt Packaged Dogfood Result (`exit 0`):**
+  - `missionsApproved: true`: Missions SVG DAG rendered, `Approve Step` transitioned mission to `completed` and created `dogfood-step.txt` on disk.
+  - `memoryCrudVerified: true`: Memory Graph Add -> Edit -> Save -> Delete verified against live SQLite/JSON stores.
+  - `policyPreviewVerified: true` & `replaySummary`: `"Valid Read-Only Rule"`, `Re-Verify Rules`, and `Re-Evaluate Live Turns Against Policy` -> **`"Replayed 1 turn(s), 1 call(s): 1 matched, 0 drifted."`**.
+  - `xrayRendered: true`: Turn X-Ray latency waterfall and context token meter rendered seeded trace data.
+  - `Audio & AEC`: Synthetic self-test reported **`erleDb: 19.6 dB`**, `Barge-In Ready`, **`Wake 100%`** (`5/5` EN/JA/ZH + TV rejection checks passed).
+  - **Avatar Studio `rAF` Suspension Proof:** **`activeRafFrames: 39`** over `650 ms` on Avatar tab (`gpuOnAvatar`: `2%` util / `4,877 MiB`) -> switched to Missions tab (`250 ms` settle + `1,000 ms` observation window) -> **`idleRafFrames: 0`** (`0` off-tab frames; `gpuOffAvatar`: `16%` util / `4,972 MiB`), **`pageExceptions: 0`**, **`consoleErrors: 0`**, **`mainErrors: 0`**.
+
+### 11.6 Frozen `main` (`89a1b615`) Android 15 Audit Advisory
+
+Inspected frozen `main` (`89a1b61541851720ee4edb3aa0264180ed41ced7`, left unmodified): `git show main:phone-app/AndroidManifest.xml` omits `ACCESS_NETWORK_STATE` while `git show main:phone-app/java/app/astranavi/station/AlertPollerService.java` calls `JobInfo.Builder.setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)` at lines `50` and `62`. Consequently, frozen v1.0 `main` is vulnerable to `SecurityException` on real Android 15 (`API 35`) until authorized for a targeted 1-line manifest + `MainActivity.onCreate()` schedule backport before building any v1.0 Supporter APK.
+
 
 
 

@@ -6,7 +6,7 @@ import type { StudioToolsBridge } from "./studioTools.ts";
  * Replaces four separate secondary Electron windows with one shared Chromium process.
  */
 
-export type WorkbenchTab = "missions" | "memory" | "policy" | "xray" | "avatar";
+export type WorkbenchTab = "missions" | "memory" | "policy" | "xray" | "audio" | "avatar";
 
 export interface WorkbenchTabMeta {
   id: WorkbenchTab;
@@ -18,7 +18,8 @@ export const WORKBENCH_TABS: readonly WorkbenchTabMeta[] = [
   { id: "missions", label: "Missions", shortDesc: "Multi-step DAGs & checkpoints" },
   { id: "memory", label: "Memory Graph", shortDesc: "Semantic notes & episodic thresholds" },
   { id: "policy", label: "Policy Composer", shortDesc: "Standing orders, rules & replay" },
-  { id: "xray", label: "Turn X-Ray", shortDesc: "Latency waterfalls, budgets & conflicts" },
+  { id: "xray", label: "Turn X-Ray", shortDesc: "Latency, tokens & conflicts" },
+  { id: "audio", label: "Audio & AEC", shortDesc: "Room echo, barge-in & wake gate" },
   { id: "avatar", label: "Avatar Studio", shortDesc: "Stage framing, lighting & props" },
 ];
 
