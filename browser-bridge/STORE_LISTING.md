@@ -55,7 +55,7 @@ Actual requested keys in `browser-bridge/manifest.json`:
 ---
 
 ## Privacy & Data Handling Questionnaire Answers
-- **Does the extension collect, store, or transmit user data to external servers?** **No.** All data stays on `localhost` via OS Native Messaging stdio pipes.
+- **Does the extension collect, store, or transmit user data to external servers?** **No.** All data stays on `localhost` via OS Native Messaging stdio pipes (`browser_specific_settings.gecko.data_collection_permissions.required: ["none"]` in `manifest.json`).
 - **Does it use remote code?** **No.** All extension scripts (`background.js`, `content.js`) are bundled statically inside the archive.
 - **Account required?** **No** (no sign-in required for extension review; functionality requires the local open-source **Astra Navi Desktop** native messaging host, source in `browser-bridge/native-host.mjs`).
 

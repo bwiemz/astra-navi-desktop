@@ -14,6 +14,16 @@ on:
         options:
           - community
           - supporter
+      signing_mode:
+        description: "Windows signing profile mode (auto, public, private, dry-run-self-signed)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - public
+          - private
+          - dry-run-self-signed
       require_windows_signing:
         description: "Fail build if Windows Authenticode signing secrets are absent"
         required: false
@@ -22,6 +32,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   win-hands-native:
@@ -47,32 +58,121 @@ jobs:
           '{}' | ./hands/win-hands-native/bin/Release/net9.0/win-x64/publish/win-hands.exe volume-get
           '{"id":"1","verb":"ping"}' | ./hands/win-hands-native/bin/Release/net9.0/win-x64/publish/win-hands.exe --serve | Select-String '"ok":true'
 
-      - name: Sign win-hands.exe (when credentials configured)
+      - name: Detect Windows signing configuration
+        id: signing_env
         shell: pwsh
         env:
+          SIGNING_MODE_INPUT: ${{ inputs.signing_mode || 'auto' }}
           AZURE_CODE_SIGNING_ENDPOINT: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
           AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
           AZURE_CODE_SIGNING_CERT_PROFILE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE }}
+          AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ASTRA_NAVI_CERT_PFX_B64: ${{ secrets.ASTRA_NAVI_CERT_PFX_B64 }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORG_SLUG: ${{ secrets.SIGNPATH_ORG_SLUG }}
+          SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+        run: |
+          $modeInput = if ([string]::IsNullOrWhiteSpace($env:SIGNING_MODE_INPUT)) { "auto" } else { $env:SIGNING_MODE_INPUT }
+          $profileMode = if ($modeInput -in @("public", "private")) { $modeInput } else { "auto" }
+
+          $hasOidc = (-not [string]::IsNullOrWhiteSpace($env:AZURE_CLIENT_ID)) -and
+                     (-not [string]::IsNullOrWhiteSpace($env:AZURE_TENANT_ID)) -and
+                     (-not [string]::IsNullOrWhiteSpace($env:AZURE_SUBSCRIPTION_ID))
+
+          $azBase = (-not [string]::IsNullOrWhiteSpace($env:AZURE_CODE_SIGNING_ENDPOINT)) -and
+                    (-not [string]::IsNullOrWhiteSpace($env:AZURE_CODE_SIGNING_ACCOUNT))
+          $azPublic = -not [string]::IsNullOrWhiteSpace($env:AZURE_CODE_SIGNING_CERT_PROFILE)
+          $azPrivate = -not [string]::IsNullOrWhiteSpace($env:AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE)
+          $hasAzureProfile = switch ($profileMode) {
+            "public" { $azPublic }
+            "private" { $azPrivate -or $azPublic }
+            default { $azPublic -or $azPrivate }
+          }
+          $hasAzure = $azBase -and $hasAzureProfile
+          $hasPfx = -not [string]::IsNullOrWhiteSpace($env:ASTRA_NAVI_CERT_PFX_B64)
+          $hasSignPath = (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_API_TOKEN)) -and
+                         (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_ORG_SLUG)) -and
+                         (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_PROJECT_SLUG))
+
+          $effective = "unsigned"
+          if ($modeInput -eq "dry-run-self-signed") {
+            $effective = "self-signed-test"
+          } elseif ($hasAzure) {
+            $effective = "azure"
+          } elseif ($hasSignPath) {
+            $effective = "signpath"
+          } elseif ($hasPfx) {
+            $effective = "pfx"
+          }
+
+          $useAzureOidc = if ($effective -eq "azure" -and $hasOidc) { "true" } else { "false" }
+          "effective_mode=$effective" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "profile_mode=$profileMode" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "use_azure_oidc=$useAzureOidc" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "win-hands signing resolved: input=$modeInput -> effective_mode=$effective, profile_mode=$profileMode, use_azure_oidc=$useAzureOidc"
+
+      - name: Azure Login (OIDC)
+        if: steps.signing_env.outputs.use_azure_oidc == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Azure Trusted Signing Client (Dlib)
+        if: steps.signing_env.outputs.effective_mode == 'azure'
+        shell: pwsh
+        run: |
+          $pkgDir = Join-Path $env:RUNNER_TEMP "trusted-signing"
+          New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
+          $nuget = Get-Command nuget -ErrorAction SilentlyContinue
+          if (-not $nuget) {
+            $nugetExe = Join-Path $env:RUNNER_TEMP "nuget.exe"
+            Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $nugetExe
+            & $nugetExe install Microsoft.Trusted.Signing.Client -OutputDirectory $pkgDir -NonInteractive
+          } else {
+            & $nuget.Source install Microsoft.Trusted.Signing.Client -OutputDirectory $pkgDir -NonInteractive
+          }
+
+      - name: Sign & verify win-hands.exe (when credentials configured)
+        shell: pwsh
+        env:
+          EFFECTIVE_PROVIDER: ${{ steps.signing_env.outputs.effective_mode }}
+          PROFILE_MODE: ${{ steps.signing_env.outputs.profile_mode }}
+          REQUIRE_SIGNING: ${{ inputs.require_windows_signing }}
+          AZURE_CODE_SIGNING_ENDPOINT: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
+          AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
+          AZURE_CODE_SIGNING_CERT_PROFILE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE }}
+          AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE }}
+          AZURE_PRIVATE_TRUST_ROOT_CER_B64: ${{ secrets.AZURE_PRIVATE_TRUST_ROOT_CER_B64 }}
           ASTRA_NAVI_CERT_PFX_B64: ${{ secrets.ASTRA_NAVI_CERT_PFX_B64 }}
           ASTRA_NAVI_CERT_PASS: ${{ secrets.ASTRA_NAVI_CERT_PASS }}
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
           SIGNPATH_ORG_SLUG: ${{ secrets.SIGNPATH_ORG_SLUG }}
           SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
         run: |
-          $hasCert = $false
-          if ($env:ASTRA_NAVI_CERT_PFX_B64) {
-            $pfxOut = Join-Path $env:RUNNER_TEMP "release-cert.pfx"
-            [IO.File]::WriteAllBytes($pfxOut, [Convert]::FromBase64String($env:ASTRA_NAVI_CERT_PFX_B64))
-            $env:ASTRA_NAVI_CERT_PFX = $pfxOut
-            $hasCert = $true
-          } elseif ($env:AZURE_CODE_SIGNING_ENDPOINT -and $env:AZURE_CODE_SIGNING_ACCOUNT -and $env:AZURE_CODE_SIGNING_CERT_PROFILE) {
-            $hasCert = $true
-          }
-          if ($hasCert) {
-            pwsh -File scripts/sign-windows.ps1 -Targets "hands\win-hands-native\bin\Release\net9.0\win-x64\publish\win-hands.exe"
+          $helper = @("hands\win-hands-native\bin\Release\net9.0\win-x64\publish\win-hands.exe")
+          if ($env:EFFECTIVE_PROVIDER -eq "self-signed-test") {
+            Write-Host "Dry-run self-signed mode: deferring win-hands.exe test signature to package-windows so the runner root certificate matches."
+            & .\scripts\sign-windows.ps1 -DryRun -Targets $helper
+          } elseif ($env:EFFECTIVE_PROVIDER -in @("azure", "pfx", "signpath")) {
+            if ($env:EFFECTIVE_PROVIDER -eq "pfx") {
+              $pfxOut = Join-Path $env:RUNNER_TEMP "release-cert.pfx"
+              [IO.File]::WriteAllBytes($pfxOut, [Convert]::FromBase64String(($env:ASTRA_NAVI_CERT_PFX_B64 -replace '\s+', '')))
+              $env:ASTRA_NAVI_CERT_PFX = $pfxOut
+            }
+            & .\scripts\sign-windows.ps1 -Provider $env:EFFECTIVE_PROVIDER -ProfileMode $env:PROFILE_MODE -Targets $helper
+            if ($env:EFFECTIVE_PROVIDER -ne "signpath") {
+              & .\scripts\sign-windows.ps1 -VerifyOnly -Targets $helper
+            }
+          } elseif ($env:REQUIRE_SIGNING -eq "true") {
+            throw "Windows signing secrets are missing and require_windows_signing=true."
           } else {
             Write-Host "No Windows signing credentials configured; skipping Authenticode signature on win-hands.exe."
-            pwsh -File scripts/sign-windows.ps1 -DryRun
+            & .\scripts\sign-windows.ps1 -DryRun -Targets $helper
           }
 
       - uses: actions/upload-artifact@v4
@@ -260,41 +360,190 @@ jobs:
         run: |
           Copy-Item -Path "_supporter/overlay/*" -Destination "." -Recurse -Force
           Remove-Item -Path "_supporter" -Recurse -Force
-      - name: Package Windows NSIS & Portable
+
+      - name: Detect Windows signing configuration
+        id: signing_env
+        shell: pwsh
+        env:
+          SIGNING_MODE_INPUT: ${{ inputs.signing_mode || 'auto' }}
+          AZURE_CODE_SIGNING_ENDPOINT: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
+          AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
+          AZURE_CODE_SIGNING_CERT_PROFILE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE }}
+          AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ASTRA_NAVI_CERT_PFX_B64: ${{ secrets.ASTRA_NAVI_CERT_PFX_B64 }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORG_SLUG: ${{ secrets.SIGNPATH_ORG_SLUG }}
+          SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+        run: |
+          $modeInput = if ([string]::IsNullOrWhiteSpace($env:SIGNING_MODE_INPUT)) { "auto" } else { $env:SIGNING_MODE_INPUT }
+          $profileMode = if ($modeInput -in @("public", "private")) { $modeInput } else { "auto" }
+
+          $hasOidc = (-not [string]::IsNullOrWhiteSpace($env:AZURE_CLIENT_ID)) -and
+                     (-not [string]::IsNullOrWhiteSpace($env:AZURE_TENANT_ID)) -and
+                     (-not [string]::IsNullOrWhiteSpace($env:AZURE_SUBSCRIPTION_ID))
+
+          $azBase = (-not [string]::IsNullOrWhiteSpace($env:AZURE_CODE_SIGNING_ENDPOINT)) -and
+                    (-not [string]::IsNullOrWhiteSpace($env:AZURE_CODE_SIGNING_ACCOUNT))
+          $azPublic = -not [string]::IsNullOrWhiteSpace($env:AZURE_CODE_SIGNING_CERT_PROFILE)
+          $azPrivate = -not [string]::IsNullOrWhiteSpace($env:AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE)
+          $hasAzureProfile = switch ($profileMode) {
+            "public" { $azPublic }
+            "private" { $azPrivate -or $azPublic }
+            default { $azPublic -or $azPrivate }
+          }
+          $hasAzure = $azBase -and $hasAzureProfile
+          $hasPfx = -not [string]::IsNullOrWhiteSpace($env:ASTRA_NAVI_CERT_PFX_B64)
+          $hasSignPath = (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_API_TOKEN)) -and
+                         (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_ORG_SLUG)) -and
+                         (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_PROJECT_SLUG))
+
+          $effective = "unsigned"
+          if ($modeInput -eq "dry-run-self-signed") {
+            $effective = "self-signed-test"
+          } elseif ($hasAzure) {
+            $effective = "azure"
+          } elseif ($hasSignPath) {
+            $effective = "signpath"
+          } elseif ($hasPfx) {
+            $effective = "pfx"
+          }
+
+          $useAzureOidc = if ($effective -eq "azure" -and $hasOidc) { "true" } else { "false" }
+          "effective_mode=$effective" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "profile_mode=$profileMode" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "use_azure_oidc=$useAzureOidc" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "package-windows signing resolved: input=$modeInput -> effective_mode=$effective, profile_mode=$profileMode, use_azure_oidc=$useAzureOidc"
+
+      - name: Azure Login (OIDC)
+        if: steps.signing_env.outputs.use_azure_oidc == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Azure Trusted Signing Client (Dlib)
+        if: steps.signing_env.outputs.effective_mode == 'azure'
+        shell: pwsh
+        run: |
+          $pkgDir = Join-Path $env:RUNNER_TEMP "trusted-signing"
+          New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
+          $nuget = Get-Command nuget -ErrorAction SilentlyContinue
+          if (-not $nuget) {
+            $nugetExe = Join-Path $env:RUNNER_TEMP "nuget.exe"
+            Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $nugetExe
+            & $nugetExe install Microsoft.Trusted.Signing.Client -OutputDirectory $pkgDir -NonInteractive
+          } else {
+            & $nuget.Source install Microsoft.Trusted.Signing.Client -OutputDirectory $pkgDir -NonInteractive
+          }
+
+      - name: Stage 1 - Package Windows unpacked app directory
         shell: pwsh
         env:
           ASTRA_NAVI_EDITION: ${{ inputs.edition || 'community' }}
-        run: node scripts/package-release.ts --edition $env:ASTRA_NAVI_EDITION --platform win
-      - name: Sign Windows installers (when configured)
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: node scripts/package-release.ts --edition $env:ASTRA_NAVI_EDITION --platform win --stage unpacked
+
+      - name: Verify packaged win-hands.exe exists inside Stage 1 unpacked resources
+        shell: pwsh
+        run: |
+          $packagedWinHands = "dist\win-unpacked\resources\hands\win-hands-native\bin\Release\net9.0\win-x64\publish\win-hands.exe"
+          if (-not (Test-Path $packagedWinHands)) {
+            throw "Packaged Stage 1 directory is missing required native helper: $packagedWinHands"
+          }
+          Write-Host "Packaged win-hands.exe confirmed: $packagedWinHands ($((Get-Item $packagedWinHands).Length) bytes)"
+
+      - name: Sign Stage 1 Windows executables (before installer bundling)
+        if: steps.signing_env.outputs.effective_mode != 'unsigned' && steps.signing_env.outputs.effective_mode != 'signpath'
         shell: pwsh
         env:
+          EFFECTIVE_PROVIDER: ${{ steps.signing_env.outputs.effective_mode }}
+          PROFILE_MODE: ${{ steps.signing_env.outputs.profile_mode }}
+          AZURE_CODE_SIGNING_ENDPOINT: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
+          AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
+          AZURE_CODE_SIGNING_CERT_PROFILE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE }}
+          AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE }}
+          AZURE_PRIVATE_TRUST_ROOT_CER_B64: ${{ secrets.AZURE_PRIVATE_TRUST_ROOT_CER_B64 }}
+          ASTRA_NAVI_CERT_PFX_B64: ${{ secrets.ASTRA_NAVI_CERT_PFX_B64 }}
+          ASTRA_NAVI_CERT_PASS: ${{ secrets.ASTRA_NAVI_CERT_PASS }}
+        run: |
+          if ($env:EFFECTIVE_PROVIDER -eq "pfx") {
+            $pfxOut = Join-Path $env:RUNNER_TEMP "release-cert.pfx"
+            [IO.File]::WriteAllBytes($pfxOut, [Convert]::FromBase64String(($env:ASTRA_NAVI_CERT_PFX_B64 -replace '\s+', '')))
+            $env:ASTRA_NAVI_CERT_PFX = $pfxOut
+          }
+          $stage1Targets = @(
+            "hands\win-hands-native\bin\Release\net9.0\win-x64\publish\win-hands.exe",
+            "dist\win-unpacked\resources\hands\win-hands-native\bin\Release\net9.0\win-x64\publish\win-hands.exe",
+            "dist\win-unpacked\Astra Navi Desktop.exe"
+          )
+          & .\scripts\sign-windows.ps1 -Provider $env:EFFECTIVE_PROVIDER -ProfileMode $env:PROFILE_MODE -RequireAllTargets -Targets $stage1Targets
+
+      - name: Stage 2 - Package Windows NSIS & Portable installers from prepackaged dir
+        shell: pwsh
+        env:
+          ASTRA_NAVI_EDITION: ${{ inputs.edition || 'community' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: node scripts/package-release.ts --edition $env:ASTRA_NAVI_EDITION --platform win --stage installers
+
+      - name: Sign Stage 2 Windows installers (or enforce require_windows_signing)
+        shell: pwsh
+        env:
+          EFFECTIVE_PROVIDER: ${{ steps.signing_env.outputs.effective_mode }}
+          PROFILE_MODE: ${{ steps.signing_env.outputs.profile_mode }}
           REQUIRE_SIGNING: ${{ inputs.require_windows_signing }}
           AZURE_CODE_SIGNING_ENDPOINT: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
           AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
           AZURE_CODE_SIGNING_CERT_PROFILE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE }}
+          AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE: ${{ secrets.AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE }}
+          AZURE_PRIVATE_TRUST_ROOT_CER_B64: ${{ secrets.AZURE_PRIVATE_TRUST_ROOT_CER_B64 }}
           ASTRA_NAVI_CERT_PFX_B64: ${{ secrets.ASTRA_NAVI_CERT_PFX_B64 }}
           ASTRA_NAVI_CERT_PASS: ${{ secrets.ASTRA_NAVI_CERT_PASS }}
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
           SIGNPATH_ORG_SLUG: ${{ secrets.SIGNPATH_ORG_SLUG }}
           SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
         run: |
-          $hasCreds = $false
-          if ($env:ASTRA_NAVI_CERT_PFX_B64) {
-            $pfxOut = Join-Path $env:RUNNER_TEMP "release-cert.pfx"
-            [IO.File]::WriteAllBytes($pfxOut, [Convert]::FromBase64String($env:ASTRA_NAVI_CERT_PFX_B64))
-            $env:ASTRA_NAVI_CERT_PFX = $pfxOut
-            $hasCreds = $true
-          } elseif (($env:AZURE_CODE_SIGNING_ENDPOINT -and $env:AZURE_CODE_SIGNING_ACCOUNT -and $env:AZURE_CODE_SIGNING_CERT_PROFILE) -or ($env:SIGNPATH_API_TOKEN -and $env:SIGNPATH_ORG_SLUG -and $env:SIGNPATH_PROJECT_SLUG)) {
-            $hasCreds = $true
-          }
-          if ($hasCreds) {
-            pwsh -File scripts/sign-windows.ps1
-          } elseif ($env:REQUIRE_SIGNING -eq "true") {
-            throw "Windows signing secrets are missing and require_windows_signing=true."
-          } else {
+          if ($env:EFFECTIVE_PROVIDER -eq "unsigned") {
+            if ($env:REQUIRE_SIGNING -eq "true") {
+              throw "Windows signing secrets are missing and require_windows_signing=true."
+            }
             Write-Host "No Windows signing secrets set; writing unsigned draft artifacts."
-            pwsh -File scripts/sign-windows.ps1 -DryRun
+            & .\scripts\sign-windows.ps1 -DryRun
+            exit 0
           }
+          if ($env:EFFECTIVE_PROVIDER -eq "pfx") {
+            $pfxOut = Join-Path $env:RUNNER_TEMP "release-cert.pfx"
+            [IO.File]::WriteAllBytes($pfxOut, [Convert]::FromBase64String(($env:ASTRA_NAVI_CERT_PFX_B64 -replace '\s+', '')))
+            $env:ASTRA_NAVI_CERT_PFX = $pfxOut
+          }
+          if ($env:EFFECTIVE_PROVIDER -eq "signpath") {
+            & .\scripts\sign-windows.ps1 -Provider signpath
+            exit 0
+          }
+          $stage2Targets = @(
+            "dist\Astra Navi Desktop Setup*.exe",
+            "dist\Astra Navi Desktop*.exe"
+          )
+          & .\scripts\sign-windows.ps1 -Provider $env:EFFECTIVE_PROVIDER -ProfileMode $env:PROFILE_MODE -RequireAllTargets -Targets $stage2Targets
+
+      - name: Verify Authenticode signatures, RFC 3161 timestamps, and untouched third-party DLLs
+        if: steps.signing_env.outputs.effective_mode != 'unsigned' && steps.signing_env.outputs.effective_mode != 'signpath'
+        shell: pwsh
+        env:
+          AZURE_PRIVATE_TRUST_ROOT_CER_B64: ${{ secrets.AZURE_PRIVATE_TRUST_ROOT_CER_B64 }}
+        run: |
+          $allTargets = @(
+            "hands\win-hands-native\bin\Release\net9.0\win-x64\publish\win-hands.exe",
+            "dist\win-unpacked\resources\hands\win-hands-native\bin\Release\net9.0\win-x64\publish\win-hands.exe",
+            "dist\win-unpacked\Astra Navi Desktop.exe",
+            "dist\Astra Navi Desktop Setup*.exe",
+            "dist\Astra Navi Desktop*.exe"
+          )
+          & .\scripts\sign-windows.ps1 -VerifyOnly -RequireAllTargets -Targets $allTargets -AssertNoThirdPartyResignDir "dist\win-unpacked"
+
       - name: Compute Windows SHA-256 checksums
         shell: pwsh
         run: |
@@ -302,7 +551,20 @@ jobs:
             $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$h  $($_.Name)"
           } | Set-Content -Path dist\SHA256SUMS-windows.txt -Encoding UTF8
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload dry-run self-signed Windows artifacts
+        if: steps.signing_env.outputs.effective_mode == 'self-signed-test'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-signing-dry-run
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/SHA256SUMS-windows.txt
+
+      - name: Upload Windows installers
+        if: steps.signing_env.outputs.effective_mode != 'self-signed-test'
+        uses: actions/upload-artifact@v4
         with:
           name: dist-windows
           path: |
