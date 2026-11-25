@@ -83,17 +83,18 @@ $hasCreds = switch ($resolvedProvider) {
   }
 }
 
-$resolved = @()
+$resolvedList = [System.Collections.Generic.List[string]]::new()
 $seenPaths = @{}
 foreach ($pattern in $Targets) {
-  $matches = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue
+  $matches = @(Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue)
   foreach ($m in $matches) {
     if (-not $seenPaths.ContainsKey($m.FullName)) {
       $seenPaths[$m.FullName] = $true
-      $resolved += $m.FullName
+      $resolvedList.Add($m.FullName)
     }
   }
 }
+$resolved = @($resolvedList)
 
 if ($DryRun) {
   @{
@@ -117,11 +118,22 @@ function Find-SigntoolExe {
   if ($cmd) {
     return $cmd.Source
   }
-  $sdkBins = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending
-  if ($sdkBins -and $sdkBins.Count -gt 0) {
+  $sdkBins = @(Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending)
+  if ($sdkBins.Count -gt 0) {
     return $sdkBins[0].FullName
   }
   throw "Windows SDK signtool.exe not found on PATH or under Windows Kits."
+}
+
+function Import-TrustedRootCertificate {
+  param([string]$CerPath)
+  try {
+    Import-Certificate -FilePath $CerPath -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
+    return "Cert:\LocalMachine\Root"
+  } catch {
+    Import-Certificate -FilePath $CerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+    return "Cert:\CurrentUser\Root"
+  }
 }
 
 function Import-OptionalPrivateTrustRoot {
@@ -130,8 +142,8 @@ function Import-OptionalPrivateTrustRoot {
     try {
       $cleanB64 = ($env:AZURE_PRIVATE_TRUST_ROOT_CER_B64 -replace '\s+', '')
       [IO.File]::WriteAllBytes($rootCer, [Convert]::FromBase64String($cleanB64))
-      Import-Certificate -FilePath $rootCer -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
-      Write-Host "Imported AZURE_PRIVATE_TRUST_ROOT_CER_B64 into Cert:\CurrentUser\Root."
+      $storeUsed = Import-TrustedRootCertificate -CerPath $rootCer
+      Write-Host "Imported AZURE_PRIVATE_TRUST_ROOT_CER_B64 into $storeUsed."
     } finally {
       Remove-Item -Path $rootCer -Force -ErrorAction SilentlyContinue
     }
@@ -216,12 +228,12 @@ if ($VerifyOnly) {
       throw "Expected $appExe to be signed before checking third-party DLLs."
     }
     $ourThumb = $appSig.SignerCertificate.Thumbprint
-    $dlls = Get-ChildItem -Path $AssertNoThirdPartyResignDir -Filter "*.dll" -Recurse -File -ErrorAction SilentlyContinue
-    $reSigned = @()
+    $dlls = @(Get-ChildItem -Path $AssertNoThirdPartyResignDir -Filter "*.dll" -Recurse -File -ErrorAction SilentlyContinue)
+    $reSigned = [System.Collections.Generic.List[string]]::new()
     foreach ($dll in $dlls) {
       $dllSig = Get-AuthenticodeSignature -FilePath $dll.FullName
       if ($null -ne $dllSig.SignerCertificate -and $dllSig.SignerCertificate.Thumbprint -eq $ourThumb) {
-        $reSigned += $dll.FullName
+        $reSigned.Add($dll.FullName)
       }
     }
     if ($reSigned.Count -gt 0) {
@@ -237,12 +249,13 @@ if (-not $hasCreds) {
   throw "Signing credentials for provider '$resolvedProvider' (profileMode '$ProfileMode') are not configured."
 }
 
-$toSign = @()
+$toSignList = [System.Collections.Generic.List[string]]::new()
 foreach ($file in $resolved) {
   if (-not (Test-ShouldSkipSigning -FilePath $file -PublisherPattern $ExpectedPublisherPattern -SkipOwn $SkipAlreadySigned)) {
-    $toSign += $file
+    $toSignList.Add($file)
   }
 }
+$toSign = @($toSignList)
 
 if ($toSign.Count -eq 0) {
   $signtoolExe = Find-SigntoolExe
@@ -278,14 +291,14 @@ $signtoolExe = Find-SigntoolExe
 if ($resolvedProvider -eq "azure") {
   $dlibPath = $azDlib
   if ([string]::IsNullOrWhiteSpace($dlibPath) -or -not (Test-Path $dlibPath)) {
-    $candidate = Get-ChildItem -Path @(
+    $candidates = @(Get-ChildItem -Path @(
       "$env:RUNNER_TEMP\trusted-signing\Microsoft.Trusted.Signing.Client.*\bin\x64\Azure.CodeSigning.Dlib.dll",
       "$env:USERPROFILE\.nuget\packages\microsoft.trusted.signing.client\*\bin\x64\Azure.CodeSigning.Dlib.dll",
       "${env:ProgramFiles}\Microsoft Azure Artifact Signing\Client\x64\Azure.CodeSigning.Dlib.dll",
       "$env:LOCALAPPDATA\Microsoft\AzureArtifactSigning\Azure.CodeSigning.Dlib.dll",
       "tools\Azure.CodeSigning.Dlib.dll"
-    ) -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
-    if ($candidate) { $dlibPath = $candidate.FullName }
+    ) -ErrorAction SilentlyContinue | Sort-Object FullName -Descending)
+    if ($candidates.Count -gt 0) { $dlibPath = $candidates[0].FullName }
   }
   if ([string]::IsNullOrWhiteSpace($dlibPath) -or -not (Test-Path $dlibPath)) {
     throw "AZURE_CODE_SIGNING_DLIB must point to Azure.CodeSigning.Dlib.dll from Microsoft.Trusted.Signing.Client."
@@ -332,14 +345,14 @@ if ($resolvedProvider -eq "self-signed-test") {
     $tmpCer = Join-Path ([System.IO.Path]::GetTempPath()) "astranavi-ci-test-$thumb.cer"
     try {
       Export-Certificate -Cert $cert -FilePath $tmpCer | Out-Null
-      Import-Certificate -FilePath $tmpCer -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+      $storeUsed = Import-TrustedRootCertificate -CerPath $tmpCer
     } finally {
       Remove-Item -Path $tmpCer -Force -ErrorAction SilentlyContinue
     }
     if ($env:GITHUB_ENV) {
       "ASTRA_NAVI_TEST_CERT_THUMBPRINT=$thumb" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
     }
-    Write-Host "Created ephemeral 72h CI test signing certificate ($thumb) and trusted it on this runner."
+    Write-Host "Created ephemeral 72h CI test signing certificate ($thumb) and trusted it in $storeUsed on this runner."
   } else {
     Write-Host "Reusing ephemeral CI test signing certificate ($thumb)."
   }
