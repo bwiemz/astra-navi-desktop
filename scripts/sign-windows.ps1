@@ -13,6 +13,7 @@
   [string]$ExpectedPublisherPattern = "Astra Navi",
   [string]$AssertNoThirdPartyResignDir = "",
   [switch]$VerifyOnly,
+  [switch]$RequireAllTargets,
   [bool]$SkipAlreadySigned = $true,
   [switch]$DryRun
 )
@@ -87,6 +88,9 @@ $resolvedList = [System.Collections.Generic.List[string]]::new()
 $seenPaths = @{}
 foreach ($pattern in $Targets) {
   $matches = @(Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue)
+  if ($RequireAllTargets -and $matches.Count -eq 0) {
+    throw "Required signing/verification target pattern matched 0 files: $pattern"
+  }
   foreach ($m in $matches) {
     if (-not $seenPaths.ContainsKey($m.FullName)) {
       $seenPaths[$m.FullName] = $true

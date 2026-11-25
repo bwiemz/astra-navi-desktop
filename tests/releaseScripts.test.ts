@@ -64,5 +64,14 @@ describe("release asset, legal, community & workflow completeness", () => {
     expect(signPs1).toContain("TimeStamperCertificate");
     expect(signPs1).toContain("AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE");
     expect(signPs1).toContain("AssertNoThirdPartyResignDir");
+    expect(signPs1).toContain("RequireAllTargets");
+
+    const builderYml = readFileSync(join(ROOT, "electron-builder.yml"), "utf8");
+    expect(builderYml).not.toContain("!win-hands-native/bin/**/!(win-hands.exe)");
+
+    expect(releaseYml).toContain("-RequireAllTargets");
+    expect(releaseYml).toContain(
+      "dist\\win-unpacked\\resources\\hands\\win-hands-native\\bin\\Release\\net9.0\\win-x64\\publish\\win-hands.exe",
+    );
   });
 });
