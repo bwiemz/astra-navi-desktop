@@ -12,7 +12,7 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
-DET_URL="${AI_CHAN_OCR_DET_URL:-https://huggingface.co/monkt/paddleocr-onnx/resolve/main/detection/v4/det.onnx}"
+DET_URL="${AI_CHAN_OCR_DET_URL:-https://huggingface.co/monkt/paddleocr-onnx/resolve/main/detection/v5/det.onnx}"
 REC_URL="${AI_CHAN_OCR_REC_URL:-https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/rec.onnx}"
 DICT_URL="${AI_CHAN_OCR_DICT_URL:-https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/dict.txt}"
 

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync } from "node:fs";
 import { copyFile, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -154,9 +154,33 @@ export function launcherTargetPath(deps: BootstrapDeps = {}): string {
   return join(env.xdgDataHome, "applications", "astra-navi-desktop.desktop");
 }
 
+/** True when the optional Qwen-TTS Python environment exists and finished installing `qwen-tts`. */
+export function isVoiceEnvReady(voicePythonPath: string): boolean {
+  if (!existsSync(voicePythonPath)) return false;
+  const envDir = dirname(dirname(voicePythonPath));
+  if (existsSync(join(envDir, ".astranavi-voice-ready"))) return true;
+  if (existsSync(join(envDir, "Lib", "site-packages", "qwen_tts"))) return true;
+  const posixLib = join(envDir, "lib");
+  if (existsSync(posixLib)) {
+    try {
+      for (const entry of readdirSync(posixLib)) {
+        if (
+          entry.startsWith("python3.") &&
+          existsSync(join(posixLib, entry, "site-packages", "qwen_tts"))
+        ) {
+          return true;
+        }
+      }
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export async function checkBootstrapStatus(deps: BootstrapDeps = {}): Promise<BootstrapStatus> {
   const env = resolveEnv(deps);
-  const voiceReady = existsSync(env.voicePython);
+  const voiceReady = isVoiceEnvReady(env.voicePython);
   const ocrDir = join(env.modelsRoot, "ocr");
   const ocrReady =
     existsSync(join(ocrDir, "det.onnx")) &&
@@ -302,17 +326,17 @@ async function setupVoice(env: ReturnType<typeof resolveEnv>): Promise<string> {
   }
 
   await mkdir(env.dataRoot, { recursive: true, mode: 0o700 });
-  if (!existsSync(env.voicePython) && existsSync(envDir)) {
+  if (!isVoiceEnvReady(env.voicePython) && existsSync(envDir)) {
     await rm(envDir, { recursive: true, force: true });
   }
   emit("venv", 45, `Creating virtual environment in ${envDir}...`);
   const pipArgs = hasReqs ? ["-r", reqFile] : ["qwen-tts"];
   if (hasUv) {
-    await env.runCommand("uv", ["venv", envDir, "--python", "3.12"], 120_000);
+    await env.runCommand("uv", ["venv", "--clear", envDir, "--python", "3.12"], 120_000);
     emit("install", 75, "Installing pinned voice packages via uv...");
     await env.runCommand("uv", ["pip", "install", "--python", env.voicePython, ...pipArgs], 600_000);
   } else if (pyCmd) {
-    await env.runCommand(pyCmd.cmd, [...pyCmd.preArgs, "-m", "venv", envDir], 120_000);
+    await env.runCommand(pyCmd.cmd, [...pyCmd.preArgs, "-m", "venv", "--clear", envDir], 120_000);
     emit("install", 75, "Installing pinned voice packages via pip...");
     await env.runCommand(
       env.voicePython,
@@ -320,6 +344,12 @@ async function setupVoice(env: ReturnType<typeof resolveEnv>): Promise<string> {
       600_000,
     );
   }
+
+  await mkdir(envDir, { recursive: true, mode: 0o700 });
+  await writeFile(join(envDir, ".astranavi-voice-ready"), "ok\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
 
   emit("done", 100, `Voice environment ready at ${envDir}.`);
   return `Voice environment installed in ${envDir}`;

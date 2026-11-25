@@ -772,6 +772,17 @@ body[data-advanced="false"] .advanced-only {
   border-radius: 10px;
 }
 
+.wiz-service-row > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wiz-service-row button {
+  flex: none;
+  width: auto;
+  min-width: 96px;
+}
+
 .audit-badge {
   display: inline-block;
   padding: 2px 10px;
