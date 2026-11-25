@@ -298,6 +298,7 @@ const modelFiles = createModelFiles({
   scheme: SCHEME,
   appOrigin: APP_ORIGIN,
   rendererDir: RENDERER_DIR,
+  bundledRoot: resolveBundledRoot(app.getAppPath()),
   sendToWindow,
   appState,
   defaultModelPath: join(resolveBundledRoot(app.getAppPath()), "assets", "models", "ai-navigator", "ai-navigator.pmx"),

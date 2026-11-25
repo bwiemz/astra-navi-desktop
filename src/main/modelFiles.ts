@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -46,6 +47,8 @@ export interface ModelFilesDeps {
   appOrigin: string;
   /** Where the built page is. */
   rendererDir: string;
+  /** Unpacked bundled resources root (`process.resourcesPath` in packaged builds) for optional 2D sprite overlays. */
+  bundledRoot?: string;
   sendToWindow(channel: string, payload?: unknown): void;
   appState(showNotice: boolean): AppState;
   /** Optional distributable loose .pmx fallback when no user-imported model bundle exists yet. */
@@ -114,8 +117,19 @@ export function createModelFiles(deps: ModelFilesDeps): ModelFiles {
   }
 
   function serveAppFile(url: URL): Promise<Response> | Response {
-    const relative = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
-    const file = normalize(join(deps.rendererDir, relative));
+    const pathname = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
+    if (pathname.startsWith("/avatar2d/")) {
+      if (!deps.bundledRoot) return new Response(null, { status: 404 });
+      const avatarRoot = normalize(join(deps.bundledRoot, "assets", "avatar2d"));
+      const rel = pathname.slice("/avatar2d/".length);
+      const assetFile = normalize(join(avatarRoot, rel));
+      if (!assetFile.startsWith(avatarRoot + sep)) return new Response(null, { status: 403 });
+      const ext = extname(assetFile).toLowerCase();
+      if (ext !== ".json" && ext !== ".png") return new Response(null, { status: 403 });
+      if (!existsSync(assetFile)) return new Response(null, { status: 404 });
+      return net.fetch(pathToFileURL(assetFile).toString());
+    }
+    const file = normalize(join(deps.rendererDir, pathname));
     if (!file.startsWith(deps.rendererDir + sep)) return new Response(null, { status: 403 });
     return net.fetch(pathToFileURL(file).toString());
   }

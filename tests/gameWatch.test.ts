@@ -47,9 +47,24 @@ describe("the watch for games", () => {
     onCard = seen;
     await games.look();
   };
-  const saved = async (): Promise<{ sessions: PlaySession[]; open?: unknown }> => {
-    // Saving is not waited for by a look; give it a moment.
-    await new Promise((resolve) => setTimeout(resolve, 15));
+  const saved = async (
+    predicate?: (data: { sessions: PlaySession[]; open?: unknown }) => boolean,
+  ): Promise<{ sessions: PlaySession[]; open?: unknown }> => {
+    const deadline = Date.now() + 2_000;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+      try {
+        const parsed = JSON.parse(await readFile(file, "utf8")) as {
+          sessions: PlaySession[];
+          open?: unknown;
+        };
+        if (!predicate || predicate(parsed)) return parsed;
+      } catch (err) {
+        lastError = err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    if (lastError) throw lastError;
     return JSON.parse(await readFile(file, "utf8")) as { sessions: PlaySession[]; open?: unknown };
   };
 
@@ -63,8 +78,10 @@ describe("the watch for games", () => {
     ended = [];
   });
   afterEach(async () => {
-    // Stopping waits for whatever was still being written.
-    await Promise.all(made.splice(0).map((games) => games.stop()));
+    // Stopping sequentially avoids concurrent `.tmp` rename races when two instances share `file`.
+    for (const games of made.splice(0)) {
+      await games.stop();
+    }
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -220,7 +237,7 @@ describe("the watch for games", () => {
     await lookAfter(first, 44.5, CIV);
     await lookAfter(first, 0.5, null);
     await lookAfter(first, 0.5, null);
-    const onDisk = await saved();
+    const onDisk = await saved((d) => d.sessions.length === 1 && d.open === undefined);
     expect(onDisk.sessions).toHaveLength(1);
     expect(onDisk.open).toBeUndefined();
     expect((await stat(file)).mode & 0o777).toBe(0o600);
@@ -237,9 +254,10 @@ describe("the watch for games", () => {
     await lookAfter(first, 0.5, CIV);
     await lookAfter(first, 39.5, CIV);
     // Killed here: the file holds the sitting as still open.
-    const killed = await saved();
+    const killed = await saved((d) => Boolean(d.open));
     expect(killed.sessions).toEqual([]);
     expect(killed.open).toMatchObject({ game: CIV });
+    await first.stop();
     now = new Date(now.getTime() + 5 * 60 * 60_000);
     // Nothing is on the card when she comes back (a game that was would be believed at once).
     onCard = null;
@@ -260,8 +278,9 @@ describe("the watch for games", () => {
     await second.stop();
     expect(second.current()).toBeNull();
     expect(ended).toEqual([]);
-    expect((await saved()).sessions.map((session) => session.game)).toEqual([CIV, "Hades.x86_64"]);
-    expect((await saved()).open).toBeUndefined();
+    const finalSaved = await saved((d) => d.sessions.length === 2 && d.open === undefined);
+    expect(finalSaved.sessions.map((session) => session.game)).toEqual([CIV, "Hades.x86_64"]);
+    expect(finalSaved.open).toBeUndefined();
   });
 
   it("drops what in the file it could not have written, and keeps the rest", async () => {

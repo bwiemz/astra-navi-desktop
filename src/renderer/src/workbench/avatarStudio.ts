@@ -1,4 +1,5 @@
 import type { Config } from "../../../core/config.ts";
+import { LayeredSpriteRigManifestSchema } from "../../../shared/avatar2d.ts";
 import {
   computeAudioVisualizerProp,
   computeThermalCrystalProp,
@@ -10,6 +11,7 @@ import type {
   AvatarStudioSnapshot,
   StudioToolsBridge,
 } from "../../../shared/studioTools.ts";
+import { Canvas2DAvatarRenderer } from "../canvas2dStage.ts";
 import { StageLightingController } from "../stageLighting.ts";
 import { VrmaStageBridge } from "../vrmaStageBridge.ts";
 import { el } from "./dom.ts";
@@ -85,7 +87,76 @@ export function createWorkbenchAvatarPanel(
     setStatus(res.message);
   });
   rightCard.append(controls, saveBtn);
-  grid.append(leftCard, rightCard);
+
+  const spriteCard = el("div", "card stack");
+  spriteCard.append(el("h2", undefined, "2D Layered Sprite Rig Check (`astral-midnight`)"));
+  const spriteControls = el("div", "btn-row");
+  const loadSpriteBtn = el("button", undefined, "Load & Render 2D Sprite Rig");
+  loadSpriteBtn.type = "button";
+  loadSpriteBtn.dataset.action = "load-avatar2d-rig";
+  const spriteStatus = el("span", "muted", "Click to verify packaged 2D sprite overlay.");
+  spriteStatus.dataset.testid = "avatar2d-status";
+  spriteControls.append(loadSpriteBtn, spriteStatus);
+
+  const spriteCanvas = document.createElement("canvas");
+  spriteCanvas.dataset.testid = "avatar2d-canvas";
+  spriteCanvas.width = 512;
+  spriteCanvas.height = 512;
+  spriteCanvas.style.width = "256px";
+  spriteCanvas.style.height = "256px";
+  spriteCanvas.style.borderRadius = "8px";
+  spriteCanvas.style.border = "1px solid var(--border)";
+
+  loadSpriteBtn.addEventListener("click", async () => {
+    loadSpriteBtn.disabled = true;
+    spriteStatus.textContent = "Loading 2D sprite rig…";
+    try {
+      const baseUrl = new URL("./avatar2d/astral-midnight/", window.location.href);
+      const rigRes = await fetch(new URL("rig.json", baseUrl).toString());
+      if (!rigRes.ok) {
+        spriteStatus.textContent = "Supporter 2D sprite rig not installed (optional overlay).";
+        return;
+      }
+      const parsed = LayeredSpriteRigManifestSchema.safeParse((await rigRes.json()) as unknown);
+      if (!parsed.success) {
+        spriteStatus.textContent = "Invalid 2D rig manifest.";
+        return;
+      }
+      const needed = new Set<string>(parsed.data.layers.map((l) => l.asset));
+      for (const v of Object.values(parsed.data.visemeAssets)) if (v) needed.add(v);
+      if (parsed.data.blinkEyeAsset) needed.add(parsed.data.blinkEyeAsset);
+      for (const m of Object.values(parsed.data.moodOverlays)) if (m) needed.add(m);
+
+      const renderer = new Canvas2DAvatarRenderer({
+        ctx: spriteCanvas.getContext("2d"),
+        loadAsset: (relAsset) =>
+          new Promise((resolveImg, rejectImg) => {
+            const img = new Image();
+            img.onload = () => resolveImg(img);
+            img.onerror = () => rejectImg(new Error(`Failed loading 2D sprite: ${relAsset}`));
+            img.src = new URL(relAsset, baseUrl).toString();
+          }),
+      });
+      await renderer.load(parsed.data);
+      renderer.renderFrame({
+        mood: "happy",
+        visemes: { A: 0.7, I: 0, U: 0, E: 0, O: 0 },
+        blink: 0,
+        gazeX: 0.1,
+        gazeY: -0.05,
+      });
+      const msg = `Rendered 2D rig "${parsed.data.name}" (${needed.size} sprites loaded)`;
+      spriteStatus.textContent = msg;
+      setStatus(msg);
+    } catch (error) {
+      spriteStatus.textContent = error instanceof Error ? error.message : String(error);
+    } finally {
+      loadSpriteBtn.disabled = false;
+    }
+  });
+
+  spriteCard.append(spriteControls, spriteCanvas);
+  grid.append(leftCard, rightCard, spriteCard);
   container.replaceChildren(grid);
 
   function addSlider(

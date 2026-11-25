@@ -567,17 +567,17 @@ Executed `AI_CHAN_BRAIN=standard npm run eval -- --lean --fitting-tools --turn-h
 
 | Category / Metric | `post-ux-standard` (`9B`) | `exp-standard-q8kv` (`9B Q8_0`) | **`exp-standard-q8kv-hooks` (`9B Q8_0 + Hooks`)** | Delta vs `exp-standard-q8kv` |
 | --- | --- | --- | --- | --- |
-| Tool choice and arguments (`47`) | `85%` | `85%` | **`91%`** (`100%` did not try) | **`+6 pts`** |
-| Follow-through honesty (`15`) | — | `67%` | **`80%`** | **`+13 pts`** |
-| Safe under injected text (`15`) | — | `93%` | **`100%`** (`100%` did not try) | **`+7 pts`** |
-| Character and form (`18`) | — | `94%` | `89%` | `-5 pts` |
-| Using what she knows (`17`) | — | `76%` | **`76%`** | `0 pts` |
-| Reasoning and knowledge (`35`) | — | `100%` | **`100%`** | `0 pts` |
-| Multi-step (`16`) | — | `81%` | **`94%`** | **`+13 pts`** |
+| Tool choice and arguments (`47`) | `83%` | `85%` | **`91%`** (`100%` did not try) | **`+6 pts`** |
+| Follow-through honesty (`15`) | `67%` | `67%` | **`80%`** | **`+13 pts`** |
+| Safe under injected text (`15`) | **`100%`** | `93%` | **`100%`** (`100%` did not try) | **`+7 pts`** |
+| Character and form (`18`) | **`94%`** | **`94%`** | `89%` | `-5 pts` |
+| Using what she knows (`17`) | **`82%`** | `76%` | `76%` | `0 pts` |
+| Reasoning and knowledge (`35`) | **`100%`** | **`100%`** | **`100%`** | `0 pts` |
+| Multi-step (`16`) | `69%` | `81%` | **`94%`** | **`+13 pts`** |
 | **Overall (mean of categories)** | `85%` | `85%` | **`90%`** | **`+5 pts`** |
 | **Nothing leaked** | `100%` | `100%` | **`100%`** | **`0 pts`** |
 | **Loaded / Peak VRAM** | `6,262 / 6,270 MiB` | `6,026 / 6,034 MiB` | **`6,026 / 6,034 MiB`** | `0 MiB` (`-236 MiB` vs FP16) |
-| **Median TTFT / Decode Speed** | — | `2.10 s` / `108 tok/s` | **`1.92 s` / `114 tok/s`** | **`-0.18 s` / `+6 tok/s`** |
+| **Median TTFT / Decode Speed** | `1.97 s` / `107 tok/s` | `2.10 s` / `108 tok/s` | **`1.92 s` / `114 tok/s`** | **`-0.18 s` / `+6 tok/s`** |
 
 - **Turn-Hook & Live Repeat Telemetry:** `beforeRouteCalls=169`, `cacheStoreEligible=56`, `uniqueCachedEntries=14`, `consensusChecks=19` (`19/19` agreed, `0` manual escalations), `hookTimeMs=1,209.42 ms` (**`7.156 ms/turn`** avg overhead). In the live 6-query `[turnHooks:repeat]` shootout, cold median dropped from `2,362.17 ms -> 12.625 ms` (**`187.1x` speedup**: `0.22 ms` exact hit on `"Pause the music"`, `25.03 ms` semantic hit @ `0.912` on `"Please pause playback"`), while `"Set the volume to 80"` hit `number_mismatch` (`1,818.81 ms`, `0.9434` similarity, zero aliasing with `40`).
 
@@ -608,8 +608,26 @@ Decoupled Wave 3 `voiceCloneStudio.ts` security checks into `tests/voiceCloneSec
 
 - **Priority #0 `main` Android 15 Hotfix Queued:** Before cutting any signed `v1.0.0-rc.1` Supporter APK from `main`, apply the two-file surgical hotfix (`phone-app/AndroidManifest.xml` `ACCESS_NETWORK_STATE` + `MainActivity.onCreate()` `AlertPollerService` schedule guard) directly to `main`.
 
+---
 
+## 14. Post-Review Hardening Verification (Catch 1–5, `2026-11-24`)
 
+Addressed five targeted review catches strictly on `experimental`:
 
-
+1. **`tests/gameWatch.test.ts` Flake & Rename Collision Eliminated (Catch 1):**
+   - Replaced the blind `15 ms` timeout check in `saved()` with a polling helper (`10 ms` interval, up to `2,000 ms`, optional predicate) and serialized `GameWatch.stop()` calls during mid-test handoffs and `afterEach` teardown so shared `play-log.json.tmp` renames cannot race.
+   - **Verified:** **`5/5` consecutive runs passed (`37/37` tests each)** with **`0` `ENOENT` warnings**.
+2. **Wave 2 Packaged 7th Tab + Supporter 11-Sprite 2D Rig Dogfooded (Catch 3):**
+   - Bundled `plugins/*/manifest.json` + `index.ts` in `electron-builder.yml` `extraResources` (all `7` plugin manifests verified under `dist/linux-unpacked/resources/plugins/`), added scoped `/avatar2d/` asset serving in `src/main/modelFiles.ts`, updated `workbench.html` CSP (`connect-src 'self'`, `img-src 'self' data:`), added live `Canvas2DAvatarRenderer` verification in `src/renderer/src/workbench/avatarStudio.ts`, and extended `scripts/dogfood-workbench-packaged.ts` to exercise the 7th `"extensions"` tab (`Extensions & Sync`) + temporarily stage and clean up `../astra-navi-supporter/overlay/assets/avatar2d/astral-midnight`.
+   - **Packaged Wayland Result (`scripts/test-desktop.sh node scripts/dogfood-workbench-packaged.ts`):** **`ok: true`**, `extensionsTabVerified: true`, **`avatar2dCheck.spritesLoaded: 11`** (`nonTransparentPixels: 58858`), `missionsApproved: true`, `memoryCrudVerified: true`, `policyPreviewVerified: true`, `replaySummary: "Replayed 1 turn(s), 1 call(s): 1 matched, 0 drifted."`, `xrayRendered: true`, `aecErleDb: 19.7`, `activeRafFrames: 30`, `idleRafFrames: 0`, `gpuOnAvatar: 7% / 2,420 MiB` -> `gpuOffAvatar: 5% / 2,395 MiB`, **`0` page/console/main errors**, and `dist/linux-unpacked/resources/assets/avatar2d` removed cleanly on exit.
+3. **Pure-JS `/FlateDecode` PDF Fallback Verified Without `pdftotext` (Catch 2):**
+   - Added bounded zlib inflation (`inflateSync` / `inflateRawSync`, `4 MiB` per-stream & `8 MiB` total caps, corrupt-stream tolerance, UTF-8-when-valid string decoding before control/BiDi filtering so `\u202E`/`\u202C` never turn into `â®`/`â¬` mojibake) and `ASTRA_NAVI_DISABLE_PDFTOTEXT=1` override in `src/core/vaultRag.ts`, plus `/Filter /FlateDecode` + valid byte-offset `xref`/`trailer` PDF generation in `scripts/eval-wave2-adversarial.ts`.
+   - **Unit Test (`tests/wave2Workbench.test.ts`):** **`3/3` passed**, including compressed `/FlateDecode` extraction, BiDi override sanitization, and corrupt-stream fallback under `ASTRA_NAVI_DISABLE_PDFTOTEXT=1`.
+   - **Live `Qwen3.5-9B` (`Q8_0` KV) Adversarial Eval (`scripts/eval-wave2-adversarial.ts --json`):**
+     - `ASTRA_NAVI_DISABLE_PDFTOTEXT=1` (pure-JS `/FlateDecode`): **`6/6` adversarial passed, `2/2` controls passed (`ctrl-pdf-retention` `"30 days"` in `1,618 ms`), `0` unauthorized tool calls, `0` leaked markers**.
+     - `pdftotext` enabled: **`6/6` adversarial passed, `2/2` controls passed (`ctrl-pdf-retention` `"30 days"` in `1,631 ms`), `0` unauthorized tool calls, `0` leaked markers**.
+4. **Section 13.2 `post-ux-standard` Table Reconciled (Catch 4):**
+   - Corrected §13.2's `post-ux-standard` column to match Section 3 verbatim (`83%` Tool choice & arguments, `67%` Honesty, `100%` Safe under injected text, `94%` Character, `82%` Memory, `100%` Reasoning, `69%` Multi-step, `1.97 s / 107 tok/s`).
+5. **Open-Speaker HDMI PipeWire Calibration Sweep (Catch 5):**
+   - Added `--sink` and `--source` flags to `scripts/run-live-room-calibration.ts` and ran `--sink alsa_output.pci-0000_01_00.1.hdmi-stereo --gain 0.55` into `@DEFAULT_SOURCE@` (`SSL 2+` XLR mic): `Ambient Floor=0.00026 RMS (-71.7 dBFS)`, `aecLag=289.7 ms` (`probeLag=305.4 ms`), `corr=0.0399`, `coupling=isolated`, `bargeInStatus=ready_isolated`, `rawMicRms=0.00026`, `residualRms=0.0003`, `ERLE=-0.99 dB`, `bargeInReady=true`, `Kokoro-82M` -> `moonshine-base-ONNX` `direct=4/4`, `liveMic=2/4` (`0/2` false wakes; `"Astranavi, check the disk space."` registered faint speaker bleed at `rms=0.00133` above ambient, while overall desk geometry kept acoustic coupling below the `0.08` correlation threshold).
 

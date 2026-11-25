@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { deflateSync } from "node:zlib";
 import { defineChatSessionFunction, type ChatSessionModelFunctions } from "node-llama-cpp";
 import { createHomelabOpsPlugin } from "../plugins/homelab-ops/index.ts";
 import { LocalEngine } from "../src/core/engine.ts";
@@ -20,31 +21,42 @@ import { frameVaultExcerpt, VaultRagIndex } from "../src/core/vaultRag.ts";
 
 const jsonOut = process.argv.includes("--json");
 
-/** Builds a valid PDF 1.4 document readable by `pdftotext` and literal-string extraction. */
+/** Builds a valid PDF 1.4 document with `/Filter /FlateDecode` zlib stream (readable by `pdftotext` AND pure-JS fallback). */
 function buildPdfBytes(lines: readonly string[]): Buffer {
   const escaped = lines.map((l) =>
     l.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)"),
   );
   const textOps = escaped.map((l, idx) => `(${l}) Tj${idx < escaped.length - 1 ? " T*" : ""}`).join("\n");
-  const streamBody = `BT\n/F1 12 Tf\n14 TL\n72 720 Td\n${textOps}\nET\n`;
-  const objects = [
-    "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-    "3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n",
-    `4 0 obj\n<< /Length ${Buffer.byteLength(streamBody, "utf8")} >>\nstream\n${streamBody}endstream\nendobj\n`,
-    "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+  const streamText = `BT\n/F1 12 Tf\n14 TL\n72 720 Td\n${textOps}\nET\n`;
+  const compressed = deflateSync(Buffer.from(streamText, "utf8"));
+  const objects: Buffer[] = [
+    Buffer.from("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n", "utf8"),
+    Buffer.from("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n", "utf8"),
+    Buffer.from(
+      "3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n",
+      "utf8",
+    ),
+    Buffer.concat([
+      Buffer.from(`4 0 obj\n<< /Length ${compressed.length} /Filter /FlateDecode >>\nstream\n`, "utf8"),
+      compressed,
+      Buffer.from("\nendstream\nendobj\n", "utf8"),
+    ]),
+    Buffer.from("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n", "utf8"),
   ];
-  let out = "%PDF-1.4\n";
+  const chunks: Buffer[] = [Buffer.from("%PDF-1.4\n", "utf8")];
+  let bytePos = chunks[0]?.length ?? 0;
   const offsets: number[] = [];
   for (const obj of objects) {
-    offsets.push(Buffer.byteLength(out, "utf8"));
-    out += obj;
+    offsets.push(bytePos);
+    chunks.push(obj);
+    bytePos += obj.length;
   }
-  const xrefStart = Buffer.byteLength(out, "utf8");
-  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  for (const off of offsets) out += `${String(off).padStart(10, "0")} 00000 n \n`;
-  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
-  return Buffer.from(out, "utf8");
+  const xrefStart = bytePos;
+  const xrefLines = [`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`];
+  for (const off of offsets) xrefLines.push(`${String(off).padStart(10, "0")} 00000 n \n`);
+  xrefLines.push(`trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
+  chunks.push(Buffer.from(xrefLines.join(""), "utf8"));
+  return Buffer.concat(chunks);
 }
 
 interface RecordedToolCall {

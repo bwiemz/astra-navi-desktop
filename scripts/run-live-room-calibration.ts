@@ -27,9 +27,13 @@ const args = process.argv.slice(2);
 const jsonOut = args.includes("--json");
 let cacheDir = join(homedir(), ".local/share/ai-chan/models/speech");
 let sweepGain = 0.35;
+let sinkDevice = "@DEFAULT_SINK@";
+let sourceDevice = "@DEFAULT_SOURCE@";
 for (let i = 0; i < args.length; i += 1) {
   const arg = args[i] ?? "";
   if (arg === "--cache-dir") cacheDir = args[(i += 1)] ?? cacheDir;
+  else if (arg === "--sink") sinkDevice = args[(i += 1)] ?? sinkDevice;
+  else if (arg === "--source") sourceDevice = args[(i += 1)] ?? sourceDevice;
   else if (arg === "--gain") {
     const parsed = Number(args[(i += 1)]);
     if (Number.isFinite(parsed) && parsed > 0 && parsed <= 0.8) sweepGain = parsed;
@@ -117,7 +121,7 @@ async function captureMic16k(durationMs: number, whileRecording?: () => Promise<
       "--channels=1",
       "--latency-msec=20",
       "--raw",
-      "--device=@DEFAULT_SOURCE@",
+      `--device=${sourceDevice}`,
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
@@ -151,7 +155,7 @@ async function captureMic16k(durationMs: number, whileRecording?: () => Promise<
 }
 
 async function playWav(wavPath: string): Promise<void> {
-  await execFileAsync("paplay", ["--device=@DEFAULT_SINK@", wavPath], { timeout: 15_000 });
+  await execFileAsync("paplay", [`--device=${sinkDevice}`, wavPath], { timeout: 15_000 });
 }
 
 function estimateDeviceLagSamples(
@@ -375,7 +379,7 @@ async function main(): Promise<void> {
     if (jsonOut) {
       console.log(JSON.stringify(payload, null, 2));
     } else {
-      console.log(`Live PipeWire Devices: ${pw.serverName} | sink=${pw.defaultSink} | source=${pw.defaultSource}`);
+      console.log(`Live PipeWire Devices: ${pw.serverName} | sink=${sinkDevice} (default=${pw.defaultSink}) | source=${sourceDevice} (default=${pw.defaultSource})`);
       console.log(`Ambient Floor (${ambient.length} samples @ 16 kHz): RMS=${ambientRms} (${ambientDb} dBFS)`);
       console.log(
         `Physical Sweep (gain=${sweepGain}): aecLag=${roomReport.estimatedLagMs} ms (probeLag=${payload.physicalSweep.deviceLagMs} ms), corr=${roomReport.peakCorrelation}, coupling=${roomReport.couplingStatus}, bargeInStatus=${roomReport.bargeInStatus}, rawMicRms=${roomReport.rawMicRms}, residualRms=${roomReport.residualRms}, ERLE=${roomReport.erleDb} dB, bargeInReady=${roomReport.bargeInReady}, minSnrDb=${roomReport.recommendedMinSnrDb}, minResRms=${roomReport.recommendedMinResidualRms}`,

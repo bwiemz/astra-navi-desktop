@@ -43,6 +43,11 @@ extraResources:
     to: voice-server
   - from: browser-bridge
     to: browser-bridge
+  - from: plugins
+    to: plugins
+    filter:
+      - "**/manifest.json"
+      - "**/index.ts"
 linux:
   target:
     - AppImage

@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { cpSync, existsSync, rmSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -324,7 +324,7 @@ async function main(): Promise<void> {
     `Packaged binary not found at ${binPath}. Run 'npm run build && npx electron-builder --linux dir --publish never' first.`,
   );
 
-  const { stepFlagFile } = await seedIsolatedState();
+  const { wsDir, stepFlagFile } = await seedIsolatedState();
 
   const stdoutLines: string[] = [];
   const stderrLines: string[] = [];
@@ -527,7 +527,8 @@ async function main(): Promise<void> {
       `(() => {
         const box = document.querySelector('#panel-audio [data-testid="aec-report"]');
         const txt = box?.textContent ?? '';
-        return txt.includes('Barge-In Ready') && txt.includes('Wake 100%') ? txt : '';
+        const hasBargeBadge = txt.includes('Open-Speaker AEC Ready') || txt.includes('Headphones / Isolated') || txt.includes('Barge-In Ready');
+        return hasBargeBadge && txt.includes('Wake 100%') ? txt : '';
       })()`,
       8_000,
       "Audio & AEC self-test report",
@@ -536,69 +537,198 @@ async function main(): Promise<void> {
     const erleDb = erleMatch ? Number(erleMatch[1]) : 0;
     assert(erleDb >= 10, `Expected synthetic ERLE >= 10 dB, got ${erleDb}`);
 
-    // 6. Avatar Studio tab & rAF suspension proof
-    await cdp.exec(`(() => {
-      window.__rafCount = 0;
-      const orig = window.requestAnimationFrame.bind(window);
-      window.requestAnimationFrame = (cb) => orig((ts) => {
-        window.__rafCount += 1;
-        cb(ts);
-      });
-    })()`);
-    await cdp.exec(`document.querySelector('button.wb-nav-btn[data-tab="avatar"]').click()`);
-    await pause(650);
-    const activeRafFrames = await cdp.eval<number>(`window.__rafCount`);
-    assert(activeRafFrames >= 5, `Expected activeRafFrames >= 5 on Avatar tab, got ${activeRafFrames}`);
-
-    await cdp.exec(`(() => {
-      const waveBtn = Array.from(document.querySelectorAll('#panel-avatar button')).find((b) => b.textContent?.trim() === 'Wave');
-      if (waveBtn) waveBtn.click();
-    })()`);
-    const gpuOnAvatar = await sampleGpu();
-
-    await cdp.exec(`document.querySelector('button.wb-nav-btn[data-tab="missions"]').click()`);
-    await pause(250);
-    await cdp.exec(`(() => { window.__rafCount = 0; })()`);
-    await pause(1000);
-    const idleRafFrames = await cdp.eval<number>(`window.__rafCount`);
-    const gpuOffAvatar = await sampleGpu();
-    assert(idleRafFrames === 0, `Expected idleRafFrames === 0 off Avatar tab, got ${idleRafFrames}`);
-
-    assert(
-      cdp.pageExceptions.length === 0,
-      `Renderer uncaught exceptions: ${cdp.pageExceptions.join(" | ")}`,
+    // 6. Avatar Studio tab, rAF suspension proof & packaged Supporter 2D Sprite Rig check
+    const supporterRigSrc = resolve(
+      ROOT,
+      "../astra-navi-supporter/overlay/assets/avatar2d/astral-midnight",
     );
-    assert(
-      cdp.consoleErrors.length === 0,
-      `Renderer console errors: ${cdp.consoleErrors.join(" | ")}`,
-    );
-    assert(
-      mainErrors.length === 0,
-      `Main process errors: ${mainErrors.join(" | ")}`,
-    );
+    const stagedRigDest = join(ROOT, "dist/linux-unpacked/resources/assets/avatar2d/astral-midnight");
+    const preExistingRig = existsSync(stagedRigDest);
+    let avatar2dCheck: { spritesLoaded: number; nonTransparentPixels: number; status: string } = {
+      spritesLoaded: 0,
+      nonTransparentPixels: 0,
+      status: "skipped",
+    };
+    if (existsSync(supporterRigSrc) && !preExistingRig) {
+      cpSync(supporterRigSrc, stagedRigDest, { recursive: true });
+    }
 
-    console.log(
-      JSON.stringify(
-        {
-          ok: true,
-          missionsApproved: true,
-          memoryCrudVerified: true,
-          policyPreviewVerified: true,
-          replaySummary: replaySummary.trim(),
-          xrayRendered: true,
-          aecErleDb: erleDb,
-          activeRafFrames,
-          idleRafFrames,
-          gpuOnAvatar,
-          gpuOffAvatar,
-          pageExceptions: cdp.pageExceptions.length,
-          consoleErrors: cdp.consoleErrors.length,
-          mainErrors: mainErrors.length,
-        },
-        null,
-        2,
-      ),
-    );
+    try {
+      await cdp.exec(`(() => {
+        window.__rafCount = 0;
+        const orig = window.requestAnimationFrame.bind(window);
+        window.requestAnimationFrame = (cb) => orig((ts) => {
+          window.__rafCount += 1;
+          cb(ts);
+        });
+      })()`);
+      await cdp.exec(`document.querySelector('button.wb-nav-btn[data-tab="avatar"]').click()`);
+      await pause(650);
+      const activeRafFrames = await cdp.eval<number>(`window.__rafCount`);
+      assert(activeRafFrames >= 5, `Expected activeRafFrames >= 5 on Avatar tab, got ${activeRafFrames}`);
+
+      await cdp.exec(`(() => {
+        const waveBtn = Array.from(document.querySelectorAll('#panel-avatar button')).find((b) => b.textContent?.trim() === 'Wave');
+        if (waveBtn) waveBtn.click();
+      })()`);
+
+      if (existsSync(join(stagedRigDest, "rig.json"))) {
+        await cdp.exec(
+          `document.querySelector('#panel-avatar button[data-action="load-avatar2d-rig"]').click()`,
+        );
+        const rigStatus = await cdp.waitFor<string>(
+          `(() => {
+            const st = document.querySelector('#panel-avatar [data-testid="avatar2d-status"]')?.textContent ?? '';
+            return st.includes('sprites loaded') || st.includes('Failed') || st.includes('not installed') ? st : '';
+          })()`,
+          8_000,
+          "Supporter 2D sprite rig load",
+        );
+        assert(rigStatus.includes("11 sprites loaded"), `Expected 11 loaded 2D sprites, got "${rigStatus}"`);
+        const nonTransparentPixels = await cdp.eval<number>(`(() => {
+          const canvas = document.querySelector('#panel-avatar canvas[data-testid="avatar2d-canvas"]');
+          const ctx = canvas?.getContext('2d');
+          if (!canvas || !ctx) return 0;
+          const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+          let count = 0;
+          for (let i = 3; i < data.length; i += 4) {
+            if (data[i] > 0) count += 1;
+          }
+          return count;
+        })()`);
+        assert(
+          nonTransparentPixels > 1000,
+          `Expected nonTransparentPixels > 1000 on 2D sprite canvas, got ${nonTransparentPixels}`,
+        );
+        avatar2dCheck = { spritesLoaded: 11, nonTransparentPixels, status: rigStatus };
+      }
+
+      const gpuOnAvatar = await sampleGpu();
+
+      // 7. Extensions & Sync tab (7th tab: Wave 2 plugins + Vault RAG approval/revocation)
+      const dogfoodVault = join(wsDir, "dogfood-vault");
+      await mkdir(dogfoodVault, { recursive: true });
+      await writeFile(
+        join(dogfoodVault, "vault-notes.md"),
+        "# Dogfood Vault\nCluster backup window runs Sunday at 02:00.\n",
+        "utf8",
+      );
+
+      await cdp.exec(`document.querySelector('button.wb-nav-btn[data-tab="extensions"]').click()`);
+      await pause(250);
+      await cdp.exec(`(() => { window.__rafCount = 0; })()`);
+      await pause(1000);
+      const idleRafFrames = await cdp.eval<number>(`window.__rafCount`);
+      const gpuOffAvatar = await sampleGpu();
+      assert(idleRafFrames === 0, `Expected idleRafFrames === 0 off Avatar tab, got ${idleRafFrames}`);
+
+      const pluginsRendered = await cdp.waitFor<boolean>(
+        `(() => {
+          const txt = document.getElementById('panel-extensions')?.textContent ?? '';
+          return txt.includes('local-vault-rag') &&
+            txt.includes('lan-game-copilot') &&
+            txt.includes('homelab-ops') &&
+            txt.includes('home-assistant-mqtt') &&
+            txt.includes('creative-pipeline') &&
+            txt.includes('scope: read_workspace');
+        })()`,
+        6_000,
+        "Wave 2 opt-in plugins list",
+      );
+      assert(pluginsRendered, "Wave 2 plugins failed to render in Extensions & Sync tab");
+
+      await cdp.exec(`(() => {
+        const inp = document.querySelector('#panel-extensions input[aria-label="Vault directory path"]');
+        inp.value = ${JSON.stringify(dogfoodVault)};
+        document.querySelector('#panel-extensions button[data-action="wave2-vault-add"]').click();
+      })()`);
+      await cdp.waitFor<boolean>(
+        `(() => {
+          const txt = document.getElementById('panel-extensions')?.textContent ?? '';
+          return txt.includes('Approved') && txt.includes('1 file(s)');
+        })()`,
+        8_000,
+        "Wave 2 vault approval",
+      );
+
+      await cdp.exec(
+        `document.querySelector('#panel-extensions button[data-plugin-id="local-vault-rag"]').click()`,
+      );
+      await cdp.waitFor<boolean>(
+        `(() => {
+          const btn = document.querySelector('#panel-extensions button[data-plugin-id="local-vault-rag"]');
+          return btn?.textContent?.trim() === 'Disable';
+        })()`,
+        6_000,
+        "Wave 2 plugin enable toggle",
+      );
+      await cdp.exec(
+        `document.querySelector('#panel-extensions button[data-plugin-id="local-vault-rag"]').click()`,
+      );
+      await cdp.waitFor<boolean>(
+        `(() => {
+          const btn = document.querySelector('#panel-extensions button[data-plugin-id="local-vault-rag"]');
+          return btn?.textContent?.trim() === 'Enable';
+        })()`,
+        6_000,
+        "Wave 2 plugin disable toggle",
+      );
+
+      await cdp.exec(`(() => {
+        const revokeBtn = Array.from(document.querySelectorAll('#panel-extensions button')).find((b) => b.textContent?.trim() === 'Revoke');
+        revokeBtn?.click();
+      })()`);
+      await cdp.waitFor<boolean>(
+        `(document.getElementById('panel-extensions')?.textContent ?? '').includes('No Vault RAG directories approved yet.')`,
+        6_000,
+        "Wave 2 vault revoke",
+      );
+
+      assert(
+        cdp.pageExceptions.length === 0,
+        `Renderer uncaught exceptions: ${cdp.pageExceptions.join(" | ")}`,
+      );
+      assert(
+        cdp.consoleErrors.length === 0,
+        `Renderer console errors: ${cdp.consoleErrors.join(" | ")}`,
+      );
+      assert(
+        mainErrors.length === 0,
+        `Main process errors: ${mainErrors.join(" | ")}`,
+      );
+
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            missionsApproved: true,
+            memoryCrudVerified: true,
+            policyPreviewVerified: true,
+            replaySummary: replaySummary.trim(),
+            xrayRendered: true,
+            aecErleDb: erleDb,
+            activeRafFrames,
+            idleRafFrames,
+            extensionsTabVerified: true,
+            avatar2dCheck,
+            gpuOnAvatar,
+            gpuOffAvatar,
+            pageExceptions: cdp.pageExceptions.length,
+            consoleErrors: cdp.consoleErrors.length,
+            mainErrors: mainErrors.length,
+          },
+          null,
+          2,
+        ),
+      );
+    } finally {
+      if (!preExistingRig && existsSync(stagedRigDest)) {
+        rmSync(join(ROOT, "dist/linux-unpacked/resources/assets/avatar2d"), {
+          recursive: true,
+          force: true,
+        });
+      }
+    }
   } catch (err) {
     console.error("[dogfood] stdout tail:\n", stdoutLines.join("").slice(-2000));
     console.error("[dogfood] stderr tail:\n", stderrLines.join("").slice(-2000));

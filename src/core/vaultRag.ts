@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { inflateRawSync, inflateSync } from "node:zlib";
 import type { Embedder } from "./embedder.ts";
 import type { PolicyContext } from "./permissions.ts";
 import { isInside, isPrivatePath } from "./riskRules.ts";
@@ -125,67 +126,173 @@ function neutralizeUntrustedFraming(raw: string): string {
     .replace(/\[(?:UNTRUSTED VAULT EXCERPT|END UNTRUSTED VAULT EXCERPT)[^\]]*\]/gi, "[blocked-excerpt-fence]");
 }
 
-/** Fallback literal-string extraction for simple uncompressed PDF streams when `pdftotext` is unavailable. */
-export function extractPdfLiteralStrings(rawBuffer: Buffer): string {
-  const latin = rawBuffer.toString("latin1");
+const MAX_PDF_STREAM_BYTES = 4 * 1024 * 1024;
+const MAX_PDF_TOTAL_BYTES = 8 * 1024 * 1024;
+
+function extractPrintablePdfOperators(latin: string): string[] {
   const out: string[] = [];
-  let inString = false;
-  let escape = false;
-  let depth = 0;
-  let cur = "";
-  for (let i = 0; i < latin.length; i += 1) {
+  let i = 0;
+  while (i < latin.length) {
     const ch = latin[i] ?? "";
-    if (!inString) {
-      if (ch === "(") {
-        inString = true;
-        depth = 1;
-        cur = "";
-      }
-      continue;
-    }
-    if (escape) {
-      if (ch === "n") cur += "\n";
-      else if (ch === "r") cur += "\r";
-      else if (ch === "t") cur += "\t";
-      else cur += ch;
-      escape = false;
-      continue;
-    }
-    if (ch === "\\") {
-      escape = true;
-      continue;
-    }
     if (ch === "(") {
-      depth += 1;
-      cur += ch;
-    } else if (ch === ")") {
-      depth -= 1;
-      if (depth === 0) {
-        inString = false;
-        const trimmed = cur.replace(/[^\x20-\x7E\r\n\t]/g, "").trim();
-        if (trimmed.length > 0) out.push(trimmed);
-      } else {
-        cur += ch;
+      let cur = "";
+      let depth = 1;
+      let escape = false;
+      i += 1;
+      while (i < latin.length && depth > 0) {
+        const c = latin[i] ?? "";
+        if (escape) {
+          if (c === "n") cur += "\n";
+          else if (c === "r") cur += "\r";
+          else if (c === "t") cur += "\t";
+          else cur += c;
+          escape = false;
+        } else if (c === "\\") {
+          escape = true;
+        } else if (c === "(") {
+          depth += 1;
+          cur += c;
+        } else if (c === ")") {
+          depth -= 1;
+          if (depth > 0) cur += c;
+        } else {
+          cur += c;
+        }
+        i += 1;
       }
-    } else {
-      cur += ch;
+      let hasHighByte = false;
+      for (let k = 0; k < cur.length; k += 1) {
+        if (cur.charCodeAt(k) >= 0x80) {
+          hasHighByte = true;
+          break;
+        }
+      }
+      const maybeUtf8 = hasHighByte ? Buffer.from(cur, "latin1").toString("utf8") : cur;
+      const decoded = maybeUtf8.includes("\uFFFD") ? cur : maybeUtf8;
+      const cleaned = decoded.replace(/[^\x20-\x7E\r\n\t\u00A0-\uFFFF]/g, "").trim();
+      if (cleaned.length > 0) out.push(cleaned);
+      continue;
+    }
+    if (ch === "<" && latin[i + 1] !== "<") {
+      const end = latin.indexOf(">", i + 1);
+      if (end > i + 1 && end - i < 2048) {
+        const hex = latin.slice(i + 1, end).replace(/\s+/g, "");
+        if (/^[0-9A-Fa-f]{4,}$/.test(hex) && hex.length % 2 === 0) {
+          const bytes = Buffer.from(hex, "hex");
+          let decoded: string;
+          if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+            const units: number[] = [];
+            for (let k = 2; k + 1 < bytes.length; k += 2) {
+              const hi = bytes[k] ?? 0;
+              const lo = bytes[k + 1] ?? 0;
+              units.push((hi << 8) | lo);
+            }
+            decoded = String.fromCharCode(...units);
+          } else {
+            decoded = bytes.toString("latin1");
+          }
+          const cleaned = decoded.replace(/[^\x20-\x7E\r\n\t\u00A0-\uFFFF]/g, "").trim();
+          if (cleaned.length >= 2) out.push(cleaned);
+        }
+        i = end + 1;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Pure-JS PDF text extractor used when `pdftotext` is absent (common on Windows).
+ * Supports both uncompressed streams and `/FlateDecode` zlib-compressed content streams
+ * with strict per-stream (4 MiB) and total (8 MiB) output caps.
+ */
+export function extractPdfLiteralStrings(rawBuffer: Buffer): string {
+  const parts: string[] = [];
+  let totalDecompressed = 0;
+
+  const streamMarker = Buffer.from("stream", "ascii");
+  const endMarker = Buffer.from("endstream", "ascii");
+  let cursor = 0;
+  const nonStreamRanges: [number, number][] = [];
+  let outsideStart = 0;
+
+  while (cursor < rawBuffer.length && totalDecompressed < MAX_PDF_TOTAL_BYTES) {
+    const idx = rawBuffer.indexOf(streamMarker, cursor);
+    if (idx === -1) break;
+    // Require whitespace/dict boundary before `stream` and LF/CRLF after `stream`
+    const prev = idx > 0 ? rawBuffer[idx - 1] : 0x0a;
+    let bodyStart = idx + streamMarker.length;
+    if (rawBuffer[bodyStart] === 0x0d && rawBuffer[bodyStart + 1] === 0x0a) bodyStart += 2;
+    else if (rawBuffer[bodyStart] === 0x0a) bodyStart += 1;
+    else {
+      cursor = idx + 1;
+      continue;
+    }
+    if (prev !== 0x3e && prev !== 0x0a && prev !== 0x0d && prev !== 0x20) {
+      cursor = idx + 1;
+      continue;
+    }
+    const endIdx = rawBuffer.indexOf(endMarker, bodyStart);
+    if (endIdx === -1) break;
+
+    if (idx > outsideStart) nonStreamRanges.push([outsideStart, idx]);
+    outsideStart = endIdx + endMarker.length;
+
+    let bodyEnd = endIdx;
+    if (bodyEnd > bodyStart && rawBuffer[bodyEnd - 1] === 0x0a) bodyEnd -= 1;
+    if (bodyEnd > bodyStart && rawBuffer[bodyEnd - 1] === 0x0d) bodyEnd -= 1;
+
+    const slice = rawBuffer.subarray(bodyStart, bodyEnd);
+    let textChunk: string;
+    try {
+      const inflated = inflateSync(slice, { maxOutputLength: MAX_PDF_STREAM_BYTES });
+      totalDecompressed += inflated.length;
+      textChunk = inflated.toString("latin1");
+    } catch {
+      try {
+        const rawInflated = inflateRawSync(slice, { maxOutputLength: MAX_PDF_STREAM_BYTES });
+        totalDecompressed += rawInflated.length;
+        textChunk = rawInflated.toString("latin1");
+      } catch {
+        // Plain uncompressed or non-deflate stream: inspect raw latin1 safely.
+        textChunk = slice.toString("latin1");
+      }
+    }
+    parts.push(...extractPrintablePdfOperators(textChunk));
+    cursor = outsideStart;
+  }
+
+  if (outsideStart < rawBuffer.length) nonStreamRanges.push([outsideStart, rawBuffer.length]);
+  if (nonStreamRanges.length === 0) {
+    parts.push(...extractPrintablePdfOperators(rawBuffer.toString("latin1")));
+  } else {
+    for (const [s, e] of nonStreamRanges) {
+      parts.push(...extractPrintablePdfOperators(rawBuffer.subarray(s, e).toString("latin1")));
     }
   }
-  return out.join("\n");
+  return parts.join("\n");
 }
 
 async function extractVaultFileText(realPath: string, rawBytes: Buffer): Promise<string> {
   if (extname(realPath).toLowerCase() !== ".pdf") {
     return rawBytes.toString("utf8");
   }
-  try {
-    const { stdout } = await execFileAsync("pdftotext", ["-l", "40", "-nopgbrk", "--", realPath, "-"], {
-      timeout: 10_000,
-      maxBuffer: 2 * 1024 * 1024,
-    });
-    if (stdout.trim().length > 0) return stdout;
-  } catch {
-    // Fall back to literal PDF string extraction when poppler/pdftotext is unavailable.
+  if (process.env["ASTRA_NAVI_DISABLE_PDFTOTEXT"] !== "1") {
+    try {
+      const { stdout } = await execFileAsync(
+        "pdftotext",
+        ["-l", "40", "-nopgbrk", "--", realPath, "-"],
+        {
+          timeout: 10_000,
+          maxBuffer: 2 * 1024 * 1024,
+        },
+      );
+      if (stdout.trim().length > 0) return stdout;
+    } catch {
+      // Fall back to pure-JS PDF stream/literal extraction when poppler/pdftotext is unavailable.
+    }
   }
   return extractPdfLiteralStrings(rawBytes);
 }
