@@ -70,8 +70,19 @@ describe("release asset, legal, community & workflow completeness", () => {
     expect(builderYml).not.toContain("!win-hands-native/bin/**/!(win-hands.exe)");
 
     expect(releaseYml).toContain("-RequireAllTargets");
+    expect(releaseYml).toContain("isTrustedReleaseRef");
+    expect(releaseYml).toContain("refs/heads/main");
+    expect(releaseYml).toContain("refs/tags/v*");
     expect(releaseYml).toContain(
       "dist\\win-unpacked\\resources\\hands\\win-hands-native\\bin\\Release\\net9.0\\win-x64\\publish\\win-hands.exe",
     );
+
+    const extBackground = readFileSync(join(ROOT, "browser-bridge", "background.js"), "utf8");
+    expect(extBackground).toContain("tab.incognito");
+
+    const pkgExtScript = readFileSync(join(ROOT, "scripts", "package-extension.ts"), "utf8");
+    expect(pkgExtScript).toContain('delete chromiumManifest["browser_specific_settings"]');
+    expect(pkgExtScript).toContain('background: { service_worker: "background.js" }');
+    expect(pkgExtScript).toContain('background: { scripts: ["background.js"] }');
   });
 });

@@ -78,6 +78,10 @@
     }
     try {
       const tab = await queryActiveTab();
+      if (tab.incognito) {
+        reply(id, false, "Private browsing tabs are excluded from local DOM inspection.");
+        return;
+      }
       const tabUrl = String(tab.url || "");
       const requestedUrl = typeof message.url === "string" ? message.url : "";
       if (requestedUrl && tabUrl && !tabUrl.startsWith(requestedUrl.split("#")[0])) {
