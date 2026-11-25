@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { access, constants } from "node:fs/promises";
 import type { Readable } from "node:stream";
+import { isVoiceEnvReady } from "../bootstrap.ts";
 import { LANGUAGES, type LanguageCode } from "../languages.ts";
 import type { SpokenAudio, VoiceBackend } from "./backend.ts";
 
@@ -71,8 +72,8 @@ export class FullVoice implements VoiceBackend {
   static async isSetUp(
     options: Pick<FullVoiceOptions, "python" | "referenceAudio" | "referenceText">,
   ): Promise<boolean> {
+    if (!isVoiceEnvReady(options.python)) return false;
     try {
-      await access(options.python, constants.X_OK);
       await access(options.referenceAudio, constants.R_OK);
       await access(options.referenceText, constants.R_OK);
       return true;

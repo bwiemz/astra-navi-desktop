@@ -1,13 +1,17 @@
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { installNativeHost } from "../browser-bridge/install-host.mjs";
 import {
+  checkBootstrapStatus,
   DEFAULT_OCR_FILES,
+  isVoiceEnvReady,
   runBootstrapTask,
 } from "../src/core/bootstrap.ts";
+import { FullVoice } from "../src/core/voice/fullVoice.ts";
 import { gameAmongHolders, gameOnCard } from "../src/core/cardWatch.ts";
 import { ConfigStore } from "../src/core/config.ts";
 import { findFiles } from "../src/core/documents.ts";
@@ -404,6 +408,89 @@ describe("Windows 1.0.0-rc Fixes", () => {
       });
       const launcherScript = await readFile(realWrite.launcherPath, "utf8");
       expect(launcherScript).toContain("ELECTRON_RUN_AS_NODE=1 exec");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("7. detects incomplete voice-env, passes --clear to venv, pins compatible qwen-tts deps, and aligns wizard buttons", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "astranavi-win-venv-"));
+    try {
+      const dataRoot = join(dir, "data");
+      const envDir = join(dataRoot, "voice-env");
+      const scriptsDir = join(envDir, "Scripts");
+      const voicePy = join(scriptsDir, "python.exe");
+      const refWav = join(dir, "ref.wav");
+      const refTxt = join(dir, "ref.txt");
+      await mkdir(scriptsDir, { recursive: true });
+      await writeFile(voicePy, "stub");
+      await writeFile(refWav, "wav");
+      await writeFile(refTxt, "txt");
+
+      // Partial/empty voice-env without qwen_tts or marker must NOT report ready
+      expect(isVoiceEnvReady(voicePy)).toBe(false);
+      expect(
+        await FullVoice.isSetUp({ python: voicePy, referenceAudio: refWav, referenceText: refTxt }),
+      ).toBe(false);
+      const beforeStatus = await checkBootstrapStatus({
+        platform: "win32",
+        home: dir,
+        dataRoot,
+        modelsRoot: join(dir, "models"),
+        voicePython: voicePy,
+        appRoot: join(import.meta.dirname, ".."),
+      });
+      expect(beforeStatus.voice.ready).toBe(false);
+
+      // Re-running voice setup clears prior partial venv via --clear and writes ready marker
+      const uvCalls: string[][] = [];
+      await runBootstrapTask("voice", {
+        platform: "win32",
+        home: dir,
+        dataRoot,
+        modelsRoot: join(dir, "models"),
+        voicePython: voicePy,
+        appRoot: join(import.meta.dirname, ".."),
+        runCommand: vi.fn(async (cmd: string, args: readonly string[]) => {
+          uvCalls.push([cmd, ...args]);
+          if (cmd === "uv" && args[0] === "venv") {
+            await mkdir(scriptsDir, { recursive: true });
+            await writeFile(voicePy, "fresh-python");
+          }
+          return { stdout: "uv 0.6.0", stderr: "" };
+        }),
+      });
+
+      const venvCall = uvCalls.find((c) => c[0] === "uv" && c[1] === "venv");
+      expect(venvCall).toContain("--clear");
+      expect(existsSync(join(envDir, ".astranavi-voice-ready"))).toBe(true);
+      expect(isVoiceEnvReady(voicePy)).toBe(true);
+
+      const afterStatus = await checkBootstrapStatus({
+        platform: "win32",
+        home: dir,
+        dataRoot,
+        modelsRoot: join(dir, "models"),
+        voicePython: voicePy,
+        appRoot: join(import.meta.dirname, ".."),
+      });
+      expect(afterStatus.voice.ready).toBe(true);
+
+      // Removing marker while Lib/site-packages/qwen_tts is present still detects readiness
+      await rm(join(envDir, ".astranavi-voice-ready"), { force: true });
+      expect(isVoiceEnvReady(voicePy)).toBe(false);
+      await mkdir(join(envDir, "Lib", "site-packages", "qwen_tts"), { recursive: true });
+      expect(isVoiceEnvReady(voicePy)).toBe(true);
+
+      // Verify compatible qwen-tts==0.0.5 pins & uniform Step 3 button styling
+      const [reqs, css] = await Promise.all([
+        readFile(join(import.meta.dirname, "..", "voice-server/requirements.txt"), "utf8"),
+        readFile(join(import.meta.dirname, "..", "src/renderer/src/settings.css"), "utf8"),
+      ]);
+      expect(reqs).toContain("qwen-tts==0.0.5");
+      expect(reqs).toContain("transformers==4.57.3");
+      expect(reqs).toContain("accelerate==1.12.0");
+      expect(css).toMatch(/\.wiz-service-row\s+button\s*\{[^}]*flex:\s*none;[^}]*width:\s*auto;/s);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

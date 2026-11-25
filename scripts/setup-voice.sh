@@ -17,7 +17,7 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 echo "Creating the voice environment in ${env_dir} ..."
-uv venv "${env_dir}" --python 3.12
+uv venv --clear "${env_dir}" --python 3.12
 uv pip install --python "${env_dir}/bin/python" qwen-tts
 
 "${env_dir}/bin/python" -c "import torch, qwen_tts; print('Ready. Graphics card in use:', torch.cuda.is_available())"
