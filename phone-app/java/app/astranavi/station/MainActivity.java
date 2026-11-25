@@ -156,6 +156,12 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_ALERT_ENABLED, false)
+                && prefs.getString(KEY_ALERT_TOKEN, null) != null
+                && prefs.getString(KEY_ADDRESS, null) != null
+                && prefs.getString(KEY_FINGERPRINT, null) != null) {
+            AlertPollerService.schedule(this);
+        }
         // Her words and the sign-in screen stay out of screenshots, screen recordings and
         // the picture of this app in the list of recent ones.
         getWindow().setFlags(
