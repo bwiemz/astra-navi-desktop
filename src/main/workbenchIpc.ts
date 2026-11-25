@@ -13,6 +13,7 @@ import type { TraceKeeper } from "../core/trace.ts";
 import { WORKBENCH_TABS, type WorkbenchTab } from "../shared/workbench.ts";
 import { createMissionControlIpc } from "./missionControlIpc.ts";
 import { createStudioToolsIpc } from "./studioToolsIpc.ts";
+import { createWave2Ipc } from "./wave2Ipc.ts";
 
 /**
  * Single secondary Electron window (`workbench.html`) consolidating Mission Control,
@@ -25,6 +26,7 @@ export interface WorkbenchDeps {
   config: ConfigStore;
   dataDir(): string;
   workspaceDir: string;
+  pluginsDir?: string;
   board(): MissionBoard | null;
   approvalDesk(): ApprovalDesk | null;
   memoryStore(): MemoryStore | null;
@@ -77,6 +79,12 @@ export function createWorkbenchController(deps: WorkbenchDeps): WorkbenchControl
     orders: deps.orders,
     skills: deps.skills,
     traces: deps.traces,
+    isAuthorizedSender: fromWorkbenchWindow,
+  });
+  const wave2Ipc = createWave2Ipc({
+    config: deps.config,
+    workspaceDir: deps.workspaceDir,
+    pluginsDir: deps.pluginsDir,
     isAuthorizedSender: fromWorkbenchWindow,
   });
 
@@ -135,6 +143,7 @@ export function createWorkbenchController(deps: WorkbenchDeps): WorkbenchControl
     ipcRegistered = true;
     mcIpc.registerIpc();
     studioIpc.registerIpc();
+    wave2Ipc.registerIpc();
   }
 
   return {

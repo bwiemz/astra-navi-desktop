@@ -8,7 +8,10 @@
  */
 const GREETING = String.raw`(?:(?:hey|hi|hello|ok|okay|yo)[\s,]+)?`;
 const NAME_FORMS: readonly RegExp[] = [
-  new RegExp(String.raw`^\s*${GREETING}astra(?:[\s,-]+navi)?\b[\s,.!?:;-]*`, "i"),
+  new RegExp(
+    String.raw`^\s*${GREETING}(?:astra(?:[\s,-]*nav[iy])?|astro[\s,-]*nav[iy])\b[\s,.!?:;-]*`,
+    "i",
+  ),
   /^\s*(?:ねえ|ねぇ|おーい)?[、,\s]*アストラ(?:\s*ナビ)?[、。！？!?,.\s]*/i,
   /^\s*(?:嘿|喂|哎)?[，,\s]*(?:阿斯特拉|星航)(?:领航员)?[，。！？!?,.\s]*/i,
 ];

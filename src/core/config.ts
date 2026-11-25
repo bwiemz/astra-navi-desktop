@@ -285,6 +285,25 @@ const ConfigSchema = z.object({
       stationFederation: z.boolean().default(false),
     })
     .prefault({}),
+  /** Wave 2 (`v1.2`) opt-in management settings: empty & disabled by default for v1.0/v1.1 parity. */
+  wave2: z
+    .object({
+      vaultRoots: z.array(z.string().max(400)).max(16).default([]),
+      lanPeers: z
+        .array(
+          z.object({
+            id: z.string().regex(/^[a-zA-Z0-9._-]{2,64}$/),
+            label: z.string().min(1).max(80),
+            endpoint: z.string().max(240),
+            publicKeyPem: z.string().max(2048),
+            pairedAt: z.string(),
+          }),
+        )
+        .max(24)
+        .default([]),
+      enabledPlugins: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{1,63}$/)).max(32).default([]),
+    })
+    .prefault({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

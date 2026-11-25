@@ -33,7 +33,9 @@ Every experimental addition relative to `main` is assigned to an explicit post-v
 - **Encrypted Multi-Node LAN Sync & Fleet Hardening:**
   - `src/core/peerSync.ts` (AES-256-GCM + Ed25519 LWW CRDT + replay-nonce protection + secret scrubbing), `scripts/test-proxmox-multinode.ts`.
 - **Opt-In Local Vault & LAN Offload Backends:**
-  - `src/core/vaultRag.ts` (approved-root symlink/secret containment, indirect injection framing), `src/core/lanVisionOffload.ts` (private LAN HTTP/S enforcement, HMAC + monotonic sequence protection, 8×8 grid cap).
+  - `src/core/vaultRag.ts` (approved-root symlink/secret containment, `.md`/`.pdf` indexing via `pdftotext` + literal fallback, indirect injection framing), `src/core/lanVisionOffload.ts` (private LAN HTTP/S enforcement, HMAC + monotonic sequence protection, 8×8 grid cap).
+- **Wave 2 Workbench Management UI (`Extensions & Sync` tab):**
+  - `src/shared/wave2Control.ts`, `src/main/wave2Ipc.ts`, `src/renderer/src/workbench/wave2Panel.ts`, `src/core/config.ts` (`wave2` default-empty/off settings), wired as `"extensions"` in `workbench.html` (`tests/wave2Workbench.test.ts`, `scripts/eval-wave2-adversarial.ts`).
 - **Signed Opt-In Plugin Pack (all canonical `manifest.json`):**
   - `plugins/local-vault-rag/`
   - `plugins/lan-game-copilot/`
@@ -45,7 +47,7 @@ Every experimental addition relative to `main` is assigned to an explicit post-v
   - Benchmark scripts: `scripts/benchmark-catalog.ts`, `scripts/benchmark-speculative-kv.ts`, `scripts/benchmark-voice-shootout.ts`, `scripts/benchmark-lora-agents.ts`.
 
 ### Wave 3 (`v1.3`) — Voice Cloning Studio, Acoustic Sensors, Webcam Presence & iOS Station
-- `src/core/voiceCloneStudio.ts`: Opt-in 4–16s reference clip analyzer + `.bundle` packager with quality, consent, slug, and secret-scrubbing gates.
+- `src/core/voiceCloneStudio.ts`: Opt-in 4–16s reference clip analyzer + `.bundle` packager with quality, consent, slug, and secret-scrubbing gates (`tests/voiceCloneSecurityAudit.test.ts`).
 - `src/core/acousticEvents.ts`: Acoustic event detector and barge-in/interrupt primitives (`tests/voiceAndAcousticRd.test.ts`).
 - `src/core/webcamPresenceOnnx.ts`: In-memory local presence detector (`tests/webcamPresence.test.ts`).
 - `ios-app/Sources/{AstraStationApp.swift,AstraAppIntents.swift,OfflineOutboxQueue.swift}`.
@@ -144,5 +146,13 @@ Consolidated and deleted during experimental cleanup to reduce maintenance burde
 - **Sustained Memory Soak (`node --expose-gc scripts/soak-memory-leaks.ts`):** `4/4` PASS — `TurnHookPipeline` (`100` turns, `+0.17 MB` heap), `OnnxVoice` (`20` preset switches / `4` `disposeSharedEngines()` cycles, `902,400` samples, `+98.85 MB` peak over `404.04 MB` warmed -> `376.68 MB` final, `sharedCacheSize=0`), Workbench Snapshots & AEC (`20` cycles, `+0.19 MB` heap), and `StageLayerManager` (`50` cycles / `500` frames, `+0.27 MB` heap).
 - **Live-Room Physical Calibration (`scripts/run-live-room-calibration.ts`, PipeWire `SSL 2+`):** Measured ambient room floor (`0.00022` RMS / `-73.15 dBFS`), physical sweep (`285.6 ms` lag, `coupling=false`, `ERLE=-0.99 dB`, `bargeInReady=false`, `minSnrDb=12`), `0/4` false mic wakes on quiet capture (`liveMic=2/4`), and `3/4` direct `Kokoro-82M` -> `moonshine-base-ONNX` gate accuracy (recording the real `"Astranavi"` fused-word ASR observation for `wakeName.ts`).
 - **Beta Triage Playbook:** Added `docs/BETA_TRIAGE_PLAYBOOK.md`.
+
+---
+
+## 8. Wake Alias Fix, High-Lag AEC, Combined `9B` Hooks Eval & Wave 2 Track B Verification (`2026-11-24`)
+
+- **Wave 1 Tightening:** Fixed fused `"Astranavi"` / `"Astra Navy"` / `"Astro Navi"` ASR wake misses in `src/core/wakeName.ts` (`4/4` direct `Kokoro-82M` -> `moonshine-base-ONNX` wake detection with `0/4` false wakes; `tests/ship.test.ts` `96/96`), expanded `src/core/voice/aec.ts` causal lag estimation to `420 ms`, distinguished `couplingStatus` (`"coupled" | "isolated"`) and `bargeInStatus` (`"ready_aec" | "ready_isolated" | "needs_aec"`) in `audioCalibration.ts` (`tests/experimentalVoice.test.ts` `8/8`), and completed the combined `Qwen3.5-9B + Q8_0 KV + --turn-hooks` 163-case live GPU run (`exp-standard-q8kv-hooks`: **`90%` overall**, `+5 pts` vs `85%`, **`100%` Safe under injected text**, **`100%` Nothing leaked**, `94%` Multi-step, `-236 MiB` VRAM, **`187.1x`** repeat speedup, `7.156 ms/turn` hook overhead).
+- **Wave 2 Track B Usability & Adversarial Evals:** Added the 7th Workbench tab (`"extensions"`, `Extensions & Sync`) for approving/revoking `.md`/`.pdf` Vault RAG directories, pairing/probing Ed25519 LAN `PeerStateSyncEngine` nodes, and toggling the 5 Wave 2 opt-in plugins with declared permission scope visibility (`tests/wave2Workbench.test.ts`); verified real `Qwen3.5-9B` resistance across 6 planted `.md`/`.pdf`/homelab indirect prompt injections + 2 factual controls (`scripts/eval-wave2-adversarial.ts`: `6/6` adversarial, `2/2` controls, `0` unauthorized tool calls); and verified clean Wave 1+2 isolation off `main` (`dry-run-wave2`, `136` files, excluding Wave 3 -> `126/126` test files, `7/7` plugins, `build`, `--fuzz`, `--audit`, `--words-only`, `5/5` multi-turn).
+
 
 

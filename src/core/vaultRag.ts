@@ -1,9 +1,13 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import type { Embedder } from "./embedder.ts";
 import type { PolicyContext } from "./permissions.ts";
 import { isInside, isPrivatePath } from "./riskRules.ts";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Isolated Local Vault & Codebase RAG Index (`defaultEnabled: false` plugin backend).
@@ -20,6 +24,7 @@ const ALLOWED_EXTENSIONS = new Set([
   ".md",
   ".markdown",
   ".txt",
+  ".pdf",
   ".ts",
   ".tsx",
   ".js",
@@ -118,6 +123,71 @@ function neutralizeUntrustedFraming(raw: string): string {
     .replace(/<\|im_start\|>|<\|im_end\|>/gi, "[blocked-chatml-tag]")
     .replace(/<\/?(?:tool_call|tool_response|function)(?:=[^>\s]*)?>/gi, "[blocked-tool-tag]")
     .replace(/\[(?:UNTRUSTED VAULT EXCERPT|END UNTRUSTED VAULT EXCERPT)[^\]]*\]/gi, "[blocked-excerpt-fence]");
+}
+
+/** Fallback literal-string extraction for simple uncompressed PDF streams when `pdftotext` is unavailable. */
+export function extractPdfLiteralStrings(rawBuffer: Buffer): string {
+  const latin = rawBuffer.toString("latin1");
+  const out: string[] = [];
+  let inString = false;
+  let escape = false;
+  let depth = 0;
+  let cur = "";
+  for (let i = 0; i < latin.length; i += 1) {
+    const ch = latin[i] ?? "";
+    if (!inString) {
+      if (ch === "(") {
+        inString = true;
+        depth = 1;
+        cur = "";
+      }
+      continue;
+    }
+    if (escape) {
+      if (ch === "n") cur += "\n";
+      else if (ch === "r") cur += "\r";
+      else if (ch === "t") cur += "\t";
+      else cur += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === "(") {
+      depth += 1;
+      cur += ch;
+    } else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        inString = false;
+        const trimmed = cur.replace(/[^\x20-\x7E\r\n\t]/g, "").trim();
+        if (trimmed.length > 0) out.push(trimmed);
+      } else {
+        cur += ch;
+      }
+    } else {
+      cur += ch;
+    }
+  }
+  return out.join("\n");
+}
+
+async function extractVaultFileText(realPath: string, rawBytes: Buffer): Promise<string> {
+  if (extname(realPath).toLowerCase() !== ".pdf") {
+    return rawBytes.toString("utf8");
+  }
+  try {
+    const { stdout } = await execFileAsync("pdftotext", ["-l", "40", "-nopgbrk", "--", realPath, "-"], {
+      timeout: 10_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    if (stdout.trim().length > 0) return stdout;
+  } catch {
+    // Fall back to literal PDF string extraction when poppler/pdftotext is unavailable.
+  }
+  return extractPdfLiteralStrings(rawBytes);
 }
 
 /** Wraps vault excerpts with explicit untrusted-data framing so injected instructions never execute. */
@@ -352,12 +422,13 @@ export class VaultRagIndex {
     let filesUnchanged = 0;
 
     for (const file of files) {
-      const content = readFileSync(file.realPath, "utf8");
-      const sha = createHash("sha256").update(content, "utf8").digest("hex");
+      const rawBytes = readFileSync(file.realPath);
+      const sha = createHash("sha256").update(rawBytes).digest("hex");
       if (this.fileHashes.get(file.realPath) === sha && this.fileChunks.has(file.realPath)) {
         filesUnchanged += 1;
         continue;
       }
+      const content = await extractVaultFileText(file.realPath, rawBytes);
       const chunks = chunkVaultDocument(file.realPath, file.relPath, content);
       if (this.embedder && chunks.length > 0) {
         try {

@@ -5,6 +5,7 @@ import type {
   PolicyComposerSnapshot,
   TurnXraySnapshot,
 } from "../../../shared/studioTools.ts";
+import type { Wave2Snapshot } from "../../../shared/wave2Control.ts";
 import { WORKBENCH_TABS, type WorkbenchBridge, type WorkbenchTab } from "../../../shared/workbench.ts";
 import { renderMemoryPanel } from "../mission-control/memory.ts";
 import { renderMissionsPanel } from "../mission-control/missions.ts";
@@ -12,6 +13,7 @@ import { renderWorkbenchAudioPanel } from "./audioCalibration.ts";
 import { createWorkbenchAvatarPanel } from "./avatarStudio.ts";
 import { renderWorkbenchPolicyPanel } from "./policyComposer.ts";
 import { renderWorkbenchXrayPanel } from "./turnXray.ts";
+import { renderWorkbenchWave2Panel } from "./wave2Panel.ts";
 
 declare global {
   interface Window {
@@ -36,6 +38,7 @@ const panelMap: Record<WorkbenchTab, HTMLElement> = {
   xray: requireEl<HTMLElement>("panel-xray"),
   audio: requireEl<HTMLElement>("panel-audio"),
   avatar: requireEl<HTMLElement>("panel-avatar"),
+  extensions: requireEl<HTMLElement>("panel-extensions"),
 };
 const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".wb-nav-btn"));
 
@@ -44,6 +47,7 @@ let lastMc: MissionControlSnapshot | null = null;
 let lastPolicy: PolicyComposerSnapshot | null = null;
 let lastXray: TurnXraySnapshot | null = null;
 let lastAvatar: AvatarStudioSnapshot | null = null;
+let lastWave2: Wave2Snapshot | null = null;
 const xrayState = { selectedTurnId: null as string | null };
 
 const setStatus = (msg: string): void => {
@@ -84,11 +88,12 @@ window.workbench.onSelectTab((tab) => {
 });
 
 function renderAll(): void {
-  if (!lastMc || !lastPolicy || !lastXray || !lastAvatar) return;
+  if (!lastMc || !lastPolicy || !lastXray || !lastAvatar || !lastWave2) return;
 
   subtitleEl.textContent =
     `${lastMc.missions.length} missions · ${lastMc.memories.length} memories · ` +
-    `${lastXray.turns.length} turns · ${lastMc.standingOrders.length} orders`;
+    `${lastXray.turns.length} turns · ${lastMc.standingOrders.length} orders · ` +
+    `${lastWave2.vaultRoots.length} vault(s) · ${lastWave2.lanPeers.length} peer(s)`;
 
   renderMissionsPanel(panelMap.missions, lastMc.missions, async (id, action) => {
     const res = await window.workbench.missionControl.actMission(id, action);
@@ -159,21 +164,29 @@ function renderAll(): void {
   });
 
   avatarPanel.update(lastAvatar);
+
+  renderWorkbenchWave2Panel(panelMap.extensions, lastWave2, {
+    wave2: window.workbench.wave2,
+    setStatus,
+    refresh,
+  });
 }
 
 async function refresh(): Promise<void> {
   refreshBtn.disabled = true;
   try {
-    const [mc, policy, xray, avatar] = await Promise.all([
+    const [mc, policy, xray, avatar, wave2] = await Promise.all([
       window.workbench.missionControl.getSnapshot(),
       window.workbench.studioTools.getPolicyComposerSnapshot(),
       window.workbench.studioTools.getTurnXraySnapshot(),
       window.workbench.studioTools.getAvatarStudioSnapshot(),
+      window.workbench.wave2.getSnapshot(),
     ]);
     lastMc = mc;
     lastPolicy = policy;
     lastXray = xray;
     lastAvatar = avatar;
+    lastWave2 = wave2;
     renderAll();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));

@@ -20,6 +20,12 @@ import type {
   StudioToolsBridge,
   TurnXraySnapshot,
 } from "../shared/studioTools.ts";
+import type {
+  LanPeerPairInput,
+  Wave2ActionResult,
+  Wave2Bridge,
+  Wave2Snapshot,
+} from "../shared/wave2Control.ts";
 import { WORKBENCH_TABS, type WorkbenchBridge, type WorkbenchTab } from "../shared/workbench.ts";
 
 const VALID_TABS = new Set<string>(WORKBENCH_TABS.map((t) => t.id));
@@ -80,9 +86,27 @@ const studioTools: StudioToolsBridge = {
     ipcRenderer.invoke("studio:run-room-calibration", request) as Promise<RoomCalibrationReport>,
 };
 
+const wave2: Wave2Bridge = {
+  getSnapshot: () => ipcRenderer.invoke("wave2:snapshot") as Promise<Wave2Snapshot>,
+  addVaultRoot: (dirPath: string) =>
+    ipcRenderer.invoke("wave2:vault-add", dirPath) as Promise<Wave2ActionResult>,
+  removeVaultRoot: (dirPath: string) =>
+    ipcRenderer.invoke("wave2:vault-remove", dirPath) as Promise<Wave2ActionResult>,
+  reindexVault: () => ipcRenderer.invoke("wave2:vault-reindex") as Promise<Wave2ActionResult>,
+  pairLanPeer: (input: LanPeerPairInput) =>
+    ipcRenderer.invoke("wave2:peer-pair", input) as Promise<Wave2ActionResult>,
+  removeLanPeer: (peerId: string) =>
+    ipcRenderer.invoke("wave2:peer-remove", peerId) as Promise<Wave2ActionResult>,
+  probeLanPeer: (peerId: string) =>
+    ipcRenderer.invoke("wave2:peer-probe", peerId) as Promise<Wave2ActionResult>,
+  togglePlugin: (pluginId: string, enabled: boolean) =>
+    ipcRenderer.invoke("wave2:plugin-toggle", pluginId, enabled) as Promise<Wave2ActionResult>,
+};
+
 const workbench: WorkbenchBridge = {
   missionControl,
   studioTools,
+  wave2,
   onSelectTab: (cb: (tab: WorkbenchTab) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, tab: string): void => {
       if (VALID_TABS.has(tab)) cb(tab as WorkbenchTab);
@@ -95,3 +119,4 @@ const workbench: WorkbenchBridge = {
 contextBridge.exposeInMainWorld("workbench", workbench);
 contextBridge.exposeInMainWorld("missionControl", missionControl);
 contextBridge.exposeInMainWorld("studioTools", studioTools);
+contextBridge.exposeInMainWorld("wave2Control", wave2);

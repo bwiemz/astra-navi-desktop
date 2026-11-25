@@ -740,6 +740,7 @@ const workbench = createWorkbenchController({
   config,
   dataDir,
   workspaceDir: workspaceRoot,
+  pluginsDir: join(resolveBundledRoot(app.getAppPath()), "plugins"),
   board: () => board,
   approvalDesk: () => approvalDesk,
   memoryStore: () => memoryStore,

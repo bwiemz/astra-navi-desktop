@@ -67,7 +67,7 @@ async function captureLiveRoomProbe(): Promise<{
     player.connect(ctx.destination);
     player.start();
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 1180);
+      setTimeout(resolve, 1500);
     });
     processor.disconnect();
     sourceNode.disconnect();
@@ -75,7 +75,7 @@ async function captureLiveRoomProbe(): Promise<{
     return {
       sampleRate,
       referenceSamples: Array.from(sweep),
-      recordedSamples: recorded.slice(0, sweep.length),
+      recordedSamples: recorded.slice(0, Math.round(sampleRate * 1.45)),
     };
   } finally {
     stream.getTracks().forEach((t) => t.stop());
@@ -90,9 +90,27 @@ function renderRoomCalibrationReport(host: HTMLElement, report: RoomCalibrationR
     el("strong", undefined, `Room Acoustic & Wake Report (${report.samplesAnalyzed} samples @ ${report.sampleRate} Hz)`),
   );
   const badges = el("div", "btn-row");
+  const isIsolated = report.bargeInStatus === "ready_isolated";
+  const erleBadgeClass = isIsolated
+    ? "ok"
+    : report.erleDb >= 10
+      ? "ok"
+      : report.erleDb >= 6
+        ? "warn"
+        : "critical";
+  const erleBadgeText = isIsolated
+    ? "Isolated (No Echo)"
+    : `ERLE ${report.erleDb.toFixed(1)} dB`;
+  const bargeBadgeClass = report.bargeInReady ? "ok" : "warn";
+  const bargeBadgeText =
+    report.bargeInStatus === "ready_isolated"
+      ? "Headphones / Isolated (Barge-In Safe)"
+      : report.bargeInStatus === "ready_aec"
+        ? "Open-Speaker AEC Ready"
+        : "Needs PipeWire AEC";
   badges.append(
-    el("span", `badge ${report.erleDb >= 10 ? "ok" : report.erleDb >= 6 ? "warn" : "critical"}`, `ERLE ${report.erleDb.toFixed(1)} dB`),
-    el("span", `badge ${report.bargeInReady ? "ok" : "warn"}`, report.bargeInReady ? "Barge-In Ready" : "Needs PipeWire AEC"),
+    el("span", `badge ${erleBadgeClass}`, erleBadgeText),
+    el("span", `badge ${bargeBadgeClass}`, bargeBadgeText),
     el("span", `badge ${report.wakePassRate >= 1 ? "ok" : "warn"}`, `Wake ${Math.round(report.wakePassRate * 100)}%`),
   );
   top.append(badges);
@@ -100,7 +118,7 @@ function renderRoomCalibrationReport(host: HTMLElement, report: RoomCalibrationR
 
   const metrics = [
     `Raw Mic RMS: ${report.rawMicRms.toFixed(5)} · Post-NLMS Residual RMS: ${report.residualRms.toFixed(5)} · Room Noise Floor: ${report.noiseFloorRms.toFixed(5)}`,
-    `Recommended Min SNR: ${report.recommendedMinSnrDb} dB · Recommended Barge-In Residual RMS: ${report.recommendedMinResidualRms.toFixed(4)}`,
+    `Lag ${report.estimatedLagMs.toFixed(1)} ms · Coupling ${report.couplingStatus} (corr ${report.peakCorrelation.toFixed(3)}) · Recommended Min SNR: ${report.recommendedMinSnrDb} dB · Barge-In Residual RMS: ${report.recommendedMinResidualRms.toFixed(4)}`,
   ];
   for (const line of metrics) host.append(el("div", "mono", line));
   for (const note of report.notes) host.append(el("div", "muted", note));

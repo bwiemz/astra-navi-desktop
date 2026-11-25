@@ -274,6 +274,9 @@ export interface WakeCalibrationResult {
   reason?: string;
 }
 
+export type CouplingStatus = "coupled" | "isolated";
+export type BargeInStatus = "ready_aec" | "ready_isolated" | "needs_aec";
+
 export interface RoomCalibrationReport {
   sampleRate: number;
   samplesAnalyzed: number;
@@ -284,6 +287,10 @@ export interface RoomCalibrationReport {
   recommendedMinSnrDb: number;
   recommendedMinResidualRms: number;
   pipewireAecCommand: string;
+  couplingStatus: CouplingStatus;
+  bargeInStatus: BargeInStatus;
+  estimatedLagMs: number;
+  peakCorrelation: number;
   bargeInReady: boolean;
   wakeChecks: WakeCalibrationResult[];
   wakePassRate: number;
@@ -337,24 +344,34 @@ function estimateCoarseCausalLag(
   reference: Float32Array,
   recorded: Float32Array,
   sampleRate: number,
-): number {
-  const len = Math.min(reference.length, recorded.length);
-  const maxLag = Math.min(len - 512, Math.round(sampleRate * 0.2));
-  if (maxLag <= 0 || computeRms(reference) < 1e-5) return 0;
+): { lagOffset: number; rawLagSamples: number; peakCorrelation: number } {
+  const minOverlap = Math.min(reference.length, recorded.length, Math.max(512, Math.round(sampleRate * 0.25)));
+  const maxLagByLen =
+    recorded.length > reference.length
+      ? Math.max(0, recorded.length - minOverlap)
+      : Math.max(0, Math.min(reference.length, recorded.length) - 512);
+  const maxLag = Math.min(maxLagByLen, Math.round(sampleRate * 0.42));
+  if (maxLag <= 0 || computeRms(reference) < 1e-5) {
+    return { lagOffset: 0, rawLagSamples: 0, peakCorrelation: 0 };
+  }
 
   const stride = 4;
   let bestCoarseLag = 0;
   let bestScore = -1;
   for (let lag = 0; lag <= maxLag; lag += stride) {
+    const overlapEnd = Math.min(reference.length, recorded.length - lag);
+    if (overlapEnd < 256) continue;
     let dot = 0;
-    let energy = 0;
-    for (let i = lag; i < len; i += stride) {
-      const r = reference[i - lag] ?? 0;
-      const m = recorded[i] ?? 0;
+    let refEnergy = 0;
+    let micEnergy = 0;
+    for (let i = 0; i < overlapEnd; i += stride) {
+      const r = reference[i] ?? 0;
+      const m = recorded[i + lag] ?? 0;
       dot += r * m;
-      energy += r * r;
+      refEnergy += r * r;
+      micEnergy += m * m;
     }
-    const score = Math.abs(dot) / Math.sqrt(energy + 1e-9);
+    const score = Math.abs(dot) / (Math.sqrt(refEnergy * micEnergy) + 1e-9);
     if (score > bestScore) {
       bestScore = score;
       bestCoarseLag = lag;
@@ -363,24 +380,34 @@ function estimateCoarseCausalLag(
 
   let bestLag = bestCoarseLag;
   let refinedBest = -1;
-  const start = Math.max(0, bestCoarseLag - 8);
-  const end = Math.min(maxLag, bestCoarseLag + 8);
+  const start = Math.max(0, bestCoarseLag - 16);
+  const end = Math.min(maxLag, bestCoarseLag + 16);
   for (let lag = start; lag <= end; lag += 1) {
+    const overlapEnd = Math.min(reference.length, recorded.length - lag);
+    if (overlapEnd < 256) continue;
     let dot = 0;
-    let energy = 0;
-    for (let i = lag; i < len; i += 2) {
-      const r = reference[i - lag] ?? 0;
-      const m = recorded[i] ?? 0;
+    let refEnergy = 0;
+    let micEnergy = 0;
+    for (let i = 0; i < overlapEnd; i += 2) {
+      const r = reference[i] ?? 0;
+      const m = recorded[i + lag] ?? 0;
       dot += r * m;
-      energy += r * r;
+      refEnergy += r * r;
+      micEnergy += m * m;
     }
-    const score = Math.abs(dot) / Math.sqrt(energy + 1e-9);
+    const score = Math.abs(dot) / (Math.sqrt(refEnergy * micEnergy) + 1e-9);
     if (score > refinedBest) {
       refinedBest = score;
       bestLag = lag;
     }
   }
-  return Math.max(0, bestLag - 8);
+
+  const clampedCorr = Number(Math.max(0, Math.min(1, refinedBest)).toFixed(4));
+  return {
+    lagOffset: Math.max(0, bestLag - 8),
+    rawLagSamples: bestLag,
+    peakCorrelation: clampedCorr,
+  };
 }
 
 /**
@@ -395,16 +422,32 @@ export function evaluateRoomCalibration(input: {
   wakeSamples?: readonly WakeCalibrationSample[];
 }): RoomCalibrationReport {
   const sampleRate = Math.max(8_000, Math.min(48_000, Math.round(input.sampleRate ?? 16_000)));
-  const len = Math.min(input.reference.length, input.recorded.length);
-  const mic = input.recorded.subarray(0, len);
-  const ref = input.reference.subarray(0, len);
+  const { lagOffset, rawLagSamples, peakCorrelation } = estimateCoarseCausalLag(
+    input.reference,
+    input.recorded,
+    sampleRate,
+  );
 
-  const lagOffset = estimateCoarseCausalLag(ref, mic, sampleRate);
-  const alignedRef = new Float32Array(len);
-  for (let i = lagOffset; i < len; i += 1) {
-    alignedRef[i] = ref[i - lagOffset] ?? 0;
+  let mic: Float32Array;
+  let alignedRef: Float32Array;
+  let activeStart = 0;
+
+  if (input.recorded.length > input.reference.length && lagOffset > 0) {
+    const overlapLen = Math.min(input.reference.length, input.recorded.length - lagOffset);
+    mic = input.recorded.subarray(lagOffset, lagOffset + overlapLen);
+    alignedRef = input.reference.subarray(0, overlapLen);
+  } else {
+    const len = Math.min(input.reference.length, input.recorded.length);
+    mic = input.recorded.subarray(0, len);
+    const ref = input.reference.subarray(0, len);
+    alignedRef = new Float32Array(len);
+    for (let i = lagOffset; i < len; i += 1) {
+      alignedRef[i] = ref[i - lagOffset] ?? 0;
+    }
+    activeStart = lagOffset;
   }
 
+  const len = mic.length;
   const aec = new NlmsEchoCanceller({ filterLength: 128, stepSize: 0.45 });
   const residual = new Float32Array(len);
   const frameSize = 512;
@@ -414,12 +457,17 @@ export function evaluateRoomCalibration(input: {
     residual.set(out, offset);
   }
 
-  const settleStart = Math.min(len, Math.floor(len * 0.4));
+  const activeLen = Math.max(0, len - activeStart);
+  const settleStart = Math.min(Math.max(0, len - 1), activeStart + Math.floor(activeLen * 0.35));
   const micEval = len > 64 ? mic.subarray(settleStart) : mic;
   const resEval = len > 64 ? residual.subarray(settleStart) : residual;
   const rawMicRms = Number(computeRms(micEval).toFixed(5));
   const residualRms = Number(computeRms(resEval).toFixed(5));
   const erleDb = Number(computeErleDb(micEval, resEval).toFixed(2));
+  const estimatedLagMs = Number(((rawLagSamples / sampleRate) * 1000).toFixed(1));
+
+  const couplingStatus: CouplingStatus =
+    len > 0 && rawMicRms <= 0.008 && peakCorrelation < 0.15 ? "isolated" : "coupled";
 
   const frameRmsList: number[] = [];
   for (let offset = 0; offset < residual.length; offset += frameSize) {
@@ -430,13 +478,22 @@ export function evaluateRoomCalibration(input: {
   const p15 = frameRmsList[Math.floor(frameRmsList.length * 0.15)] ?? residualRms;
   const noiseFloorRms = Number(Math.max(1e-4, p15).toFixed(5));
 
-  const baseSnr = erleDb >= 12 ? 7 : erleDb >= 8 ? 9 : 12;
+  const baseSnr =
+    couplingStatus === "isolated" ? 8 : erleDb >= 12 ? 7 : erleDb >= 8 ? 9 : 12;
   const noisyPenalty = noiseFloorRms >= 0.03 ? 2 : 0;
   const recommendedMinSnrDb = Math.max(6, Math.min(18, baseSnr + noisyPenalty));
   const recommendedMinResidualRms = Number(
     Math.max(0.01, Math.min(0.08, residualRms * 1.6 + 0.008)).toFixed(4),
   );
-  const bargeInReady = erleDb >= 6;
+  const bargeInStatus: BargeInStatus =
+    len === 0
+      ? "needs_aec"
+      : couplingStatus === "isolated"
+        ? "ready_isolated"
+        : erleDb >= 6
+          ? "ready_aec"
+          : "needs_aec";
+  const bargeInReady = bargeInStatus !== "needs_aec";
   const pipewireAec = buildPipeWireAecArgs();
   const pipewireAecCommand = `${pipewireAec.program} ${pipewireAec.args.join(" ")}`;
 
@@ -472,17 +529,21 @@ export function evaluateRoomCalibration(input: {
   const notes: string[] = [];
   if (len === 0) {
     notes.push("No audio samples provided; run live speaker/mic probe or synthetic self-test.");
+  } else if (bargeInStatus === "ready_isolated") {
+    notes.push(
+      `No Speaker Coupling / Headphones Detected (Barge-In Safe): negligible speaker bleed (RMS ${rawMicRms.toFixed(5)}, corr ${peakCorrelation.toFixed(3)}); no echo cancellation required.`,
+    );
   } else if (erleDb >= 12) {
     notes.push(
-      `Strong echo suppression (${erleDb.toFixed(1)} dB ERLE, aligned lag ${lagOffset} samples); full-duplex barge-in ready.`,
+      `Strong echo suppression (${erleDb.toFixed(1)} dB ERLE, aligned lag ${estimatedLagMs.toFixed(1)} ms); full-duplex barge-in ready.`,
     );
   } else if (erleDb >= 6) {
     notes.push(
-      `Moderate echo suppression (${erleDb.toFixed(1)} dB ERLE); barge-in usable, consider lowering speaker volume or loading PipeWire WebRTC AEC.`,
+      `Moderate echo suppression (${erleDb.toFixed(1)} dB ERLE, lag ${estimatedLagMs.toFixed(1)} ms); barge-in usable, consider lowering speaker volume or loading PipeWire WebRTC AEC.`,
     );
   } else {
     notes.push(
-      `Low ERLE (${erleDb.toFixed(1)} dB); load PipeWire module-echo-cancel before unattended hands-free barge-in.`,
+      `Low ERLE (${erleDb.toFixed(1)} dB at lag ${estimatedLagMs.toFixed(1)} ms); load PipeWire module-echo-cancel before unattended hands-free barge-in.`,
     );
   }
   if (passedCount < wakeChecks.length) {
@@ -501,6 +562,10 @@ export function evaluateRoomCalibration(input: {
     recommendedMinSnrDb,
     recommendedMinResidualRms,
     pipewireAecCommand,
+    couplingStatus,
+    bargeInStatus,
+    estimatedLagMs,
+    peakCorrelation,
     bargeInReady,
     wakeChecks,
     wakePassRate,

@@ -358,6 +358,8 @@ describe("Zero-Python CPU Clause Streaming & Multilingual Streaming Backends", (
       otherNames: ["Computer"],
     });
     expect(report.erleDb).toBeGreaterThanOrEqual(10);
+    expect(report.couplingStatus).toBe("coupled");
+    expect(report.bargeInStatus).toBe("ready_aec");
     expect(report.bargeInReady).toBe(true);
     expect(report.residualRms).toBeLessThan(report.rawMicRms);
     expect(report.recommendedMinSnrDb).toBeGreaterThanOrEqual(6);
@@ -367,5 +369,51 @@ describe("Zero-Python CPU Clause Streaming & Multilingual Streaming Backends", (
     expect(report.wakeChecks.some((w) => w.phrase.includes("アストラナビ") && w.accepted)).toBe(true);
     expect(report.wakeChecks.some((w) => w.phrase.includes("星航") && w.accepted)).toBe(true);
     expect(report.wakeChecks.some((w) => w.phrase.includes("TV news") && !w.accepted)).toBe(true);
+  });
+
+  it("locks high-lag (320 ms) open-speaker echo, clears isolated/headphone captures as barge-in safe, and flags uncancelled loud echo", () => {
+    const sampleRate = 16_000;
+    const reference = generateCalibrationTone(sampleRate, 1.0);
+
+    // 1. High-lag (320 ms = 5120 samples) open-speaker echo recorded in a 1.5s capture window
+    const lagSamples = Math.round(sampleRate * 0.32);
+    const highLagRecorded = new Float32Array(Math.round(sampleRate * 1.5));
+    for (let i = 0; i < reference.length; i += 1) {
+      const dst = i + lagSamples;
+      if (dst < highLagRecorded.length) {
+        const direct = 0.55 * (reference[i] ?? 0);
+        const bounce = i >= 14 ? 0.2 * (reference[i - 14] ?? 0) : 0;
+        highLagRecorded[dst] = Math.max(-1, Math.min(1, direct + bounce));
+      }
+    }
+    const highLagReport = evaluateRoomCalibration({ reference, recorded: highLagRecorded, sampleRate });
+    expect(highLagReport.couplingStatus).toBe("coupled");
+    expect(highLagReport.bargeInStatus).toBe("ready_aec");
+    expect(highLagReport.bargeInReady).toBe(true);
+    expect(highLagReport.estimatedLagMs).toBeGreaterThanOrEqual(300);
+    expect(highLagReport.estimatedLagMs).toBeLessThanOrEqual(340);
+    expect(highLagReport.erleDb).toBeGreaterThanOrEqual(10);
+
+    // 2. Headphones / isolated desk mic (tiny ambient floor, uncorrelated with reference)
+    const isolatedRecorded = new Float32Array(reference.length);
+    for (let i = 0; i < isolatedRecorded.length; i += 1) {
+      isolatedRecorded[i] = 0.00025 * Math.sin((2 * Math.PI * 60 * i) / sampleRate);
+    }
+    const isolatedReport = evaluateRoomCalibration({ reference, recorded: isolatedRecorded, sampleRate });
+    expect(isolatedReport.couplingStatus).toBe("isolated");
+    expect(isolatedReport.bargeInStatus).toBe("ready_isolated");
+    expect(isolatedReport.bargeInReady).toBe(true);
+    expect(isolatedReport.notes.some((n) => n.includes("Headphones Detected (Barge-In Safe)"))).toBe(true);
+
+    // 3. Loud uncancelled open-speaker acoustic distortion -> coupled + needs_aec
+    const distorted = new Float32Array(reference.length);
+    for (let i = 0; i < distorted.length; i += 1) {
+      // Frequency-shifted / uncorrelated loud speech interference + weak echo
+      distorted[i] = 0.25 * Math.sin((2 * Math.PI * 417 * i) / sampleRate);
+    }
+    const needsAecReport = evaluateRoomCalibration({ reference, recorded: distorted, sampleRate });
+    expect(needsAecReport.couplingStatus).toBe("coupled");
+    expect(needsAecReport.bargeInStatus).toBe("needs_aec");
+    expect(needsAecReport.bargeInReady).toBe(false);
   });
 });

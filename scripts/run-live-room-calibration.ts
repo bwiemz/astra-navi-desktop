@@ -232,20 +232,13 @@ async function main(): Promise<void> {
     });
 
     const lagEstimate = estimateDeviceLagSamples(playbackTone, sweepCapture, 16_000);
-    const alignedSlice = new Float32Array(playbackTone.length);
-    const avail = Math.min(playbackTone.length, Math.max(0, sweepCapture.length - lagEstimate.lagSamples));
-    if (avail > 0) {
-      alignedSlice.set(sweepCapture.subarray(lagEstimate.lagSamples, lagEstimate.lagSamples + avail));
-    }
-
     const roomReport = evaluateRoomCalibration({
       reference: playbackTone,
-      recorded: alignedSlice,
+      recorded: sweepCapture,
       sampleRate: 16_000,
       otherNames: ["Computer"],
     });
-    const physicalCouplingDetected =
-      roomReport.rawMicRms > ambientRms * 1.5 && lagEstimate.normalizedCorrelation >= 0.15;
+    const physicalCouplingDetected = roomReport.couplingStatus === "coupled";
 
     // Step C: Real Kokoro-82M playback -> physical mic -> moonshine-base-ONNX STT
     env.cacheDir = cacheDir;
@@ -356,7 +349,11 @@ async function main(): Promise<void> {
         captureSamples: sweepCapture.length,
         deviceLagSamples: lagEstimate.lagSamples,
         deviceLagMs: Number(((lagEstimate.lagSamples / 16_000) * 1000).toFixed(1)),
+        estimatedLagMs: roomReport.estimatedLagMs,
+        peakCorrelation: roomReport.peakCorrelation,
         normalizedCorrelation: lagEstimate.normalizedCorrelation,
+        couplingStatus: roomReport.couplingStatus,
+        bargeInStatus: roomReport.bargeInStatus,
         physicalCouplingDetected,
         rawMicRms: roomReport.rawMicRms,
         residualRms: roomReport.residualRms,
@@ -381,11 +378,11 @@ async function main(): Promise<void> {
       console.log(`Live PipeWire Devices: ${pw.serverName} | sink=${pw.defaultSink} | source=${pw.defaultSource}`);
       console.log(`Ambient Floor (${ambient.length} samples @ 16 kHz): RMS=${ambientRms} (${ambientDb} dBFS)`);
       console.log(
-        `Physical Sweep (gain=${sweepGain}): lag=${payload.physicalSweep.deviceLagMs} ms, corr=${lagEstimate.normalizedCorrelation}, coupling=${physicalCouplingDetected}, rawMicRms=${roomReport.rawMicRms}, residualRms=${roomReport.residualRms}, ERLE=${roomReport.erleDb} dB, bargeInReady=${roomReport.bargeInReady}, minSnrDb=${roomReport.recommendedMinSnrDb}, minResRms=${roomReport.recommendedMinResidualRms}`,
+        `Physical Sweep (gain=${sweepGain}): aecLag=${roomReport.estimatedLagMs} ms (probeLag=${payload.physicalSweep.deviceLagMs} ms), corr=${roomReport.peakCorrelation}, coupling=${roomReport.couplingStatus}, bargeInStatus=${roomReport.bargeInStatus}, rawMicRms=${roomReport.rawMicRms}, residualRms=${roomReport.residualRms}, ERLE=${roomReport.erleDb} dB, bargeInReady=${roomReport.bargeInReady}, minSnrDb=${roomReport.recommendedMinSnrDb}, minResRms=${roomReport.recommendedMinResidualRms}`,
       );
-      if (!physicalCouplingDetected) {
+      if (roomReport.bargeInStatus === "ready_isolated") {
         console.log(
-          "  Note: Physical speaker-to-mic acoustic coupling was below threshold (monitors/headphone/mic gain likely isolated in analog stage); reported metrics reflect real room capture honestly.",
+          "  Note: No Speaker Coupling / Headphones Detected (Barge-In Safe); reported metrics reflect real isolated room capture cleanly.",
         );
       }
       console.log(

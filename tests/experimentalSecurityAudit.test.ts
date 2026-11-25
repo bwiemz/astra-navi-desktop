@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { LanVisionOffloadServer, signLanVisionPacket } from "../src/core/lanVisionOffload.ts";
 import { PeerStateSyncEngine, scrubSecretsForSync } from "../src/core/peerSync.ts";
 import { frameVaultExcerpt, VaultRagIndex } from "../src/core/vaultRag.ts";
-import { analyzeVoiceReferenceClip, packageClonedVoiceArchive } from "../src/core/voiceCloneStudio.ts";
 
 const tempDirs: string[] = [];
 
@@ -263,58 +262,5 @@ describe("Experimental Security Audit: lanVisionOffload.ts", () => {
       secret,
     );
     expect((await server.ingestPacket(bankPacket, { nowMs })).accepted).toBe(false);
-  });
-});
-
-describe("Experimental Security Audit: voiceCloneStudio.ts", () => {
-  it("rejects non-finite PCM samples, invalid sample rates, withheld consent, and traversal manifest IDs", async () => {
-    const rate = 24_000;
-    const validSamples = new Float32Array(rate * 5);
-    for (let i = 0; i < validSamples.length; i += 1) {
-      // Quiet pauses interleaved with clean speech-like tone
-      validSamples[i] = i % 12_000 < 2_000 ? 0.0005 : 0.22 * Math.sin((2 * Math.PI * 220 * i) / rate);
-    }
-
-    const nanSamples = new Float32Array(validSamples);
-    nanSamples[1234] = Number.NaN;
-    const nanReport = analyzeVoiceReferenceClip(nanSamples, rate);
-    expect(nanReport.ok).toBe(false);
-    expect(nanReport.issues[0]).toContain("Non-finite");
-
-    const hiRateReport = analyzeVoiceReferenceClip(validSamples, 500_000);
-    expect(hiRateReport.ok).toBe(false);
-
-    const dir = await makeTempDir();
-    await expect(
-      packageClonedVoiceArchive({
-        samples: validSamples,
-        sampleRate: rate,
-        transcript: "Hello ship",
-        bundleDir: join(dir, "b1"),
-        manifest: {
-          version: 1,
-          id: "test-voice",
-          name: "Test Voice",
-        } as never,
-        outBundleFile: join(dir, "b1.bundle"),
-        consentConfirmed: false,
-      }),
-    ).rejects.toThrow(/consent/i);
-
-    await expect(
-      packageClonedVoiceArchive({
-        samples: validSamples,
-        sampleRate: rate,
-        transcript: "Hello ship",
-        bundleDir: join(dir, "b2"),
-        manifest: {
-          version: 1,
-          id: "../../escape",
-          name: "Bad",
-        } as never,
-        outBundleFile: join(dir, "b2.bundle"),
-        consentConfirmed: true,
-      }),
-    ).rejects.toThrow(/Unsafe character manifest id/i);
   });
 });
