@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stationPage } from "../src/core/stationPage.ts";
+import { STATION_STYLE } from "../src/core/stationPageStyle.ts";
 
 /**
  * The station page's own script, run here against a stand-in for a browser page: just
@@ -1813,7 +1814,21 @@ describe("pinned mission bridge and mobile trace drawer", () => {
     expect(alertsEnabled).toBe(true);
     expect(alertToken).toBe("token-of-this-device");
 
-    // Hold-to-talk voice note triggers native start/stop and posts base64 WAV to /voice
+    // Hold-to-talk voice note suppresses mobile long-press selection/callouts and posts base64 WAV
+    expect(STATION_STYLE).toContain("user-select: none;");
+    expect(STATION_STYLE).toContain("-webkit-user-select: none;");
+    expect(STATION_STYLE).toContain("-webkit-touch-callout: none;");
+    expect(STATION_STYLE).toContain("touch-action: none;");
+    for (const evtType of ["contextmenu", "selectstart", "touchstart"]) {
+      let prevented = false;
+      page.byId("voice-hold").fire(evtType, {
+        preventDefault: () => {
+          prevented = true;
+        },
+      });
+      expect(prevented, `${evtType} must call preventDefault()`).toBe(true);
+    }
+
     page.byId("voice-hold").fire("pointerdown");
     expect(startedVoice).toBe(1);
     expect(page.byId("voice-hold").dataset["recording"]).toBe("yes");

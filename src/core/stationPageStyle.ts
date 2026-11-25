@@ -539,7 +539,14 @@ body[data-link="lost"] .start .away { display: inline; }
 .composer textarea { flex: 1; min-height: 48px; max-height: 9.5em; resize: none; line-height: 1.35; }
 .composer button { min-width: 68px; }
 #stop { background: var(--lemon); }
-.voice-hold { background: var(--sky); }
+.voice-hold {
+  background: var(--sky);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
 .voice-hold[data-recording="yes"] { background: var(--blush); color: #1b1f3b; }
 .outbox {
   margin: 0 14px 8px;

@@ -1334,8 +1334,17 @@ export const STATION_SCRIPT = String.raw`
     resetVoiceButton();
     add("caution", String(msg || "Voice recording failed."), "");
   };
+  function preventHoldDefault(event) {
+    if (event && event.preventDefault) event.preventDefault();
+  }
+  voiceHold.addEventListener("contextmenu", preventHoldDefault);
+  voiceHold.addEventListener("selectstart", preventHoldDefault);
+  voiceHold.addEventListener("touchstart", preventHoldDefault, { passive: false });
   voiceHold.addEventListener("pointerdown", function (event) {
     if (event && event.preventDefault) event.preventDefault();
+    if (event && event.pointerId != null && typeof voiceHold.setPointerCapture === "function") {
+      try { voiceHold.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
+    }
     if (voiceRecording || !token || !session) return;
     voiceRecording = true;
     voiceHold.dataset.recording = "yes";
