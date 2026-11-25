@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { DesktopLayout, MediaAction, NowPlaying, WindowAction, WindowDetail } from "../desktop.ts";
-import type { ControlList, Hands } from "../hands.ts";
+import type { ControlList, Hands, HandsAbilities } from "../hands.ts";
 import type { MonitorChild } from "../notices.ts";
 import { resolveBundledRoot } from "../paths.ts";
 import type { EarsProcess } from "../shipEars.ts";
@@ -96,6 +96,8 @@ export interface PlatformAdapter {
     activeFullscreenGame(): Promise<string | null>;
     gpuVramStatus?(): Promise<PlatformGpuVramStatus | null>;
   };
+  abilities?(): Promise<HandsAbilities>;
+  dispose?(): void;
 }
 
 export interface PlatformAdapterOptions {

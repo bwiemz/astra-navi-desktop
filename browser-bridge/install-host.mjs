@@ -98,6 +98,7 @@ export async function installNativeHost(options = {}) {
     options.hostScript ?? join(import.meta.dirname, "native-host.mjs"),
   );
   const nodePath = options.nodePath ?? process.execPath;
+  const electronRunAsNode = options.electronRunAsNode ?? Boolean(process.versions?.electron);
   const targets = nativeHostTargets(options);
   const payloads = buildHostManifests({
     executablePath: targets.launcherPath,
@@ -111,7 +112,9 @@ export async function installNativeHost(options = {}) {
       for (const m of targets.manifests) rmSync(m.file, { force: true });
       if (platform === "win32") {
         for (const reg of targets.registryKeys) {
-          await execFileAsync("reg.exe", ["delete", reg.key, "/f"]).catch(() => undefined);
+          await execFileAsync("reg.exe", ["delete", reg.key, "/f"], { windowsHide: true }).catch(
+            () => undefined,
+          );
         }
       }
     }
@@ -126,8 +129,12 @@ export async function installNativeHost(options = {}) {
 
   const launcherBody =
     platform === "win32"
-      ? `@echo off\r\n"${nodePath}" "${hostScript}" %*\r\n`
-      : `#!/usr/bin/env sh\nexec "${nodePath}" "${hostScript}" "$@"\n`;
+      ? electronRunAsNode
+        ? `@echo off\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"${nodePath}" "${hostScript}" %*\r\n`
+        : `@echo off\r\n"${nodePath}" "${hostScript}" %*\r\n`
+      : electronRunAsNode
+        ? `#!/usr/bin/env sh\nELECTRON_RUN_AS_NODE=1 exec "${nodePath}" "${hostScript}" "$@"\n`
+        : `#!/usr/bin/env sh\nexec "${nodePath}" "${hostScript}" "$@"\n`;
 
   if (!dryRun) {
     mkdirSync(dirname(targets.launcherPath), { recursive: true, mode: 0o700 });
@@ -144,7 +151,11 @@ export async function installNativeHost(options = {}) {
       for (const reg of targets.registryKeys) {
         const manifestFile =
           targets.manifests.find((m) => m.kind === reg.kind)?.file ?? targets.manifests[0].file;
-        await execFileAsync("reg.exe", ["add", reg.key, "/ve", "/t", "REG_SZ", "/d", manifestFile, "/f"]);
+        await execFileAsync(
+          "reg.exe",
+          ["add", reg.key, "/ve", "/t", "REG_SZ", "/d", manifestFile, "/f"],
+          { windowsHide: true },
+        );
       }
     }
   }

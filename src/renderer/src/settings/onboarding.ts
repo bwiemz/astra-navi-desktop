@@ -150,12 +150,16 @@ export function renderBootstrapList(status: SettingsView["bootstrapStatus"]): vo
         void bridge
           .runBootstrap(entry.task)
           .then((res) => {
+            if (latestView) latestView = { ...latestView, bootstrapStatus: res.status };
             element("wiz-bootstrap-note").textContent = res.summary.join(" ") || "Done.";
             renderBootstrapList(res.status);
           })
           .catch((error: unknown) => {
-            element("wiz-bootstrap-note").textContent =
-              error instanceof Error ? error.message : "Setup failed.";
+            const raw = error instanceof Error ? error.message : "Setup failed.";
+            element("wiz-bootstrap-note").textContent = raw.replace(
+              /^Error invoking remote method '[^']+': (?:Error: )?/,
+              "",
+            );
           })
           .finally(() => {
             btn.disabled = false;

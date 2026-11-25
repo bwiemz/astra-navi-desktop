@@ -198,6 +198,11 @@ export class ShipEars {
     if (this.child !== child) return; // an old one, already replaced or stopped
     this.child = null;
     if (!this.wanted) return;
+    if (child === null && error instanceof Error) {
+      this.wanted = false;
+      this.onProblem(error.message);
+      return;
+    }
     if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
       this.wanted = false;
       this.onProblem(

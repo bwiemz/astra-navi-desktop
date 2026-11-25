@@ -15,6 +15,9 @@ const AUTOSTART_FILE = join(
 );
 
 export async function startsAtLogin(): Promise<boolean> {
+  if (process.platform === "win32" || process.platform === "darwin") {
+    return app.getLoginItemSettings().openAtLogin;
+  }
   try {
     await readFile(AUTOSTART_FILE);
     return true;
@@ -30,6 +33,10 @@ function desktopExecPath(path: string): string {
 }
 
 export async function setStartAtLogin(on: boolean): Promise<void> {
+  if (process.platform === "win32" || process.platform === "darwin") {
+    app.setLoginItemSettings({ openAtLogin: on });
+    return;
+  }
   if (!on) {
     await rm(AUTOSTART_FILE, { force: true });
     return;

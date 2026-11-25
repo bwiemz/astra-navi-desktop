@@ -14,17 +14,50 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
-/** Marks of a game among the programs holding the card. */
-const GAME_ON_CARD: readonly RegExp[] = [
+/** Marks of a game among the programs holding the card across platforms. */
+const CROSS_PLATFORM_GAME_MARKS: readonly RegExp[] = [
   // Anything from a Steam library, on either kind of path.
   /steamapps[\\/]+common[\\/]/i,
-  // A Windows program, which on this kind of machine means a game under Proton or Wine.
-  /\.exe$/i,
   /(?:^|[\\/])gamescope(?:-wl)?$/i,
   // How Unreal and Unity name what they ship.
   /-(?:Win64|Linux)-Shipping(?:\.exe)?$/i,
   /\.x86_64$/i,
 ];
+
+/** On Linux/macOS, an `.exe` holding the GPU means a Windows game running under Proton or Wine. */
+const LINUX_EXE_GAME_MARK = /\.exe$/i;
+
+/** Built-in Windows shell/compositor/app processes that hold the GPU and are never games. */
+const WINDOWS_SYSTEM_NON_GAMES = new Set([
+  "shellhost.exe",
+  "shellexperiencehost.exe",
+  "startmenuexperiencehost.exe",
+  "searchhost.exe",
+  "searchapp.exe",
+  "textinputhost.exe",
+  "lockapp.exe",
+  "dwm.exe",
+  "explorer.exe",
+  "applicationframehost.exe",
+  "systemsettings.exe",
+  "widgets.exe",
+  "widgetservice.exe",
+  "screenclippinghost.exe",
+  "sihost.exe",
+  "csrss.exe",
+  "winlogon.exe",
+  "runtimebroker.exe",
+  "ctfmon.exe",
+  "taskhostw.exe",
+  "dllhost.exe",
+  "conhost.exe",
+  "windowsterminal.exe",
+  "openconsole.exe",
+  "nvcontainer.exe",
+  "nvdisplay.container.exe",
+  "electron.exe",
+  "astra navi desktop.exe",
+]);
 
 function lastPart(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
@@ -39,10 +72,20 @@ export interface Holder {
 }
 
 /** The name of a game among the programs holding the card, or null when none looks like one. */
-export function gameAmongHolders(holders: readonly string[]): string | null {
+export function gameAmongHolders(
+  holders: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  const marks =
+    platform === "win32"
+      ? CROSS_PLATFORM_GAME_MARKS
+      : [...CROSS_PLATFORM_GAME_MARKS, LINUX_EXE_GAME_MARK];
   for (const holder of holders) {
     const name = holder.trim();
-    if (name !== "" && GAME_ON_CARD.some((mark) => mark.test(name))) return lastPart(name);
+    if (name === "") continue;
+    const file = lastPart(name);
+    if (WINDOWS_SYSTEM_NON_GAMES.has(file.toLowerCase())) continue;
+    if (marks.some((mark) => mark.test(name))) return file;
   }
   return null;
 }
@@ -53,7 +96,7 @@ export async function cardHolders(command = "nvidia-smi"): Promise<Holder[] | nu
     const { stdout } = await run(
       command,
       ["--query-compute-apps=pid,process_name", "--format=csv,noheader"],
-      { timeout: 5000 },
+      { timeout: 5000, windowsHide: true },
     );
     return stdout
       .split("\n")
@@ -119,19 +162,25 @@ function steamGame(path: string | null): string | null {
 }
 
 /** The game this program on the card is, or null when it is not one. */
-async function gameBehind(holder: Holder, look: ProcessLook): Promise<string | null> {
-  const byName = gameAmongHolders([holder.name]);
+async function gameBehind(
+  holder: Holder,
+  look: ProcessLook,
+  platform: NodeJS.Platform,
+): Promise<string | null> {
+  if (WINDOWS_SYSTEM_NON_GAMES.has(lastPart(holder.name.trim()).toLowerCase())) return null;
+  const byName = gameAmongHolders([holder.name], platform);
   if (holder.pid === null) return byName;
   // Another account's program is not this user's game, and what it calls itself is
   // not to be trusted: anyone can name a program "x.exe".
   if ((await look.mine(holder.pid)) === false) return null;
   const exe = await look.exe(holder.pid);
+  if (exe && WINDOWS_SYSTEM_NON_GAMES.has(lastPart(exe.trim()).toLowerCase())) return null;
   // A Windows game is named by the card with its own path; the program file behind it
   // is the layer it runs in ("Proton"), which is not its name.
   const folder = steamGame(holder.name) ?? steamGame(exe);
   if (folder) return folder;
   if (byName !== null) return byName;
-  if (exe && gameAmongHolders([exe]) !== null) return lastPart(exe);
+  if (exe && gameAmongHolders([exe], platform) !== null) return lastPart(exe);
   const started = await look.environment(holder.pid);
   if (started?.some((entry) => LAUNCHED_AS_GAME.test(entry))) {
     return lastPart(exe ?? holder.name);
@@ -147,11 +196,12 @@ async function gameBehind(holder: Holder, look: ProcessLook): Promise<string | n
 export async function gameOnCard(
   holders: () => Promise<Holder[] | null> = cardHolders,
   look: ProcessLook = PROC,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<string | null> {
   for (const holder of (await holders()) ?? []) {
     // Herself, started from a game launcher's shell, is not a game.
     if (holder.pid === process.pid || holder.pid === process.ppid) continue;
-    const game = await gameBehind(holder, look);
+    const game = await gameBehind(holder, look, platform);
     if (game !== null) return game;
   }
   return null;
@@ -166,7 +216,7 @@ export async function gpuUtilization(command = "nvidia-smi"): Promise<number | n
     const { stdout } = await run(
       command,
       ["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-      { timeout: 5000 },
+      { timeout: 5000, windowsHide: true },
     );
     const numbers = stdout
       .split("\n")

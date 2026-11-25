@@ -10,8 +10,10 @@ import {
   type ChatSessionModelFunctions,
   type Llama,
   type LlamaContext,
+  type LlamaContextOptions,
   type LlamaContextSequence,
   type LlamaModel,
+  type LlamaModelOptions,
   type Token,
 } from "node-llama-cpp";
 import {
@@ -138,6 +140,114 @@ export function afterLookingForGame(
 /** The part of a working space's settings that lays a tuning over the model. */
 function tuned(adapter: string | null): { lora?: { adapters: { filePath: string }[] } } {
   return adapter === null ? {} : { lora: { adapters: [{ filePath: adapter }] } };
+}
+
+/** True when model/context allocation failed due to tight VRAM or memory constraints. */
+export function isVramMemoryError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "InsufficientMemoryError") return true;
+  return /too large for the available (?:VRAM|RAM|resources)|insufficient.*(?:vram|memory)|out of memory|cuda.*alloc|failed to allocate/i.test(
+    error.message,
+  );
+}
+
+export interface ModelContextLoader<M> {
+  loadModel(options: LlamaModelOptions): Promise<M>;
+}
+
+export interface LoadableModel<C> {
+  readonly flashAttentionSupported: boolean;
+  createContext(options?: LlamaContextOptions): Promise<C>;
+  dispose(): Promise<void>;
+}
+
+export interface FallbackLoadOptions {
+  modelPath: string;
+  effectiveContextSize: number;
+  effectiveLean: boolean;
+  allowLeanKv: boolean;
+  freeVramBytes: number | null;
+  adapter: string | null;
+  processorOnly?: { threads: number };
+}
+
+/**
+ * Loads a GGUF model and creates its context with progressive VRAM-pressure fallbacks:
+ * 1) Normal GPU offload reserving context headroom (and Q8_0 KV when free VRAM < 2.5 GB),
+ * 2) Tight-VRAM retry capped at 8192 max / 2048 min tokens with Q8_0 KV,
+ * 3) Full CPU+RAM offload (`gpuLayers: 0`) so another GPU-heavy app never bricks chat.
+ */
+export async function loadModelAndContextWithFallback<M extends LoadableModel<unknown>>(
+  loader: ModelContextLoader<M>,
+  opts: FallbackLoadOptions,
+): Promise<{
+  model: M;
+  context: Awaited<ReturnType<M["createContext"]>>;
+  cpuFallback: boolean;
+}> {
+  const minCtx = Math.min(4096, opts.effectiveContextSize);
+  const lowFreeVram =
+    opts.freeVramBytes !== null && opts.freeVramBytes > 0 && opts.freeVramBytes < 2.5 * GIB;
+  const attemptLean = opts.effectiveLean || (lowFreeVram && opts.allowLeanKv);
+
+  const attempt = async (
+    gpuLayers: LlamaModelOptions["gpuLayers"],
+    minContext: number,
+    maxContext: number,
+    useLeanKv: boolean,
+  ): Promise<{ model: M; context: Awaited<ReturnType<M["createContext"]>> }> => {
+    let model: M | null = null;
+    try {
+      model = await loader.loadModel({
+        modelPath: opts.modelPath,
+        gpuLayers,
+        defaultContextFlashAttention: useLeanKv && opts.allowLeanKv ? true : "auto",
+      });
+      const context = (await model.createContext({
+        contextSize: { min: minContext, max: maxContext },
+        ...(opts.processorOnly ? { threads: opts.processorOnly.threads } : {}),
+        ...tuned(opts.adapter),
+        ...(useLeanKv && opts.allowLeanKv && model.flashAttentionSupported
+          ? {
+              flashAttention: true,
+              experimentalKvCacheKeyType: "Q8_0" as const,
+              experimentalKvCacheValueType: "Q8_0" as const,
+            }
+          : {}),
+      })) as Awaited<ReturnType<M["createContext"]>>;
+      return { model, context };
+    } catch (error) {
+      await model?.dispose().catch(() => undefined);
+      throw error;
+    }
+  };
+
+  try {
+    const first = await attempt(
+      opts.processorOnly ? 0 : { fitContext: { contextSize: minCtx } },
+      minCtx,
+      opts.effectiveContextSize,
+      attemptLean,
+    );
+    return { ...first, cpuFallback: false };
+  } catch (error1) {
+    if (!isVramMemoryError(error1) || opts.processorOnly) throw error1;
+    const cappedMax = Math.min(8192, opts.effectiveContextSize);
+    const relaxedMin = Math.min(2048, cappedMax);
+    try {
+      const second = await attempt(
+        { fitContext: { contextSize: relaxedMin } },
+        relaxedMin,
+        cappedMax,
+        opts.allowLeanKv,
+      );
+      return { ...second, cpuFallback: false };
+    } catch (error2) {
+      if (!isVramMemoryError(error2)) throw error2;
+      const third = await attempt(0, relaxedMin, cappedMax, false);
+      return { ...third, cpuFallback: true };
+    }
+  }
 }
 
 async function isFile(path: string): Promise<boolean> {
@@ -899,7 +1009,7 @@ export class LocalEngine {
       // Its own small working space, so the conversation's is left exactly as it was.
       // Never less than the write-up needs: too small a space would fail the same way every time.
       const context = await loaded.model.createContext({
-        contextSize: { min: 4096, max: 6144 },
+        contextSize: { min: 2048, max: 6144 },
         ...tuned(loaded.adapter),
       });
       try {
@@ -1269,25 +1379,20 @@ export class LocalEngine {
     if (adapter !== null) chosen = { ...chosen, label: `${chosen.label}, tuned` };
 
     options.onStatus({ stage: "loading", label: chosen.label });
-    const model = await llama.loadModel({ modelPath: chosen.path });
-    let context: LlamaContext;
-    try {
-      context = await model.createContext({
-        contextSize: { min: Math.min(4096, effectiveContextSize), max: effectiveContextSize },
-        ...(options.processorOnly ? { threads: options.processorOnly.threads } : {}),
-        ...tuned(adapter),
-        // Tried with her own models only; see `lean`.
-        ...(effectiveLean && chosen.download !== null && model.flashAttentionSupported
-          ? {
-              flashAttention: true,
-              experimentalKvCacheKeyType: "Q8_0" as const,
-              experimentalKvCacheValueType: "Q8_0" as const,
-            }
-          : {}),
-      });
-    } catch (error) {
-      await model.dispose(); // otherwise every failed attempt keeps a model's worth of memory
-      throw error;
+    const { model, context, cpuFallback } = await loadModelAndContextWithFallback(llama, {
+      modelPath: chosen.path,
+      effectiveContextSize,
+      effectiveLean,
+      allowLeanKv: chosen.download !== null,
+      freeVramBytes: card?.free ?? null,
+      adapter,
+      processorOnly: options.processorOnly,
+    });
+    if (cpuFallback) {
+      console.warn(
+        "[engine] Available VRAM too low even with reduced GPU context; fell back to CPU offload (gpuLayers: 0).",
+      );
+      chosen = { ...chosen, label: `${chosen.label}, CPU offload (VRAM busy)` };
     }
     const sequence = context.getSequence();
     const session = new LlamaChatSession({ contextSequence: sequence, systemPrompt });
@@ -1295,7 +1400,7 @@ export class LocalEngine {
       const system = session.getChatHistory().filter((item) => item.type === "system");
       session.setChatHistory([...system, ...this.history]);
     }
-    this.loaded = {
+    const loaded: Loaded = {
       path: chosen.path,
       model,
       context,
@@ -1307,7 +1412,8 @@ export class LocalEngine {
       anchor: null,
       instructionsMark: null,
     };
+    this.loaded = loaded;
     options.onStatus({ stage: "ready", label: chosen.label });
-    return this.loaded;
+    return loaded;
   }
 }

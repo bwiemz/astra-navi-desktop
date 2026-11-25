@@ -351,7 +351,9 @@ export class Hands {
 
   async abilities(): Promise<HandsAbilities> {
     if (this.options.adapter) {
-      return { controls: true, controlsProblem: "", input: true };
+      return this.options.adapter.abilities
+        ? this.options.adapter.abilities()
+        : { controls: true, controlsProblem: "", input: true };
     }
     const answer = await this.ask("hello", {}, 8000);
     return {

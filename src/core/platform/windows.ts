@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DesktopLayout, MediaAction, NowPlaying, WindowAction, WindowDetail } from "../desktop.ts";
-import type { Control } from "../hands.ts";
+import type { Control, HandsAbilities } from "../hands.ts";
 import type { MonitorChild } from "../notices.ts";
 import type { PlatformAdapter, PlatformAudioStream, PlatformGpuVramStatus } from "./adapter.ts";
 
@@ -130,6 +130,71 @@ export function parseWin32GpuVramJson(raw: string): PlatformGpuVramStatus | null
   };
 }
 
+/** Windows shell, compositor, and system host processes that are never games. */
+const WINDOWS_IGNORED_GAME_PROCESSES = new Set([
+  "shellhost",
+  "shellexperiencehost",
+  "startmenuexperiencehost",
+  "searchhost",
+  "searchapp",
+  "textinputhost",
+  "lockapp",
+  "dwm",
+  "explorer",
+  "applicationframehost",
+  "systemsettings",
+  "widgets",
+  "widgetservice",
+  "screenclippinghost",
+  "sihost",
+  "csrss",
+  "winlogon",
+  "runtimebroker",
+  "ctfmon",
+  "taskhostw",
+  "dllhost",
+  "conhost",
+  "windowsterminal",
+  "openconsole",
+  "nvcontainer",
+  "nvdisplay.container",
+  "electron",
+  "astra navi desktop",
+  "app",
+  "idle",
+  "system",
+]);
+
+/** Apps that often trigger QUNS_BUSY (e.g. fullscreen browser video or IDE) without being games. */
+const WINDOWS_NON_GAME_BUSY_APPS = new Set([
+  "chrome",
+  "msedge",
+  "firefox",
+  "brave",
+  "opera",
+  "vivaldi",
+  "discord",
+  "vesktop",
+  "code",
+  "powershell",
+  "pwsh",
+  "cmd",
+  "vlc",
+  "mpv",
+]);
+
+function cleanWinProcessStem(processName: string | undefined): string {
+  if (!processName) return "";
+  const base = processName.split(/[\\/]/).pop() ?? processName;
+  return base.trim().toLowerCase().replace(/\.exe$/i, "");
+}
+
+/** True when a Windows process reported alongside QUNS state is a system/shell component, not a game. */
+export function isIgnoredWindowsGameProcess(processName: string | undefined): boolean {
+  const stem = cleanWinProcessStem(processName);
+  return stem !== "" && WINDOWS_IGNORED_GAME_PROCESSES.has(stem);
+}
+
 /** Parses Windows `SHQueryUserNotificationState` result into full-screen game status + optional VRAM telemetry. */
 export function parseQunsState(raw: string): {
   fullscreenGame: boolean;
@@ -143,13 +208,24 @@ export function parseQunsState(raw: string): {
       const obj = JSON.parse(trimmed) as Record<string, unknown>;
       const state = String(obj["state"] ?? "");
       const code = Number(obj["code"]);
-      const fullscreenGame =
-        state === "QUNS_RUNNING_D3D_FULL_SCREEN" || state === "QUNS_BUSY" || code === 3 || code === 2;
+      const processName =
+        typeof obj["process"] === "string" && obj["process"].trim() ? obj["process"].trim() : undefined;
+      const isD3dFullscreen = state === "QUNS_RUNNING_D3D_FULL_SCREEN" || code === 3;
+      const isBusy = state === "QUNS_BUSY" || code === 2;
+      let fullscreenGame = isD3dFullscreen || isBusy;
+      if (fullscreenGame && isIgnoredWindowsGameProcess(processName)) {
+        fullscreenGame = false;
+      } else if (isBusy && !isD3dFullscreen) {
+        const stem = cleanWinProcessStem(processName);
+        if (!stem || WINDOWS_NON_GAME_BUSY_APPS.has(stem)) {
+          fullscreenGame = false;
+        }
+      }
       const vram = parseWin32GpuVramJson(trimmed);
       return {
         fullscreenGame,
         state: state || String(code),
-        ...(typeof obj["process"] === "string" && obj["process"] ? { processName: obj["process"] } : {}),
+        ...(processName ? { processName } : {}),
         ...(vram ? { vram } : {}),
       };
     } catch {
@@ -250,7 +326,7 @@ export class PersistentWinWorker {
     this.maxLineBytes = options.maxLineBytes ?? 4 * 1024 * 1024;
     this.spawnProcess =
       options.spawnProcess ??
-      ((command, args, opts) => spawn(command, [...args], opts));
+      ((command, args, opts) => spawn(command, [...args], { ...opts, windowsHide: true }));
   }
 
   private ensureStarted(): ChildProcess {
@@ -417,6 +493,7 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
   private readonly primaryWorker: PersistentWinWorker | null;
   private readonly fallbackWorker: PersistentWinWorker | null;
   private readonly workerKind: "native" | "powershell" | "custom";
+  private readonly hasFallbackScript: boolean;
 
   constructor(options: {
     scriptPath: string;
@@ -426,6 +503,7 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
     runScript?: (verb: string, payload: unknown) => Promise<string>;
   }) {
     this.scriptPath = options.scriptPath;
+    this.hasFallbackScript = Boolean(options.spawnProcess) || existsSync(this.scriptPath);
     if (options.runScript) {
       this.primaryWorker = null;
       this.fallbackWorker = null;
@@ -435,7 +513,7 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
     }
 
     const nativeBin = resolveNativeWinHandsBinary(options.scriptPath, options.nativeBinaryPath);
-    const hasFallbackScript = Boolean(options.spawnProcess) || existsSync(this.scriptPath);
+    const hasFallbackScript = this.hasFallbackScript;
     const psArgs = [
       "-NoProfile",
       "-NonInteractive",
@@ -509,6 +587,26 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
 
   activeWorkerKind(): "native" | "powershell" | "custom" {
     return this.workerKind;
+  }
+
+  async abilities(): Promise<HandsAbilities> {
+    if (this.workerKind === "native") {
+      return {
+        controls: this.hasFallbackScript,
+        controlsProblem: this.hasFallbackScript
+          ? ""
+          : "Using Windows screen reading, pointer, and keyboard controls.",
+        input: true,
+      };
+    }
+    if (this.workerKind === "custom" || this.hasFallbackScript) {
+      return { controls: true, controlsProblem: "", input: true };
+    }
+    return {
+      controls: false,
+      controlsProblem: "The Windows desktop helper (win-hands.exe) is missing.",
+      input: false,
+    };
   }
 
   dispose(): void {
@@ -643,21 +741,36 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
           mediaName: String(item["mediaName"] ?? ""),
         }));
     },
-    spawnCapture: (source = "default") =>
-      spawn(
+    spawnCapture: (source = "default") => {
+      if (!existsSync(this.scriptPath)) {
+        throw new Error(
+          "Remembering what the PC played is not yet available in packaged Windows builds.",
+        );
+      }
+      return spawn(
         "powershell.exe",
         ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", this.scriptPath, "wasapi-capture"],
-        { stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, AI_CHAN_WASAPI_SOURCE: source } },
-      ),
+        {
+          stdio: ["ignore", "pipe", "ignore"],
+          windowsHide: true,
+          env: { ...process.env, AI_CHAN_WASAPI_SOURCE: source },
+        },
+      );
+    },
   };
 
   readonly systemNotices: PlatformAdapter["systemNotices"] = {
-    isAvailable: async () => true,
+    isAvailable: async () => existsSync(this.scriptPath),
     spawnMonitor: (): MonitorChild => {
+      if (!existsSync(this.scriptPath)) {
+        throw new Error(
+          "Reading Windows desktop notifications is not yet available in packaged Windows builds.",
+        );
+      }
       const child = spawn(
         "powershell.exe",
         ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", this.scriptPath, "notices-monitor"],
-        { stdio: ["ignore", "pipe", "ignore"] },
+        { stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
       );
       const MAX_LINE_CHARS = 16_384;
       let heard: ((line: string) => void) | null = null;

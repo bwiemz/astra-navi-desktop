@@ -5,10 +5,11 @@ import type { BrainEvent } from "../shared/ipc.ts";
 import type { ConfigStore } from "./config.ts";
 import { reportFrontWindow } from "./desktop.ts";
 import type { DesktopServices } from "./desktopTools.ts";
-import { Hands, type HandsAbilities } from "./hands.ts";
+import { Hands, type HandsAbilities, type WindowSeen } from "./hands.ts";
 import type { HandsServices } from "./handsTools.ts";
 import type { PinnedMissionView } from "./missionPlan.ts";
 import { listPhones, pingPhone } from "./phone.ts";
+import type { PlatformAdapter } from "./platform/adapter.ts";
 import { ShipEars } from "./shipEars.ts";
 import type { Sight } from "./sight.ts";
 import {
@@ -37,6 +38,8 @@ export interface ReachDeps {
   modelsCacheDir: string;
   /** Full path of hands.py. */
   handsScript: string;
+  /** Optional cross-platform adapter replacing Linux Python/KWin helpers. */
+  adapter?: PlatformAdapter;
   /** The app's own windows, by program name. */
   ownApps: readonly string[];
   stationDir: string;
@@ -103,7 +106,7 @@ export class Reach {
 
   constructor(deps: ReachDeps) {
     this.deps = deps;
-    this.hands = new Hands({ script: deps.handsScript });
+    this.hands = new Hands({ script: deps.handsScript, adapter: deps.adapter });
     this.transcriber = new ClipTranscriber(deps.modelsCacheDir);
   }
 
@@ -111,6 +114,7 @@ export class Reach {
   get handsServices(): HandsServices {
     return {
       hands: this.hands,
+      ...(this.deps.adapter ? { adapter: this.deps.adapter } : {}),
       sight: this.deps.sight,
       scriptDir: this.deps.scriptDir,
       ownApps: this.deps.ownApps,
@@ -165,16 +169,74 @@ export class Reach {
       const watch = this.watch;
       this.watch = null;
       await watch?.stop();
-      await this.hands.unfollowWindows();
+      if (!this.deps.adapter) await this.hands.unfollowWindows();
       return;
     }
     if (this.watch) return;
     const { deps, hands } = this;
+    const adapter = deps.adapter;
     const watch = new ScreenWatch({
-      follow: async (listener) => {
-        const address = await hands.followWindows(listener, () => this.watchLost(watch));
-        return reportFrontWindow(deps.scriptDir, address);
-      },
+      follow: adapter
+        ? async (listener) => {
+            let stopped = false;
+            let lastKey = "";
+            let failures = 0;
+            let polling = false;
+            const emitActive = (
+              layout: Awaited<ReturnType<typeof adapter.windowManager.layout>>,
+            ): void => {
+              const chosen =
+                layout.windows.find((win) => win.active && !win.minimized) ??
+                layout.windows.find((win) => !win.minimized);
+              if (!chosen) return;
+              const key = `${chosen.id}|${chosen.app}|${chosen.title}|${chosen.fullScreen}`;
+              if (key === lastKey) return;
+              lastKey = key;
+              const seen: WindowSeen = {
+                id: chosen.id,
+                app: chosen.app,
+                title: chosen.title,
+                pid: chosen.pid,
+                fullScreen: chosen.fullScreen,
+                dialog: chosen.dialog,
+                width: chosen.width,
+                height: chosen.height,
+              };
+              listener(seen);
+            };
+            const initial = await adapter.windowManager.layout();
+            emitActive(initial);
+            const timer = setInterval(() => {
+              if (stopped || polling) return;
+              polling = true;
+              void adapter.windowManager
+                .layout()
+                .then((layout) => {
+                  failures = 0;
+                  if (!stopped) emitActive(layout);
+                })
+                .catch(() => {
+                  failures += 1;
+                  if (!stopped && failures >= 5) {
+                    stopped = true;
+                    clearInterval(timer);
+                    this.watchLost(watch);
+                  }
+                })
+                .finally(() => {
+                  polling = false;
+                });
+            }, 1200);
+            timer.unref();
+            return async () => {
+              stopped = true;
+              clearInterval(timer);
+            };
+          }
+        : async (listener) => {
+            const address = await hands.followWindows(listener, () => this.watchLost(watch));
+            return reportFrontWindow(deps.scriptDir, address);
+          },
       read: (signal) => deps.sight.readFrontWindow(signal),
       ownApps: deps.ownApps,
       skip: () => deps.config.value.sight.watchSkip,
@@ -185,7 +247,7 @@ export class Reach {
       await watch.start();
     } catch (error) {
       this.watch = null;
-      await hands.unfollowWindows();
+      if (!adapter) await hands.unfollowWindows();
       const message = `She cannot keep watch on the screen: ${error instanceof Error ? error.message : String(error)}`;
       deps.onProblem(message);
       throw new Error(message, { cause: error });
@@ -227,6 +289,7 @@ export class Reach {
     }
     if (this.ears) return;
     this.ears = new ShipEars({
+      adapter: this.deps.adapter,
       onProblem: (message) => this.deps.onProblem(`She cannot hear the PC: ${message}`),
     });
     this.ears.start();

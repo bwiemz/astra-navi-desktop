@@ -9,7 +9,7 @@ import {
   runBootstrapTask,
   type BootstrapTask,
 } from "../core/bootstrap.ts";
-import { gameOnCard } from "../core/cardWatch.ts";
+import { gameOnCard as cardGameOnCard } from "../core/cardWatch.ts";
 import { daysAboard } from "../core/clock.ts";
 import type { ConfigStore } from "../core/config.ts";
 import type { LocalEngine } from "../core/engine.ts";
@@ -100,6 +100,7 @@ export interface SettingsIpcDeps {
   relaunchAfterRestore?(): void;
   showAvatarWindow?(): void;
   importModel?(): Promise<void>;
+  detectGameOnCard?(): Promise<string | null>;
   sendToWindow(channel: string, payload?: unknown): void;
   rebuildTrayMenu(): void;
 }
@@ -128,6 +129,8 @@ export interface SettingsController {
 
 export function createSettingsController(deps: SettingsIpcDeps): SettingsController {
   const { config } = deps;
+  const gameOnCard = (): Promise<string | null> =>
+    deps.detectGameOnCard ? deps.detectGameOnCard() : cardGameOnCard();
   let settingsWindow: BrowserWindow | null = null;
   let startAtLogin = false;
   let handsAbilities: SettingsView["hands"] = null;
@@ -592,8 +595,8 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       return;
     }
     const window = new BrowserWindow({
-      width: 680,
-      height: 780,
+      width: 760,
+      height: 800,
       minWidth: 380,
       minHeight: 420,
       show: false,

@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import * as ort from "onnxruntime-node";
 import sharp from "sharp";
 
@@ -470,6 +470,7 @@ interface LoadedOnnxOcr {
   det: ort.InferenceSession;
   rec: ort.InferenceSession;
   dict: string[];
+  recHeight: number;
   engine: "onnx-cuda" | "onnx-cpu";
 }
 
@@ -486,7 +487,7 @@ export interface RecognizeOptions {
 }
 
 export class FastOcr {
-  private readonly ocrDir: string;
+  private readonly cacheDir: string;
   private readonly gpuBusy?: () => boolean;
   private loaded: Promise<LoadedOnnxOcr | null> | null = null;
   private loadedEngine: OcrEngine | null = null;
@@ -494,21 +495,29 @@ export class FastOcr {
   private busy = 0;
 
   constructor(options: FastOcrOptions) {
-    this.ocrDir = join(options.cacheDir, "ocr");
+    this.cacheDir = options.cacheDir;
     this.gpuBusy = options.gpuBusy;
   }
 
-  private hasOnnxModels(): boolean {
-    return (
-      existsSync(join(this.ocrDir, "det.onnx")) &&
-      existsSync(join(this.ocrDir, "rec.onnx")) &&
-      existsSync(join(this.ocrDir, "dict.txt"))
-    );
+  /** Resolves `<cacheDir>/ocr` or sibling `<dirname(cacheDir)>/ocr` (e.g. `models/ocr` next to `models/speech`). */
+  resolveOcrDir(): string | null {
+    const candidates = [join(this.cacheDir, "ocr"), join(dirname(this.cacheDir), "ocr")];
+    for (const dir of candidates) {
+      if (
+        existsSync(join(dir, "det.onnx")) &&
+        existsSync(join(dir, "rec.onnx")) &&
+        existsSync(join(dir, "dict.txt"))
+      ) {
+        return dir;
+      }
+    }
+    return null;
   }
 
-  private async ensureOnnx(): Promise<LoadedOnnxOcr | null> {
-    if (!this.hasOnnxModels()) return null;
-    const wantCpuOnly = this.gpuBusy?.() === true;
+  private async ensureOnnx(forceCpu = false): Promise<LoadedOnnxOcr | null> {
+    const ocrDir = this.resolveOcrDir();
+    if (!ocrDir) return null;
+    const wantCpuOnly = forceCpu || this.gpuBusy?.() === true;
     if (this.loaded && this.loadedEngine === "onnx-cuda" && wantCpuOnly) {
       await this.rest().catch(() => undefined);
     }
@@ -527,9 +536,9 @@ export class FastOcr {
           graphOptimizationLevel: "all",
         };
         const [det, rec, dictRaw] = await Promise.all([
-          ort.InferenceSession.create(join(this.ocrDir, "det.onnx"), sessionOptions),
-          ort.InferenceSession.create(join(this.ocrDir, "rec.onnx"), sessionOptions),
-          readFile(join(this.ocrDir, "dict.txt"), "utf8"),
+          ort.InferenceSession.create(join(ocrDir, "det.onnx"), sessionOptions),
+          ort.InferenceSession.create(join(ocrDir, "rec.onnx"), sessionOptions),
+          readFile(join(ocrDir, "dict.txt"), "utf8"),
         ]);
         const dict = dictRaw
           .split(/\r?\n/)
@@ -538,7 +547,7 @@ export class FastOcr {
         if (dict.at(-1) !== " ") dict.push(" ");
         const engine: "onnx-cuda" | "onnx-cpu" = useCuda ? "onnx-cuda" : "onnx-cpu";
         this.loadedEngine = engine;
-        return { det, rec, dict, engine };
+        return { det, rec, dict, recHeight: REC_HEIGHT, engine };
       })();
       this.loaded = loading;
       loading.catch(() => {
@@ -561,8 +570,8 @@ export class FastOcr {
         return { boxes: [], text: "", engine: "tesseract", ms: Date.now() - startMs };
       }
 
-      if (!options.background) {
-        const onnx = await this.ensureOnnx().catch((error: unknown) => {
+      if (!options.background || process.platform === "win32") {
+        const onnx = await this.ensureOnnx(options.background === true).catch((error: unknown) => {
           console.warn("[ocr] ONNX initialization failed, falling back to Tesseract:", error);
           return null;
         });
@@ -640,19 +649,22 @@ export class FastOcr {
     const recOutputName = onnx.rec.outputNames[0] ?? "softmax_11.tmp_0";
 
     const outBoxes: OcrBox[] = [];
-    for (const detBox of detBoxes.slice(0, 120)) {
-      if (signal?.aborted) break;
-      const cropW = Math.max(2, detBox.right - detBox.left);
-      const cropH = Math.max(2, detBox.bottom - detBox.top);
-      const recW = Math.min(REC_MAX_WIDTH, Math.max(16, Math.round((cropW / cropH) * REC_HEIGHT)));
+    const runRec = async (
+      left: number,
+      top: number,
+      cropW: number,
+      cropH: number,
+      height: number,
+    ) => {
+      const recW = Math.min(REC_MAX_WIDTH, Math.max(16, Math.round((cropW / cropH) * height)));
       const { data: rgbCrop } = await sharp(sourceBuf)
-        .extract({ left: detBox.left, top: detBox.top, width: cropW, height: cropH })
-        .resize(recW, REC_HEIGHT, { fit: "fill" })
+        .extract({ left, top, width: cropW, height: cropH })
+        .resize(recW, height, { fit: "fill" })
         .removeAlpha()
         .raw()
         .toBuffer({ resolveWithObject: true });
 
-      const recPlane = recW * REC_HEIGHT;
+      const recPlane = recW * height;
       const recFloat = new Float32Array(3 * recPlane);
       for (let i = 0; i < recPlane; i += 1) {
         recFloat[i] = (rgbCrop[i * 3] ?? 0) / 127.5 - 1;
@@ -660,9 +672,27 @@ export class FastOcr {
         recFloat[2 * recPlane + i] = (rgbCrop[i * 3 + 2] ?? 0) / 127.5 - 1;
       }
 
-      const recOut = await onnx.rec.run({
-        [recInputName]: new ort.Tensor("float32", recFloat, [1, 3, REC_HEIGHT, recW]),
+      return onnx.rec.run({
+        [recInputName]: new ort.Tensor("float32", recFloat, [1, 3, height, recW]),
       });
+    };
+
+    for (const detBox of detBoxes.slice(0, 120)) {
+      if (signal?.aborted) break;
+      const cropW = Math.max(2, detBox.right - detBox.left);
+      const cropH = Math.max(2, detBox.bottom - detBox.top);
+      let recOut: Awaited<ReturnType<typeof onnx.rec.run>>;
+      try {
+        recOut = await runRec(detBox.left, detBox.top, cropW, cropH, onnx.recHeight);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (onnx.recHeight === 48 && /expected:\s*32\b/i.test(msg)) {
+          onnx.recHeight = 32;
+          recOut = await runRec(detBox.left, detBox.top, cropW, cropH, 32);
+        } else {
+          throw error;
+        }
+      }
       const recTensor = recOut[recOutputName];
       if (!recTensor || !(recTensor.data instanceof Float32Array)) continue;
       const dims = recTensor.dims;

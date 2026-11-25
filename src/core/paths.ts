@@ -160,11 +160,13 @@ export function modelsDir(): string {
 }
 
 /** The Python environment of the full voice, made by `npm run setup -- voice`. */
-export function voiceEnvPython(): string {
+export function voiceEnvPython(platform: NodeJS.Platform = process.platform): string {
   return (
     process.env["ASTRA_NAVI_VOICE_PYTHON"] ??
     process.env["AI_CHAN_VOICE_PYTHON"] ??
-    join(dataDir(), "voice-env", "bin", "python")
+    (platform === "win32"
+      ? join(dataDir(), "voice-env", "Scripts", "python.exe")
+      : join(dataDir(), "voice-env", "bin", "python"))
   );
 }
 

@@ -350,8 +350,12 @@ export class NoticeWatch {
       const starter =
         this.options.start ?? this.options.adapter?.systemNotices.spawnMonitor ?? startMonitor;
       child = starter();
-    } catch {
-      this.giveUp("The program that listens for notifications (busctl) could not be started.");
+    } catch (error) {
+      this.giveUp(
+        this.options.adapter && error instanceof Error
+          ? error.message
+          : "The program that listens for notifications (busctl) could not be started.",
+      );
       return;
     }
     this.child = child;

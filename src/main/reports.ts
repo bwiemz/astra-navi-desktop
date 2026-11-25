@@ -51,6 +51,7 @@ export interface ReportsDeps {
   /** The game her brain was put away for, while that is why she is asleep. */
   brainAsleepFor(): string | null;
   describeBraveUse(): string;
+  hasNativeWinHands?(): boolean;
 }
 
 export interface Reports {
@@ -113,6 +114,8 @@ export function createReports(deps: ReportsDeps): Reports {
       memoryInUse:
         app.getAppMetrics().reduce((sum, metric) => sum + metric.memory.workingSetSize, 0) * 1024,
       reach: (await deps.reach()?.status()) ?? null,
+      platform: process.platform,
+      hasNativeWinHands: deps.hasNativeWinHands?.(),
       canReachTheWeb: async () => {
         await fetchJson("https://en.wikipedia.org/w/rest.php/v1/search/page?q=ship&limit=1", {
           timeoutMs: 5000,

@@ -177,6 +177,7 @@ All pre-release Android 15, Windows Authenticode signing pipeline, packaging, ex
 | `3a404c5` | `fix(packaging): include win-hands.exe in Windows extraResources and require all signing targets` (`electron-builder.yml`, `sign-windows.ps1`, `release.yml`, `releaseScripts.test.ts`) |
 | `6854a67` | `fix(station): prevent long-press text selection and callouts on voice Hold button` (`stationPageStyle.ts`, `stationPageScript.ts`, `stationPageScript.test.ts`) |
 | `1ef6225` | `fix(security): scope release OIDC signing to main/tags and block incognito DOM reads` (`.github/workflows/release.yml`, `browser-bridge/background.js`, `STORE_LISTING.md`, `releaseScripts.test.ts`) |
+| `9b350af` | `fix(windows): wire native Windows adapter, VRAM CPU fallback, ShellHost filter, wide settings layout, and bootstrap setups` (`windows.ts`, `reach.ts`, `selfCheck.ts`, `documents.ts`, `engine.ts`, `cardWatch.ts`, `bootstrap.ts`, `ocr.ts`, `install-host.mjs`, `settings.css`, `loginStart.ts`, `windowsRcFixes.test.ts`) |
 
 
 

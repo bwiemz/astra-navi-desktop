@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { chmodSync, existsSync } from "node:fs";
-import { copyFile, mkdir, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { dataDir, modelsDir, resolveBundledRoot, voiceEnvPython } from "./paths.ts";
 
@@ -44,18 +44,23 @@ export interface BootstrapDeps {
   voicePython?: string;
   appRoot?: string;
   dryRun?: boolean;
-  runCommand?(command: string, args: readonly string[], timeoutMs?: number): Promise<{ stdout: string; stderr: string }>;
+  runCommand?(
+    command: string,
+    args: readonly string[],
+    timeoutMs?: number,
+    extraEnv?: Record<string, string>,
+  ): Promise<{ stdout: string; stderr: string }>;
   fetchBytes?(url: string): Promise<Buffer>;
   onProgress?(progress: BootstrapProgress): void;
 }
 
-const DEFAULT_OCR_FILES = [
+export const DEFAULT_OCR_FILES = [
   {
     name: "det.onnx",
     url:
       process.env["ASTRA_NAVI_OCR_DET_URL"] ??
       process.env["AI_CHAN_OCR_DET_URL"] ??
-      "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/detection/v4/det.onnx",
+      "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/detection/v5/det.onnx",
   },
   {
     name: "rec.onnx",
@@ -77,18 +82,23 @@ async function defaultRun(
   command: string,
   args: readonly string[],
   timeoutMs = 300_000,
+  extraEnv?: Record<string, string>,
 ): Promise<{ stdout: string; stderr: string }> {
   const { stdout, stderr } = await execFileAsync(command, [...args], {
     timeout: timeoutMs,
     encoding: "utf8",
+    windowsHide: true,
+    ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
   });
   return { stdout, stderr };
 }
 
 async function defaultFetchBytes(url: string): Promise<Buffer> {
-  const res = await fetch(url);
+  const res = await fetch(url, { redirect: "follow" });
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
-  return Buffer.from(await res.arrayBuffer());
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.length === 0) throw new Error(`Empty response fetching ${url}`);
+  return bytes;
 }
 
 function desktopExecEscape(path: string): string {
@@ -113,7 +123,7 @@ function resolveEnv(deps: BootstrapDeps) {
           platform === "win32" ? "Scripts" : "bin",
           platform === "win32" ? "python.exe" : "python",
         )
-      : voiceEnvPython());
+      : voiceEnvPython(platform));
   const appRoot = deps.appRoot ?? resolveBundledRoot(resolve(import.meta.dirname, "..", ".."));
   return {
     platform,
@@ -153,7 +163,9 @@ export async function checkBootstrapStatus(deps: BootstrapDeps = {}): Promise<Bo
     existsSync(join(ocrDir, "rec.onnx")) &&
     existsSync(join(ocrDir, "dict.txt"));
   const launcherFile = launcherTargetPath(deps);
-  const launcherReady = existsSync(launcherFile);
+  const launcherReady =
+    existsSync(launcherFile) ||
+    (env.platform === "win32" && existsSync(launcherFile.replace(/\.lnk$/i, ".cmd")));
 
   const installer = (await import("../../browser-bridge/install-host.mjs")) as {
     nativeHostTargets(opts?: {
@@ -263,7 +275,11 @@ async function setupVoice(env: ReturnType<typeof resolveEnv>): Promise<string> {
         { cmd: "python", preArgs: [] },
       ]) {
     try {
-      await env.runCommand(candidate.cmd, [...candidate.preArgs, "--version"], 5000);
+      const probeArgs =
+        env.platform === "win32"
+          ? [...candidate.preArgs, "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"]
+          : [...candidate.preArgs, "--version"];
+      await env.runCommand(candidate.cmd, probeArgs, 5000);
       pyCmd = candidate;
       break;
     } catch {
@@ -272,7 +288,9 @@ async function setupVoice(env: ReturnType<typeof resolveEnv>): Promise<string> {
   }
 
   if (!hasUv && !pyCmd) {
-    throw new Error("Python 3.10+ (or uv) is required to create the full voice environment.");
+    throw new Error(
+      "Optional full Qwen-TTS voice requires Python 3.10+ or uv (install Python from python.org or run 'winget install astral-sh.uv'). Built-in ONNX voice already works without Python.",
+    );
   }
 
   const reqFile = join(env.appRoot, "voice-server", "requirements.txt");
@@ -284,6 +302,9 @@ async function setupVoice(env: ReturnType<typeof resolveEnv>): Promise<string> {
   }
 
   await mkdir(env.dataRoot, { recursive: true, mode: 0o700 });
+  if (!existsSync(env.voicePython) && existsSync(envDir)) {
+    await rm(envDir, { recursive: true, force: true });
+  }
   emit("venv", 45, `Creating virtual environment in ${envDir}...`);
   const pipArgs = hasReqs ? ["-r", reqFile] : ["qwen-tts"];
   if (hasUv) {
@@ -345,7 +366,9 @@ async function setupLauncher(env: ReturnType<typeof resolveEnv>): Promise<string
   if (env.platform === "win32") {
     await mkdir(dirname(target), { recursive: true });
     const exeTarget = process.execPath;
-    const iconIco = join(env.appRoot, "assets", "icon.png");
+    const iconIco = join(env.appRoot, "assets", "icon.ico");
+    const iconPng = join(env.appRoot, "assets", "icon.png");
+    const iconPath = existsSync(iconIco) ? iconIco : iconPng;
     const ps = [
       "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:ASTRA_LNK_OUT);",
       "$s.TargetPath=$env:ASTRA_LNK_EXE;",
@@ -354,16 +377,20 @@ async function setupLauncher(env: ReturnType<typeof resolveEnv>): Promise<string
       `if (Test-Path $env:ASTRA_LNK_ICON) { $s.IconLocation=$env:ASTRA_LNK_ICON };`,
       "$s.Save();",
     ].join(" ");
-    await env.runCommand(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", ps],
-      15_000,
-    ).catch(async () => {
-      // Fallback: write a direct Start Menu .cmd launcher when COM shortcut creation is unavailable in CI/sandbox
-      const fallbackCmd = target.replace(/\.lnk$/i, ".cmd");
-      await writeFile(fallbackCmd, `@echo off\r\nstart "" "${exeTarget}" "${env.appRoot}"\r\n`, "utf8");
-      void iconIco;
-    });
+    await env
+      .runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], 15_000, {
+        ASTRA_LNK_OUT: target,
+        ASTRA_LNK_EXE: exeTarget,
+        ASTRA_LNK_CWD: dirname(exeTarget),
+        ASTRA_LNK_ICON: iconPath,
+      })
+      .catch(async () => {
+        // Fallback: write a direct Start Menu .cmd launcher when COM shortcut creation is unavailable in CI/sandbox
+        const fallbackCmd = target.replace(/\.lnk$/i, ".cmd");
+        const isElectronBinary = /electron(?:\.exe)?$/i.test(basename(exeTarget));
+        const launchArgs = isElectronBinary ? ` "${env.appRoot}"` : "";
+        await writeFile(fallbackCmd, `@echo off\r\nstart "" "${exeTarget}"${launchArgs}\r\n`, "utf8");
+      });
   } else if (env.platform === "darwin") {
     await mkdir(dirname(target), { recursive: true });
     await writeFile(
@@ -412,6 +439,7 @@ async function setupBrowserBridge(env: ReturnType<typeof resolveEnv>): Promise<s
       localAppData?: string;
       dataRoot?: string;
       hostScript?: string;
+      electronRunAsNode?: boolean;
       dryRun?: boolean;
     }): Promise<{ files: string[]; launcherPath: string }>;
   };
@@ -422,6 +450,7 @@ async function setupBrowserBridge(env: ReturnType<typeof resolveEnv>): Promise<s
     localAppData: env.localAppData,
     dataRoot: join(env.dataRoot, "browser-bridge"),
     hostScript: join(env.appRoot, "browser-bridge", "native-host.mjs"),
+    electronRunAsNode: Boolean(process.versions["electron"]),
     dryRun: env.dryRun,
   });
   env.onProgress({

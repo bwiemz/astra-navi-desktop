@@ -155,6 +155,74 @@ export interface FindOptions {
   skipDirs?: readonly string[];
 }
 
+const IGNORED_SEARCH_DIRS = new Set(["node_modules", "target", "__pycache__", ".git"]);
+const MAX_CONTENT_SEARCH_BYTES = 1024 * 1024;
+
+function compileNameMatcher(pattern: string): (fileName: string) => boolean {
+  const clean = pattern.trim().toLowerCase();
+  if (!clean) return () => true;
+  if (!clean.includes("*")) return (fileName) => fileName.toLowerCase().includes(clean);
+  const regexBody = clean
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  const re = new RegExp(`^${regexBody}$`, "i");
+  return (fileName) => re.test(fileName);
+}
+
+/** Pure-Node recursive file finder used when `rg`/`fd` are not installed (e.g. Windows). */
+async function findFilesNative(
+  options: FindOptions,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const namePattern = options.name?.trim();
+  const contentNeedle = options.content?.trim().toLowerCase();
+  const matchesName = namePattern ? compileNameMatcher(namePattern) : () => true;
+  const skipped = (options.skipDirs ?? []).map((dir) => dir.replace(/[\\/]+$/, ""));
+  const out: string[] = [];
+  const queue: string[] = [options.folder];
+
+  while (queue.length > 0 && out.length < CONSIDERED) {
+    if (signal?.aborted) break;
+    const dir = queue.shift();
+    if (!dir) continue;
+    if (skipped.some((skip) => dir === skip || dir.startsWith(`${skip}/`) || dir.startsWith(`${skip}\\`))) {
+      continue;
+    }
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (signal?.aborted || out.length >= CONSIDERED) break;
+      if (entry.name.startsWith(".")) continue;
+      if (entry.isSymbolicLink()) continue;
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_SEARCH_DIRS.has(entry.name)) queue.push(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (!matchesName(entry.name)) continue;
+      if (isSensitivePath(fullPath)) continue;
+      if (contentNeedle) {
+        try {
+          const info = await stat(fullPath);
+          if (!info.isFile() || info.size > MAX_CONTENT_SEARCH_BYTES) continue;
+          const buf = await readFile(fullPath);
+          if (buf.includes(0)) continue; // skip binary files
+          if (!buf.toString("utf8").toLowerCase().includes(contentNeedle)) continue;
+        } catch {
+          continue;
+        }
+      }
+      out.push(fullPath);
+    }
+  }
+  return out;
+}
+
 /**
  * Finds files by name or by content, newest first. Hidden folders and anything that
  * holds passwords or keys are left out.
@@ -175,7 +243,15 @@ export async function findFiles(options: FindOptions, signal?: AbortSignal): Pro
     ];
     if (name) args.push("--iglob", name.includes("*") ? name : `*${name}*`);
     args.push("--", content, options.folder);
-    paths = await lines("rg", args, signal, 20_000);
+    try {
+      paths = await lines("rg", args, signal, 20_000);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("is not installed.")) {
+        paths = await findFilesNative(options, signal);
+      } else {
+        throw error;
+      }
+    }
   } else if (name) {
     const args = [
       "--type",
@@ -192,16 +268,26 @@ export async function findFiles(options: FindOptions, signal?: AbortSignal): Pro
     if (name.includes("*")) args.push("--glob");
     else args.push("--fixed-strings");
     args.push("--", name, options.folder);
-    paths = await lines("fd", args, signal, 20_000);
+    try {
+      paths = await lines("fd", args, signal, 20_000);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("is not installed.")) {
+        paths = await findFilesNative(options, signal);
+      } else {
+        throw error;
+      }
+    }
   } else {
     throw new Error("Say part of the file's name, or words that are in it.");
   }
 
   const found: FoundFile[] = [];
-  const skipped = (options.skipDirs ?? []).map((dir) => dir.replace(/\/+$/, ""));
+  const skipped = (options.skipDirs ?? []).map((dir) => dir.replace(/[\\/]+$/, ""));
   for (const path of paths.slice(0, CONSIDERED)) {
     if (isSensitivePath(path)) continue;
-    if (skipped.some((dir) => path === dir || path.startsWith(`${dir}/`))) continue;
+    if (skipped.some((dir) => path === dir || path.startsWith(`${dir}/`) || path.startsWith(`${dir}\\`))) {
+      continue;
+    }
     try {
       const info = await stat(path);
       if (info.isFile()) found.push({ path, bytes: info.size, modified: info.mtime });
