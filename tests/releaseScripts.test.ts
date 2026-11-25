@@ -43,5 +43,26 @@ describe("release asset, legal, community & workflow completeness", () => {
     const releaseYml = readFileSync(join(ROOT, ".github", "workflows", "release.yml"), "utf8");
     expect(releaseYml).toContain("bwiemz/astra-navi-supporter");
     expect(releaseYml).toContain("SUPPORTER_OVERLAY_TOKEN");
+    expect(releaseYml).toContain("id-token: write");
+    expect(releaseYml).toContain("signing_mode");
+    expect(releaseYml).toContain("--stage unpacked");
+    expect(releaseYml).toContain("--stage installers");
+    expect(releaseYml).toContain("-VerifyOnly");
+
+    const androidManifest = readFileSync(join(ROOT, "phone-app", "AndroidManifest.xml"), "utf8");
+    expect(androidManifest).toContain("android.permission.ACCESS_NETWORK_STATE");
+
+    const extManifest = JSON.parse(readFileSync(join(ROOT, "browser-bridge", "manifest.json"), "utf8")) as {
+      browser_specific_settings?: {
+        gecko?: { data_collection_permissions?: { required?: string[] } };
+      };
+    };
+    expect(extManifest.browser_specific_settings?.gecko?.data_collection_permissions?.required).toContain("none");
+
+    const signPs1 = readFileSync(join(ROOT, "scripts", "sign-windows.ps1"), "utf8");
+    expect(signPs1).toContain("Get-AuthenticodeSignature");
+    expect(signPs1).toContain("TimeStamperCertificate");
+    expect(signPs1).toContain("AZURE_CODE_SIGNING_CERT_PROFILE_PRIVATE");
+    expect(signPs1).toContain("AssertNoThirdPartyResignDir");
   });
 });
