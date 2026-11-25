@@ -14,6 +14,8 @@
   --ink-soft: #5c6187;
   --outline: 2.5px solid var(--ink);
   --drop: 4px 4px 0 var(--ink);
+  --page-max: 1120px;
+  --gutter: clamp(18px, 3vw, 48px);
   font-family: "M PLUS Rounded 1c", "Noto Sans CJK JP", "Noto Sans", system-ui, sans-serif;
   font-weight: 500;
   font-size: 15px;
@@ -28,7 +30,7 @@
 body {
   margin: 0;
   /* Room at the foot for the "Saved" stamp, so it never sits on the last lines. */
-  padding: 22px 26px 58px;
+  padding: 22px var(--gutter) 58px;
   /* Screentone dots, as on a comic page. */
   background:
     radial-gradient(circle, rgb(27 31 59 / 9%) 1px, transparent 1.4px) 0 0 / 11px 11px,
@@ -38,7 +40,9 @@ body {
 .masthead {
   display: grid;
   gap: 2px;
-  margin-bottom: 10px;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto 10px;
 }
 
 /* The way around a long page: a strip that stays at the top, one name per section, and
@@ -48,9 +52,10 @@ body {
   top: 0;
   z-index: 5;
   display: flex;
+  justify-content: safe center;
   gap: 5px;
-  margin: 0 -26px 18px;
-  padding: 9px 26px 10px;
+  margin: 0 calc(-1 * var(--gutter)) 18px;
+  padding: 9px var(--gutter) 10px;
   overflow-x: auto;
   scrollbar-width: none;
   background:
@@ -151,7 +156,9 @@ h1 {
 main {
   display: grid;
   gap: 20px;
-  max-width: 640px;
+  width: 100%;
+  max-width: var(--page-max);
+  margin-inline: auto;
 }
 
 .panel {
@@ -199,7 +206,7 @@ h2 + .row,
   margin: 0;
   color: var(--ink-soft);
   font-size: 13.5px;
-  max-width: 62ch;
+  max-width: 84ch;
 }
 
 .note {
@@ -317,20 +324,39 @@ output {
 }
 
 footer {
-  max-width: 640px;
-  margin-top: 22px;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 22px auto 0;
   font-size: 13px;
   color: var(--ink);
 }
 
+@media (min-width: 860px) {
+  .row:not(.switch) {
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 340px);
+  }
+
+  .row:has(input[type="range"]) {
+    grid-template-columns: minmax(0, 1fr) minmax(200px, 280px) 48px;
+  }
+
+  .wizard-card {
+    width: min(760px, 100%);
+  }
+}
+
 @media (max-width: 520px) {
+  :root {
+    --gutter: 14px;
+  }
+
   body {
-    padding: 16px 14px 58px;
+    padding: 16px var(--gutter) 58px;
   }
 
   .sections {
-    margin: 0 -14px 16px;
-    padding: 8px 14px 9px;
+    margin: 0 calc(-1 * var(--gutter)) 16px;
+    padding: 8px var(--gutter) 9px;
   }
 
   .row {
@@ -383,7 +409,7 @@ footer {
 .signin-state {
   margin: 0 0 4px;
   font-weight: 800;
-  max-width: 62ch;
+  max-width: 84ch;
 }
 
 .signin-state.unset {
@@ -587,7 +613,7 @@ button.quiet {
 
 .trace-body p {
   margin: 0;
-  max-width: 62ch;
+  max-width: 84ch;
 }
 
 .trace-label {
@@ -636,7 +662,7 @@ button.quiet {
 .trace-checks {
   margin: 2px 0 0;
   padding-left: 1.2em;
-  max-width: 62ch;
+  max-width: 84ch;
 }
 
 @media (max-width: 520px) {
@@ -821,8 +847,9 @@ body[data-advanced="false"] .advanced-only {
 }
 
 #safe-mode-banner {
+  width: 100%;
   margin: 0 auto 14px;
-  max-width: 780px;
+  max-width: var(--page-max);
   padding: 12px 16px;
   background: #fff3bf;
   border: 2px solid #9c4221;
@@ -852,8 +879,9 @@ body[data-searching="true"][data-advanced="false"] details.advanced-only {
 }
 
 .quick-setup-bar {
-  max-width: 640px;
-  margin-bottom: 14px;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto 14px;
   padding: 12px 16px;
   background: var(--paper);
   border: var(--outline);
@@ -940,8 +968,9 @@ body[data-searching="true"][data-advanced="false"] details.advanced-only {
 
 /* Non-blocking download progress banner + wizard download card */
 .download-banner {
-  max-width: 640px;
-  margin: 0 0 14px;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto 14px;
   background: #e9f7ff;
 }
 

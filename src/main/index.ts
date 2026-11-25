@@ -14,8 +14,10 @@ import {
 import { takeAwayMessage } from "../core/awayMessage.ts";
 import { Brain } from "../core/brain.ts";
 import { ConfigStore } from "../core/config.ts";
-import { gameOnCard, gpuUtilization } from "../core/cardWatch.ts";
+import { gameOnCard as cardGameOnCard, gpuUtilization } from "../core/cardWatch.ts";
 import { LocalEngine, type EngineStatus } from "../core/engine.ts";
+import { createPlatformAdapter, type PlatformAdapter } from "../core/platform/adapter.ts";
+import { resolveNativeWinHandsBinary } from "../core/platform/windows.ts";
 import { detectEnvironment } from "../core/environment.ts";
 import { Agenda } from "../core/agenda.ts";
 import { briefingLines } from "../core/agendaTools.ts";
@@ -193,7 +195,12 @@ let store: HerStore | null = null;
 let sight: Sight | null = null;
 let research: ResearchDesk | null = null;
 let reach: Reach | null = null;
+let platformAdapter: PlatformAdapter | null = null;
 let fleet: Fleet | null = null;
+
+function gameOnCard(): Promise<string | null> {
+  return platformAdapter ? platformAdapter.gameDetector.activeFullscreenGame() : cardGameOnCard();
+}
 /** True while her language model is unloaded after a quiet spell. */
 let brainAsleep = false;
 /** The game her brain was put away for, while that is why she is asleep. */
@@ -665,6 +672,9 @@ const { runSelfCheck, showSelfCheck, showActions, showLearned } = createReports(
   listening: () => voice.listening(),
   brainAsleepFor: () => brainAsleepFor,
   describeBraveUse: () => settings.describeBraveUse(),
+  hasNativeWinHands: () =>
+    platformAdapter?.platform === "win32" &&
+    Boolean(resolveNativeWinHandsBinary(join(resolveBundledRoot(app.getAppPath()), "hands", "win_hands.ps1"))),
 });
 
 const settings = createSettingsController({
@@ -722,6 +732,7 @@ const settings = createSettingsController({
   },
   showAvatarWindow: () => showWindow(false),
   importModel,
+  detectGameOnCard: gameOnCard,
   sendToWindow,
   rebuildTrayMenu: () => rebuildTrayMenu(),
 });
@@ -907,6 +918,7 @@ function startShipServices(workspace: string): void {
   gameWatch = new GameWatch({
     file: playLogFile(),
     store: store ?? undefined,
+    adapter: platformAdapter ?? undefined,
     onEnded: (game, minutes) => {
       initiative?.gameEnded(game, minutes);
       // What was held for the game goes on.
@@ -1291,6 +1303,8 @@ async function shutDown(): Promise<void> {
     // First, so the window manager's script, the virtual devices and the open port go
     // even if something further down hangs.
     await reach?.dispose();
+    platformAdapter?.dispose?.();
+    platformAdapter = null;
     await searchBudget?.flush();
     // A game still going on is written down as played up to the last look.
     await gameWatch?.stop();
@@ -1381,6 +1395,12 @@ async function main(): Promise<void> {
   }
 
   const environment = await detectEnvironment(workspaceDir());
+  if (process.platform === "win32" || process.platform === "darwin") {
+    platformAdapter = createPlatformAdapter({
+      scriptDir: scratchDir(),
+      winScriptPath: join(resolveBundledRoot(app.getAppPath()), "hands", "win_hands.ps1"),
+    });
+  }
   startShipServices(environment.workspace);
   engine = new LocalEngine({
     modelsDir: modelsDir(),
@@ -1413,9 +1433,11 @@ async function main(): Promise<void> {
   // A crash while she was looking at the screen could have left the picture behind.
   await rm(scratchDir(), { recursive: true, force: true }).catch(() => undefined);
   sight = new Sight(join(modelsDir(), "speech"), scratchDir(), {
+    adapter: platformAdapter ?? undefined,
     gpuBusy: () => (gameWatch?.current()?.game ?? null) !== null,
   });
   noticeWatch = new NoticeWatch({
+    adapter: platformAdapter ?? undefined,
     skip: () => config.value.notices.skip,
     // Her own notifications (a reminder shown while her window is hidden) are not news to her.
     ownNames: [app.getName(), "Astra Navi", "astra-navi", "ai-chan"],
@@ -1432,6 +1454,7 @@ async function main(): Promise<void> {
     scriptDir: scratchDir(),
     modelsCacheDir: join(modelsDir(), "speech"),
     handsScript: join(resolveBundledRoot(app.getAppPath()), "hands", "hands.py"),
+    adapter: platformAdapter ?? undefined,
     ownApps: [app.getName(), "astra-navi-desktop", "ai-chan-desktop"],
     stationDir: stationDir(),
     phoneAppFile: join(resolveBundledRoot(app.getAppPath()), "phone-app", "build", "astra-navi.apk"),
@@ -1532,6 +1555,7 @@ async function main(): Promise<void> {
     desktop: {
       sight,
       hands: reach.hands,
+      adapter: platformAdapter ?? undefined,
       ownApps: [app.getName()],
       scriptDir: scratchDir(),
       ...reach.desktopExtras,

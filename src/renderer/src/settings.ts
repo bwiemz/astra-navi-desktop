@@ -77,7 +77,7 @@ function show(view: SettingsView): void {
   );
   element("voice-note").textContent = view.designedVoicesReady
     ? "Picking one makes her say a line in it."
-    : 'The designed voices are not set up yet: run "npm run setup-voice" once.';
+    : "Built-in voice is active. Optional Qwen-TTS designed voices can be set up in the 60s Setup Wizard.";
   element<HTMLInputElement>("speed").value = String(view.speed);
   element("speed-shown").textContent = `${view.speed.toFixed(2)}×`;
   element<HTMLSelectElement>("speak").value = view.speak;
@@ -114,7 +114,9 @@ function show(view: SettingsView): void {
       : [
           view.hands.controls
             ? "She can read and press programs' buttons and menus."
-            : "She cannot read programs' controls here (python-gobject is missing).",
+            : view.station.platform === "win32"
+              ? "Using Windows screen reading, pointer, and keyboard controls."
+              : "She cannot read programs' controls here (python-gobject is missing).",
           view.hands.input
             ? "She can also click and type like a person."
             : "She cannot click or type here.",

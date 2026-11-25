@@ -1,7 +1,10 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readdir, rm, stat, statfs } from "node:fs/promises";
 import { join } from "node:path";
 import { BRAIN_MODELS } from "./models.ts";
+import { resolveBundledRoot } from "./paths.ts";
+import { resolveNativeWinHandsBinary } from "./platform/windows.ts";
 import type { ReachStatus } from "./reach.ts";
 
 /**
@@ -128,10 +131,20 @@ export async function removeSpareStorage(items: readonly StorageItem[]): Promise
   return removed;
 }
 
-function has(program: string): Promise<boolean> {
+function has(program: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  const probe = platform === "win32" ? "where" : "which";
   return new Promise((resolve) => {
-    execFile("which", [program], { timeout: 3000 }, (error) => resolve(!error));
+    execFile(probe, [program], { timeout: 3000, windowsHide: true }, (error) => resolve(!error));
   });
+}
+
+function hasOnnxOcrModels(modelsRoot: string): boolean {
+  return [join(modelsRoot, "ocr"), join(modelsRoot, "speech", "ocr")].some(
+    (dir) =>
+      existsSync(join(dir, "det.onnx")) &&
+      existsSync(join(dir, "rec.onnx")) &&
+      existsSync(join(dir, "dict.txt")),
+  );
 }
 
 /** One line of the report: a system, whether it is all right, and a few words about it. */
@@ -224,6 +237,10 @@ export interface SelfCheckInputs {
   notices?: NoticeReading;
   /** Her agenda. Left out where she has none. */
   agenda?: AgendaReading;
+  /** Operating system platform (defaults to `process.platform`; overridable in tests). */
+  platform?: NodeJS.Platform;
+  /** Whether the native `win-hands.exe` helper is available on Windows. */
+  hasNativeWinHands?: boolean;
 }
 
 /** Where her agenda stands. Only counts and names: never where a calendar is. */
@@ -293,18 +310,30 @@ export interface SelfCheckResult {
 
 /** Looks over each of her systems and returns the findings. */
 export async function selfCheck(inputs: SelfCheckInputs): Promise<SelfCheckResult> {
+  const plat = inputs.platform ?? process.platform;
+  const isWin = plat === "win32";
   const [spectacle, tesseract, wpctl, busctl, fd, rg, pdftotext, online, storage] =
     await Promise.all([
-      has("spectacle"),
-      has("tesseract"),
-      has("wpctl"),
-      has("busctl"),
-      has("fd"),
-      has("rg"),
-      has("pdftotext"),
+      isWin ? Promise.resolve(false) : has("spectacle", plat),
+      has("tesseract", plat),
+      isWin ? Promise.resolve(false) : has("wpctl", plat),
+      isWin ? Promise.resolve(false) : has("busctl", plat),
+      has("fd", plat),
+      has("rg", plat),
+      has("pdftotext", plat),
       inputs.canReachTheWeb().catch(() => false),
       storageReport(inputs.dataDir, inputs.modelsDir, inputs.brain.fileName),
     ]);
+  const onnxOcr = hasOnnxOcrModels(inputs.modelsDir);
+  const winNative =
+    isWin &&
+    (inputs.hasNativeWinHands ??
+      Boolean(resolveNativeWinHandsBinary(join(resolveBundledRoot(process.cwd()), "hands", "win_hands.ps1"))));
+  const missingFilesTools = [
+    !fd && "fd (find by name)",
+    !rg && "rg (find by content)",
+    !pdftotext && "pdftotext (read PDFs)",
+  ].filter(Boolean);
   const freeBytes = await statfs(inputs.dataDir)
     .then((disk) => disk.bavail * disk.bsize)
     .catch(() => null);
@@ -342,23 +371,47 @@ export async function selfCheck(inputs: SelfCheckInputs): Promise<SelfCheckResul
       ok: true,
       detail: inputs.listening ? "The microphone is on." : "The microphone is off.",
     },
-    {
-      system: "Eyes",
-      ok: spectacle && tesseract,
-      detail:
-        spectacle && tesseract
-          ? "Can take a picture of the screen and read it."
-          : `Cannot look at the screen: ${[!spectacle && "spectacle", !tesseract && "tesseract"].filter(Boolean).join(" and ")} missing.`,
-    },
-    {
-      system: "Hands",
-      ok: !inputs.handsOff && wpctl && busctl,
-      detail: inputs.handsOff
-        ? "Off the controls: she can only talk and look things up."
-        : wpctl && busctl
-          ? "Windows, sound, clipboard and lock are within reach."
-          : `Some desktop controls are missing: ${[!wpctl && "wpctl", !busctl && "busctl"].filter(Boolean).join(", ")}.`,
-    },
+    isWin
+      ? {
+          system: "Eyes",
+          ok: winNative,
+          detail: winNative
+            ? `Can take a picture of the screen and describe it (${
+                onnxOcr
+                  ? "Fast ONNX OCR ready"
+                  : tesseract
+                    ? "Tesseract OCR ready"
+                    : "built-in vision; install Fast ONNX OCR in the Setup Wizard for sharper text reading"
+              }).`
+            : "Cannot look at the screen: native Windows capture helper (win-hands.exe) is missing.",
+        }
+      : {
+          system: "Eyes",
+          ok: spectacle && (tesseract || onnxOcr),
+          detail:
+            spectacle && (tesseract || onnxOcr)
+              ? "Can take a picture of the screen and read it."
+              : `Cannot look at the screen: ${[!spectacle && "spectacle", !(tesseract || onnxOcr) && "tesseract"].filter(Boolean).join(" and ")} missing.`,
+        },
+    isWin
+      ? {
+          system: "Hands",
+          ok: !inputs.handsOff && winNative,
+          detail: inputs.handsOff
+            ? "Off the controls: she can only talk and look things up."
+            : winNative
+              ? "Windows, sound, clipboard and lock are within reach."
+              : "Windows desktop controls helper (win-hands.exe) is missing.",
+        }
+      : {
+          system: "Hands",
+          ok: !inputs.handsOff && wpctl && busctl,
+          detail: inputs.handsOff
+            ? "Off the controls: she can only talk and look things up."
+            : wpctl && busctl
+              ? "Windows, sound, clipboard and lock are within reach."
+              : `Some desktop controls are missing: ${[!wpctl && "wpctl", !busctl && "busctl"].filter(Boolean).join(", ")}.`,
+        },
     {
       system: "Lookups",
       ok: online,
@@ -366,14 +419,23 @@ export async function selfCheck(inputs: SelfCheckInputs): Promise<SelfCheckResul
         ? `Online sources answer${inputs.searchEngine ? `, and a search engine is set up (${inputs.searchEngine})` : "; no search engine of your own is set up, so results come from open sources"}.`
         : "The online sources did not answer. She is working from what she knows.",
     },
-    {
-      system: "Files",
-      ok: fd && rg && pdftotext,
-      detail:
-        fd && rg && pdftotext
-          ? "Can find files and read documents."
-          : `Missing: ${[!fd && "fd (find by name)", !rg && "rg (find by content)", !pdftotext && "pdftotext (read PDFs)"].filter(Boolean).join(", ")}.`,
-    },
+    isWin
+      ? {
+          system: "Files",
+          ok: true,
+          detail:
+            fd && rg && pdftotext
+              ? "Can find files and read documents."
+              : `Can find files by name and content (built-in search; optional tools for faster search/PDFs not installed: ${missingFilesTools.join(", ")}).`,
+        }
+      : {
+          system: "Files",
+          ok: fd && rg && pdftotext,
+          detail:
+            fd && rg && pdftotext
+              ? "Can find files and read documents."
+              : `Missing: ${missingFilesTools.join(", ")}.`,
+        },
     {
       system: "Memory",
       ok: true,
@@ -390,14 +452,20 @@ export async function selfCheck(inputs: SelfCheckInputs): Promise<SelfCheckResul
         ok: hands !== null && (hands.controls || hands.input),
         detail:
           hands === null
-            ? "The helper that works other programs did not start (it needs python3)."
+            ? isWin
+              ? "The Windows desktop helper (win-hands.exe) did not start."
+              : "The helper that works other programs did not start (it needs python3)."
             : [
                 hands.controls
                   ? "Can read and press programs' controls."
-                  : "Cannot read programs' controls (python-gobject and at-spi2-core are needed).",
+                  : isWin
+                    ? hands.controlsProblem || "Using screen reading, pointer, and keyboard controls on Windows."
+                    : "Cannot read programs' controls (python-gobject and at-spi2-core are needed).",
                 hands.input
                   ? "Can move a pointer and press keys."
-                  : "Cannot move a pointer or press keys (no access to /dev/uinput).",
+                  : isWin
+                    ? "Cannot move a pointer or press keys."
+                    : "Cannot move a pointer or press keys (no access to /dev/uinput).",
               ].join(" "),
       },
       {

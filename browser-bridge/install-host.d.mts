@@ -8,6 +8,7 @@ export interface NativeHostTargetOptions {
   dataRoot?: string;
   hostScript?: string;
   nodePath?: string;
+  electronRunAsNode?: boolean;
   extensionOrigin?: string;
   geckoExtensionId?: string;
   dryRun?: boolean;
