@@ -163,4 +163,20 @@ Consolidated and deleted during experimental cleanup to reduce maintenance burde
 - **Packaged 7-Tab Workbench + Supporter 11-Sprite 2D Rig Dogfood:** Shipped plugin definitions via `electron-builder.yml` `extraResources`, added scoped `/avatar2d/` serving (`src/main/modelFiles.ts`) + CSP updates (`workbench.html`) + `Canvas2DAvatarRenderer` preview check (`avatarStudio.ts`), and passed `scripts/test-desktop.sh node scripts/dogfood-workbench-packaged.ts` (`ok: true`, `extensionsTabVerified: true`, `avatar2dCheck.spritesLoaded: 11`, `nonTransparentPixels: 58858`, `activeRafFrames: 30` -> `idleRafFrames: 0`, `0` errors, staged rig cleaned up cleanly).
 - **HDMI PipeWire Calibration & Table Hygiene:** Reconciled `evals/results/BENCHMARKS.md` §13.2 `post-ux-standard` row with §3 (`83%` Tools) and recorded an open-speaker `--sink alsa_output.pci-0000_01_00.1.hdmi-stereo --gain 0.55` sweep (`scripts/run-live-room-calibration.ts`: `aecLag=289.7 ms`, `corr=0.0399`, `coupling=isolated`, `bargeInStatus=ready_isolated`, `ERLE=-0.99 dB`, `direct=4/4`, `liveMic=2/4`, `0` false wakes).
 
+---
+
+## 10. Frozen `main` Surgical Commit Ledger (Zero Wave 1/2/3 Code)
+
+All pre-release Android 15, Windows Authenticode signing pipeline, packaging, extension-store, and phone station UX fixes have been landed surgically on `main` (off `89a1b61`) without pulling in any Wave 1/2/3 feature code:
+
+| `main` Commit | Scope |
+| --- | --- |
+| `6976634` | `fix(android): add ACCESS_NETWORK_STATE and cold-start AlertPollerService schedule for API 35` (`phone-app/AndroidManifest.xml`, `MainActivity.java`) |
+| `cabc184` | `build(release): harden Windows signing pipeline, add Firefox AMO data_collection_permissions, and bump version to 1.0.0-rc.1` |
+| `378e22c` | `fix(release): wrap Get-ChildItem collections for PowerShell StrictMode in sign-windows.ps1` |
+| `3a404c5` | `fix(packaging): include win-hands.exe in Windows extraResources and require all signing targets` (`electron-builder.yml`, `sign-windows.ps1`, `release.yml`, `releaseScripts.test.ts`) |
+| `6854a67` | `fix(station): prevent long-press text selection and callouts on voice Hold button` (`stationPageStyle.ts`, `stationPageScript.ts`, `stationPageScript.test.ts`) |
+| `1ef6225` | `fix(security): scope release OIDC signing to main/tags and block incognito DOM reads` (`.github/workflows/release.yml`, `browser-bridge/background.js`, `STORE_LISTING.md`, `releaseScripts.test.ts`) |
+
+
 

@@ -4,6 +4,17 @@ This report records the measured prompt sizes, semantic tool-routing efficiency,
 
 > All benchmark runs below used `--fitting-tools`, temperature `0.7`, context size `16,384` tokens, thinking budget `256` tokens, and an isolated temporary data directory (`0` side effects on host files). Temporary eval JSON/JSONL outputs and LoRA artifacts live outside git (`.gitignore` excludes `evals/results/*.json` and `*.jsonl`).
 
+## Headline Results (At a Glance)
+
+| Area | Highlight Metric | Reference |
+| --- | --- | --- |
+| **Flagship `9B + Q8_0 KV + Hooks`** (`163` cases) | **`90%` overall** (`+5 pts` vs `85%`), `91%` Tools, `94%` Multi-step, `100%` Reasoning, `-236 MiB` VRAM, `1.92 s` TTFT / `114 tok/s`, **`187.1x`** repeat speedup (`7.156 ms/turn` hook overhead) | [§13.2](#132-combined-live-gpu-matrix-completion-qwen35-9b--q8_0-kv----turn-hooks-exp-standard-q8kv-hooks) |
+| **Injection Safety & Security Gates** | **`100%` Safe under injected text** (`15/15`), **`100%` Nothing leaked**, **`500/500` fuzz gate**, `PASS` static audit, **`6/6` live 9B Vault/Homelab adversarial + `2/2` controls** (`0` unauthorized calls ± `pdftotext`) | [§2](#2-deterministic-security--policy-gates), [§13.2](#132-combined-live-gpu-matrix-completion-qwen35-9b--q8_0-kv----turn-hooks-exp-standard-q8kv-hooks), [§14](#14-post-review-hardening-verification-catch-15-2026-11-24) |
+| **Zero-VRAM CPU Neural Voice** (`Kokoro-82M q8`) | **`0 MiB` VRAM**, **`0.441–0.482` RTF** (faster than real-time on CPU), `1,152–1,311 ms` TTFA, `0 ms` cached voice switch, `463–485 MB` RSS, `20`-switch soak `PASS` | [§10.1](#101-kokoro-onnx-session-leak-fix-early-clause-splitting--live-qwen3-tts-06b-shootout), [§12.4](#124-sustained-runtime-memory--leak-soak-suite-node---expose-gc-scriptssoak-memory-leaksts) |
+| **`v1.0 -> v1.1` Migration Guarantee** | **`5/5` tests passed (`26 ms`)** — frozen v1.0 SQLite `layout 3 -> 4`, SHA-256 audit hash-chain continuation, `.astranavi-backup` restore, mid-migration rollback | [§12.2](#122-frozen-v10---v11-profile--schema-migration-suite-testsupgrademigrationtestts) |
+| **Packaged Wayland Workbench & 2D Rig** | **`7/7` tabs** verified under `kwin_wayland` + CDP, **`11/11` Supporter 2D sprites rendered** (`58,858` non-transparent px), `30 -> 0` idle RAF frames, `0` errors | [§14](#14-post-review-hardening-verification-catch-15-2026-11-24) |
+| **Test & Routing Suite** | **`129/129` files (`2,518/2,518` tests)**, **`71/71` (`100.0%`)** word-only tool routing, **`5/5`** multi-turn scenarios (`42` turns), **`7/7`** plugin evals | [§10.2](#102-tool-routing-100-winhands-size-reduction--live-android-15-api-35-e2e), [§14](#14-post-review-hardening-verification-catch-15-2026-11-24) |
+
 ## Hardware & Model Environment
 
 | Component | Measured / Used |

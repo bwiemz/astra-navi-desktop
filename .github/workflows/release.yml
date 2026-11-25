@@ -97,18 +97,21 @@ jobs:
                          (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_ORG_SLUG)) -and
                          (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_PROJECT_SLUG))
 
+          $isTrustedReleaseRef = ($env:GITHUB_REF -eq "refs/heads/main") -or ($env:GITHUB_REF -like "refs/tags/v*")
           $effective = "unsigned"
           if ($modeInput -eq "dry-run-self-signed") {
             $effective = "self-signed-test"
-          } elseif ($hasAzure) {
+          } elseif (-not $isTrustedReleaseRef -and ($hasAzure -or $hasSignPath -or $hasPfx)) {
+            Write-Host "Signing credentials restricted to refs/heads/main and refs/tags/v*; leaving ref '$env:GITHUB_REF' unsigned (use signing_mode=dry-run-self-signed for branch dry-runs)."
+          } elseif ($isTrustedReleaseRef -and $hasAzure) {
             $effective = "azure"
-          } elseif ($hasSignPath) {
+          } elseif ($isTrustedReleaseRef -and $hasSignPath) {
             $effective = "signpath"
-          } elseif ($hasPfx) {
+          } elseif ($isTrustedReleaseRef -and $hasPfx) {
             $effective = "pfx"
           }
 
-          $useAzureOidc = if ($effective -eq "azure" -and $hasOidc) { "true" } else { "false" }
+          $useAzureOidc = if ($isTrustedReleaseRef -and $effective -eq "azure" -and $hasOidc) { "true" } else { "false" }
           "effective_mode=$effective" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "profile_mode=$profileMode" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "use_azure_oidc=$useAzureOidc" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
@@ -400,18 +403,21 @@ jobs:
                          (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_ORG_SLUG)) -and
                          (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_PROJECT_SLUG))
 
+          $isTrustedReleaseRef = ($env:GITHUB_REF -eq "refs/heads/main") -or ($env:GITHUB_REF -like "refs/tags/v*")
           $effective = "unsigned"
           if ($modeInput -eq "dry-run-self-signed") {
             $effective = "self-signed-test"
-          } elseif ($hasAzure) {
+          } elseif (-not $isTrustedReleaseRef -and ($hasAzure -or $hasSignPath -or $hasPfx)) {
+            Write-Host "Signing credentials restricted to refs/heads/main and refs/tags/v*; leaving ref '$env:GITHUB_REF' unsigned (use signing_mode=dry-run-self-signed for branch dry-runs)."
+          } elseif ($isTrustedReleaseRef -and $hasAzure) {
             $effective = "azure"
-          } elseif ($hasSignPath) {
+          } elseif ($isTrustedReleaseRef -and $hasSignPath) {
             $effective = "signpath"
-          } elseif ($hasPfx) {
+          } elseif ($isTrustedReleaseRef -and $hasPfx) {
             $effective = "pfx"
           }
 
-          $useAzureOidc = if ($effective -eq "azure" -and $hasOidc) { "true" } else { "false" }
+          $useAzureOidc = if ($isTrustedReleaseRef -and $effective -eq "azure" -and $hasOidc) { "true" } else { "false" }
           "effective_mode=$effective" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "profile_mode=$profileMode" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "use_azure_oidc=$useAzureOidc" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append

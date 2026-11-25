@@ -55,11 +55,11 @@ Actual requested keys in `browser-bridge/manifest.json`:
 ---
 
 ## Privacy & Data Handling Questionnaire Answers
-- **Does the extension collect, store, or transmit user data to external servers?** **No.** All data stays on `localhost` via OS Native Messaging stdio pipes (`browser_specific_settings.gecko.data_collection_permissions.required: ["none"]` in `manifest.json`).
+- **Does the extension collect, store, or transmit user data to external servers?** **No.** All data stays on `localhost` via OS Native Messaging stdio pipes (`browser_specific_settings.gecko.data_collection_permissions.required: ["none"]` in `manifest.json`), with zero cookies, zero `storage` API persistence, and explicit refusal of private-browsing (`tab.incognito`) tabs.
 - **Does it use remote code?** **No.** All extension scripts (`background.js`, `content.js`) are bundled statically inside the archive.
 - **Account required?** **No** (no sign-in required for extension review; functionality requires the local open-source **Astra Navi Desktop** native messaging host, source in `browser-bridge/native-host.mjs`).
 
 ## Reviewer Testing Notes
 1. Install **Astra Navi Desktop** (or clone https://github.com/bwiemz/astra-navi-desktop and run `npm run setup-browser-bridge`).
-2. Load the extension in Chrome/Firefox; check extension service worker/background console showing Native Messaging handshake attempts to `app.astranavi.dom_bridge`.
-3. With Astra Navi Desktop open, asking the local assistant to inspect the active browser tab returns clean DOM structure without any external HTTP requests.
+2. Load the extension in Chrome/Firefox; check extension service worker/background console showing Native Messaging handshake attempts strictly to the local stdio host `app.astranavi.dom_bridge` (zero outbound HTTP/WebSocket traffic, zero storage/history persistence, and explicit `tab.incognito` refusal for private-browsing tabs).
+3. With Astra Navi Desktop open, asking the local assistant to inspect the active non-private browser tab returns clean DOM structure over local stdio without any external network requests or reading form/password inputs.
