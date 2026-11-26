@@ -541,6 +541,7 @@ function rescueOffscreenWindow(): void {
 async function forceReleaseVram(): Promise<void> {
   interruptBrain();
   await brain?.whenIdle();
+  await visionSidecar?.dispose().catch(() => undefined);
   await engine?.unload();
   await voice.releaseIdleMemory().catch(() => undefined);
   sendPresence();
@@ -779,8 +780,11 @@ const settings = createSettingsController({
   importModel,
   loadCharacterBundle: loadAndBindCharacterBundle,
   onCharacterChanged: () => {
-    void brain?.refreshInstructions().catch(() => undefined);
+    brain?.markInstructionsDirty();
     rebuildTrayMenu();
+  },
+  onMemoryChanged: () => {
+    brain?.markInstructionsDirty();
   },
   onCharacterReset: async () => {
     await loadModelBundle();
@@ -999,6 +1003,7 @@ function startShipServices(workspace: string): void {
     onStarted: (game) => {
       sendToWindow("stage:reaction", { event: "game-started", detail: game });
       if (config.value.yieldToGames) {
+        void visionSidecar?.dispose().catch(() => undefined);
         void voice.yieldForGame(game).catch(() => undefined);
       }
     },
@@ -1538,14 +1543,35 @@ async function main(): Promise<void> {
   await actions.load();
   // A crash while she was looking at the screen could have left the picture behind.
   await rm(scratchDir(), { recursive: true, force: true }).catch(() => undefined);
+  let cachedTotalVramBytes: number | null = null;
+  try {
+    const hwRaw = JSON.parse(await readFile(join(dataDir(), "hardware-profile.json"), "utf8")) as {
+      profile?: { totalVramBytes?: unknown };
+      totalVramBytes?: unknown;
+    };
+    const vram = hwRaw.profile?.totalVramBytes ?? hwRaw.totalVramBytes;
+    if (typeof vram === "number" && Number.isFinite(vram) && vram > 0) {
+      cachedTotalVramBytes = vram;
+    }
+  } catch {
+    // Not profiled yet; engine will report exact total VRAM once initialized.
+  }
   visionSidecar = new LlamaVisionSidecar({
     modelsDir: modelsDir(),
     brainChoice: () => config.value.brain,
+    totalVramBytes: () => engine?.knownTotalVramBytes() ?? cachedTotalVramBytes,
     enabled: () => config.value.sight.nativeVision,
     binaryPath: () => config.value.sight.llamaServerPath,
     endpoint: () => config.value.sight.visionEndpoint,
     extraBinDirs: [join(dataDir(), "bin")],
     gpuBusy: () => (gameWatch?.current()?.game ?? null) !== null,
+    localModelLoaded: () => engine?.isLocalModelLoaded() ?? false,
+    freeVramBytes: () => engine?.freeVramBytes() ?? Promise.resolve(null),
+    beforeSpawn: async () => {
+      if (!brain?.isTurnActive()) {
+        await engine?.unload();
+      }
+    },
   });
   sight = new Sight(join(modelsDir(), "speech"), scratchDir(), {
     adapter: platformAdapter ?? undefined,

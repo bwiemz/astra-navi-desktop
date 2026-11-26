@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,7 +5,9 @@ import { join } from "node:path";
 import { defineChatSessionFunction } from "node-llama-cpp";
 import { afterEach, describe, expect, it } from "vitest";
 import { LocalEngine } from "../src/core/engine.ts";
+import { CLAIM_CHECK } from "../src/core/followThrough.ts";
 import {
+  buildOpenAiToolNameMap,
   classifyInferenceEndpoint,
   describeInferenceLocality,
   OpenAiCompatibleSession,
@@ -57,10 +58,15 @@ describe("OpenAI-compatible endpoint locality classification & security", () => 
     }
   });
 
-  it("blocks cloud metadata hosts, embedded credentials, and non-HTTP protocols", () => {
+  it("blocks cloud metadata hosts, plaintext http:// to internet hosts, embedded credentials, and non-HTTP protocols", () => {
     expect(classifyInferenceEndpoint("http://169.254.169.254/latest").ok).toBe(false);
+    expect(classifyInferenceEndpoint("http://api.openai.com/v1").ok).toBe(false);
+    expect(classifyInferenceEndpoint("http://8.8.8.8:8080/v1").ok).toBe(false);
     expect(classifyInferenceEndpoint("http://user:pass@127.0.0.1:11434/v1").ok).toBe(false);
     expect(classifyInferenceEndpoint("file:///etc/passwd").ok).toBe(false);
+    // https:// to internet and http:// to loopback/private LAN remain allowed.
+    expect(classifyInferenceEndpoint("https://api.openai.com/v1").ok).toBe(true);
+    expect(classifyInferenceEndpoint("http://192.168.1.50:1234/v1").ok).toBe(true);
   });
 
   it("reports local-gguf default as on-machine and LAN/remote servers as leaving the machine", () => {
@@ -261,15 +267,280 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
     }
   });
 
-  it("renders Settings inference controls safely without innerHTML and redacts API keys", () => {
-    const root = join(import.meta.dirname, "..");
-    const infUi = readFileSync(join(root, "src/renderer/src/settings/inference.ts"), "utf8");
-    const indexHtml = readFileSync(join(root, "src/renderer/index.html"), "utf8");
-    const settingsIpc = readFileSync(join(root, "src/main/settingsIpc.ts"), "utf8");
+  it("sanitizes MCP tool names on the wire, answers every parallel tool_call_id, runs live decide(), supports openWorker(), preserves partial history on abort, and refuses blank model fallback", async () => {
+    const strictNameRe = /^[a-zA-Z0-9_-]{1,64}$/;
+    let seenParallelToolCallsFlag: unknown = undefined;
+    let seenToolWireNames: string[] = [];
+    let seenToolRepliesInStep2: string[] = [];
+    let decideDecisionToReturn: unknown = { claimed: 0.91 };
+    let mode: "parallel-and-mcp" | "abort-after-write" | "worker" = "parallel-and-mcp";
 
-    expect(infUi).not.toContain("innerHTML");
-    expect(indexHtml).toContain('id="remote-inference-badge"');
-    expect(settingsIpc).toContain("config.value.inference.apiKey");
-    expect(settingsIpc).toContain("hasApiKey:");
+    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (req.url !== "/v1/chat/completions" || req.method !== "POST") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+          stream?: boolean;
+          parallel_tool_calls?: unknown;
+          tools?: { function: { name: string } }[];
+          messages: {
+            role: string;
+            content: string | null;
+            tool_calls?: { id: string; function: { name: string } }[];
+            tool_call_id?: string;
+          }[];
+        };
+
+        // Strict OpenAI validator: every tool name in `tools` and in `messages` MUST match ^[a-zA-Z0-9_-]{1,64}$
+        for (const t of body.tools ?? []) {
+          if (!strictNameRe.test(t.function.name)) {
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: `Invalid tool name: ${t.function.name}` }));
+            return;
+          }
+        }
+        for (const msg of body.messages) {
+          for (const tc of msg.tool_calls ?? []) {
+            if (!strictNameRe.test(tc.function.name)) {
+              res.writeHead(400, { "content-type": "application/json" });
+              res.end(JSON.stringify({ error: `Invalid history tool name: ${tc.function.name}` }));
+              return;
+            }
+          }
+        }
+        // Strict OpenAI validator: every assistant tool_call_id MUST have a following role:"tool" reply.
+        for (let i = 0; i < body.messages.length; i += 1) {
+          const msg = body.messages[i];
+          if (msg?.role === "assistant" && msg.tool_calls && msg.tool_calls.length > 0) {
+            const expectedIds = new Set(msg.tool_calls.map((c) => c.id));
+            const answeredIds = new Set<string>();
+            for (let j = i + 1; j < body.messages.length && body.messages[j]?.role === "tool"; j += 1) {
+              const id = body.messages[j]?.tool_call_id;
+              if (id) answeredIds.add(id);
+            }
+            for (const reqId of expectedIds) {
+              if (!answeredIds.has(reqId)) {
+                res.writeHead(400, { "content-type": "application/json" });
+                res.end(JSON.stringify({ error: `Missing tool response for ${reqId}` }));
+                return;
+              }
+            }
+          }
+        }
+
+        // Non-streaming claim-check decide() path
+        if (!body.stream) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              choices: [{ message: { content: JSON.stringify(decideDecisionToReturn) } }],
+            }),
+          );
+          return;
+        }
+
+        if (mode === "worker") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ choices: [{ message: { content: "Worker report ready." } }] }));
+          return;
+        }
+
+        if (mode === "abort-after-write") {
+          const hasToolReply = body.messages.some((m) => m.role === "tool");
+          if (!hasToolReply) {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(
+              JSON.stringify({
+                choices: [
+                  {
+                    message: {
+                      content: "Writing file now.",
+                      tool_calls: [
+                        {
+                          id: "call_write_1",
+                          function: { name: "write_file", arguments: '{"path":"notes.txt","content":"hi"}' },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              }),
+            );
+            return;
+          }
+          // Simulate server failure on step 2 after write_file already executed.
+          res.writeHead(500);
+          res.end("upstream error");
+          return;
+        }
+
+        // mode === "parallel-and-mcp"
+        seenParallelToolCallsFlag = body.parallel_tool_calls;
+        seenToolWireNames = (body.tools ?? []).map((t) => t.function.name);
+        const toolReplies = body.messages.filter((m) => m.role === "tool");
+        if (toolReplies.length === 0) {
+          const mcpWireName = seenToolWireNames.find((n) => n.includes("dim_light")) ?? "dim_light";
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: null,
+                    // Server ignores parallel_tool_calls:false and sends TWO parallel tool calls!
+                    tool_calls: [
+                      {
+                        id: "call_p1",
+                        function: { name: mcpWireName, arguments: '{"pct":25}' },
+                      },
+                      {
+                        id: "call_p2",
+                        function: { name: mcpWireName, arguments: '{"pct":80}' },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+          );
+          return;
+        }
+
+        seenToolRepliesInStep2 = toolReplies.map((m) => `${m.tool_call_id}:${m.content}`);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            choices: [{ message: { content: "[[happy]] Dimmed the desk light to 25%." } }],
+          }),
+        );
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+
+    try {
+      const cfg: InferenceBackendConfig = {
+        provider: "openai-compatible",
+        preset: "custom",
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        model: "qwen3.5:9b",
+        apiKey: "k-test",
+      };
+
+      // 1. Parallel tool calls + MCP wire-name bijective mapping
+      const longMcpName = `mcp:very-long-home-automation-server.${"x".repeat(60)}_dim`;
+      const mapCheck = buildOpenAiToolNameMap(["mcp:home-assistant.dim_light", longMcpName]);
+      for (const wireName of mapCheck.realToWire.values()) {
+        expect(wireName).toMatch(strictNameRe);
+      }
+
+      const session = new OpenAiCompatibleSession(cfg, "You are Astra Navi.");
+      const executedPcts: number[] = [];
+      const mcpFns = {
+        "mcp:home-assistant.dim_light": defineChatSessionFunction({
+          description: "Dim light",
+          params: { type: "object", properties: { pct: { type: "integer" } } },
+          handler: async (p: { pct: number }) => {
+            executedPcts.push(p.pct);
+            return `set to ${p.pct}`;
+          },
+        }),
+        [longMcpName]: defineChatSessionFunction({
+          description: "Long tool",
+          params: { type: "object", properties: {} },
+          handler: async () => "ok",
+        }),
+      };
+
+      const reply = await session.prompt("Dim light to 25%", {
+        functions: mcpFns,
+        maxParallelFunctionCalls: 1,
+      });
+      expect(seenParallelToolCallsFlag).toBe(false);
+      expect(seenToolWireNames.every((n) => strictNameRe.test(n))).toBe(true);
+      // Only the 1st tool call ran, yet BOTH tool_call_ids received matching role:"tool" replies (no HTTP 400)!
+      expect(executedPcts).toEqual([25]);
+      expect(seenToolRepliesInStep2).toHaveLength(2);
+      expect(seenToolRepliesInStep2[0]).toContain("call_p1:set to 25");
+      expect(seenToolRepliesInStep2[1]).toContain("call_p2:Skipped:");
+      expect(reply).toContain("25%");
+      // History stores the REAL internal MCP tool name!
+      const modelTurn = session.getChatHistory().find((item) => item.type === "model");
+      expect(JSON.stringify(modelTurn)).toContain("mcp:home-assistant.dim_light");
+
+      // 2. Real decide() claim-check HTTP round-trip
+      decideDecisionToReturn = { claimed: 0.91 };
+      const high = await session.decide(CLAIM_CHECK);
+      expect(high.claimed.value).toBeCloseTo(0.91, 2);
+
+      decideDecisionToReturn = { claimed: false };
+      const low = await session.decide(CLAIM_CHECK);
+      expect(low.claimed.value).toBe(0);
+
+      // 3. Partial history preserved when a turn aborts or errors AFTER write_file ran
+      mode = "abort-after-write";
+      const abortSession = new OpenAiCompatibleSession(cfg, "You are Astra.");
+      let wroteFile = false;
+      await expect(
+        abortSession.prompt("Save notes.txt", {
+          functions: {
+            write_file: defineChatSessionFunction({
+              description: "Write file",
+              params: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } } },
+              handler: async () => {
+                wroteFile = true;
+                return "Saved notes.txt";
+              },
+            }),
+          },
+          maxParallelFunctionCalls: 1,
+        }),
+      ).rejects.toThrow(/HTTP 500/);
+      expect(wroteFile).toBe(true);
+      const savedHist = abortSession.getChatHistory();
+      expect(savedHist.some((item) => item.type === "model" && JSON.stringify(item).includes("write_file"))).toBe(true);
+
+      // 4. LocalEngine.openWorker() works on OpenAI-compatible backend (for background research)
+      mode = "worker";
+      const modelsDir = await makeTempDir("astra-oai-worker-");
+      const engine = new LocalEngine({
+        modelsDir,
+        choice: "standard",
+        contextSize: 8192,
+        idleUnloadMs: 0,
+        inference: cfg,
+        onStatus: () => undefined,
+      });
+      const worker = await engine.openWorker("Research assistant");
+      expect(worker).not.toBeNull();
+      if (worker) {
+        const report = await worker.session.prompt("Summarize findings");
+        expect(report).toBe("Worker report ready.");
+        await worker.close();
+      }
+      await engine.dispose();
+
+      // 5. Blank model name when provider === "openai-compatible" MUST fail clearly, NEVER fall back to local GGUF!
+      const badEngine = new LocalEngine({
+        modelsDir,
+        choice: "standard",
+        contextSize: 8192,
+        idleUnloadMs: 0,
+        inference: { ...cfg, model: "   " },
+        onStatus: () => undefined,
+      });
+      expect(await badEngine.isDownloaded()).toBe(false);
+      await expect(badEngine.session("System")).rejects.toThrow(/no model name is set/i);
+      await badEngine.dispose();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

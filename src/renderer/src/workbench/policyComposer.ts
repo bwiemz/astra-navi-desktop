@@ -166,9 +166,21 @@ export function renderWorkbenchPolicyPanel(
   actRow.append(previewBtn, createBtn);
   builderCard.append(actRow, previewBox);
 
-  // 2. Experimental options card
+  // 2. Experimental options card (preview-only staging flags — not connected to live chat runtime yet)
   const expCard = el("div", "card");
-  expCard.append(el("h2", undefined, "Experimental Options (Plain-English Feature Switches)"));
+  const expHead = el("div", "row-between");
+  expHead.append(
+    el("h2", undefined, "Experimental Staging Flags (Preview Only)"),
+    el("span", "badge warn", "Not Wired to Chat Yet"),
+  );
+  expCard.append(
+    expHead,
+    el(
+      "p",
+      "muted",
+      "Preview only: toggling these staging flags persists preferences for upcoming experimental modules, but does not activate new tools or change live chat behavior yet.",
+    ),
+  );
   const expGrid = el("div", "option-grid");
   for (const opt of policy.experimentalOptions) {
     const card = el("div", "option-card");

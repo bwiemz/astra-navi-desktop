@@ -212,6 +212,7 @@ export class Stage {
   private readonly layers = new StageLayerManager();
   private readonly vrmaBridge = new VrmaStageBridge();
   private vrmaClipName: string | null = null;
+  private onMotionClipEnded: (() => void) | null = null;
   private activeVmd: {
     name: string;
     handle: ReturnType<MmdModel["createRuntimeAnimation"]>;
@@ -803,11 +804,17 @@ export class Stage {
     }
   }
 
+  /** Registers a callback invoked when a non-looping `.vrma`/`.vmd` motion clip finishes naturally. */
+  setOnMotionClipEnded(listener: (() => void) | null): void {
+    this.onMotionClipEnded = listener;
+  }
+
   /** Stops any active `.vrma` or `.vmd` motion clip and returns smoothly to procedural idle. */
   stopMotionClip(): void {
     if (this.vrmaClipName !== null) {
-      this.vrmaBridge.clearClip(0.25);
+      this.vrmaBridge.clearClip(0.01);
       this.vrmaClipName = null;
+      this.rig?.vrmRig?.resetAllHumanoidBones();
     }
     if (this.activeVmd !== null) {
       const { handle } = this.activeVmd;
@@ -1321,6 +1328,7 @@ export class Stage {
           this.activeVmd.frameTime30 %= this.activeVmd.maxFrameTime30;
         } else {
           this.stopMotionClip();
+          this.onMotionClipEnded?.();
         }
       }
       if (this.activeVmd) {
@@ -1341,6 +1349,8 @@ export class Stage {
       }
       if (!vrmaPose.clipActive && vrmaPose.clipBlendWeight <= 0.001) {
         this.vrmaClipName = null;
+        rig.vrmRig.resetAllHumanoidBones();
+        this.onMotionClipEnded?.();
       }
       this.runStageLayers(dt);
       rig.stepPhysics(dt);

@@ -36,6 +36,8 @@ export interface LoadedVrmRig {
   setExpression(name: string, weight: number): void;
   /** Poses a canonical VRM humanoid bone relative to its rest local orientation. */
   setBoneLocalRotation(boneName: string, rotation: Quaternion): void;
+  /** Resets every humanoid bone (including legs, hands, fingers, and hips position) back to its rest pose. */
+  resetAllHumanoidBones(): void;
   /** Advances spring-bone physics chains (`VRMC_springBone`) by `dt` seconds. */
   stepSpringBones(dt: number): void;
   /** Applies custom outline / specular / rim toon overrides cleanly. */
@@ -443,11 +445,13 @@ export async function loadVrmIntoScene(
     // --- Humanoid bone map & expression presets -----------------------------
     const humanNodes = new Map<string, TransformNode>();
     const humanNodeIndex = new Map<string, number>();
+    const restLocalPositions = new Map<number, Vector3>();
     for (const [boneName, nodeIdx] of Object.entries(doc.humanoidBones)) {
       const tn = nodeTransforms[nodeIdx];
       if (tn) {
         humanNodes.set(boneName, tn);
         humanNodeIndex.set(boneName, nodeIdx);
+        restLocalPositions.set(nodeIdx, tn.position.clone());
       }
     }
 
@@ -474,6 +478,17 @@ export async function loadVrmIntoScene(
       if (nodeIdx === undefined || !tn) return;
       const rest = restLocalRotations.get(nodeIdx) ?? Quaternion.Identity();
       tn.rotationQuaternion = rest.multiply(deltaRotation);
+    };
+
+    const resetAllHumanoidBones = (): void => {
+      for (const [boneName, tn] of humanNodes) {
+        const nodeIdx = humanNodeIndex.get(boneName);
+        if (nodeIdx === undefined) continue;
+        const restRot = restLocalRotations.get(nodeIdx) ?? Quaternion.Identity();
+        tn.rotationQuaternion = restRot.clone();
+        const restPos = restLocalPositions.get(nodeIdx);
+        if (restPos) tn.position.copyFrom(restPos);
+      }
     };
 
     // --- Verlet Spring-Bone physics setup -----------------------------------
@@ -555,6 +570,7 @@ export async function loadVrmIntoScene(
       expressionNames,
       setExpression,
       setBoneLocalRotation,
+      resetAllHumanoidBones,
       stepSpringBones,
       applyShaderPreset,
       dispose,

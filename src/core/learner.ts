@@ -436,6 +436,8 @@ export class Learner {
       .filter(
         (memory) =>
           memory.tags.includes("learned") &&
+          memory.pinned !== true &&
+          memory.source !== "user-edited" &&
           (ABOUT_THE_USER as readonly string[]).includes(memory.kind),
       )
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));

@@ -186,19 +186,28 @@ export class ProceduralAvatarController {
     const dt = clamp(Number.isFinite(rawDtSec) ? rawDtSec : 0, 0, 0.25);
     this.elapsedSec += dt;
 
+    let justAutoStopped = false;
     if (this.activeClip) {
       this.activeClip.timeSec += dt;
       if (!this.activeClip.loop && this.activeClip.timeSec >= this.activeClip.clip.durationSec) {
         this.activeClip.timeSec = this.activeClip.clip.durationSec;
+        this.stopClip(0.25);
+        justAutoStopped = true;
       }
     }
-    if (this.prevClip) {
+    if (this.prevClip && !justAutoStopped) {
       this.prevClip.timeSec += dt;
+      if (!this.prevClip.loop && this.prevClip.timeSec >= this.prevClip.clip.durationSec) {
+        this.prevClip.timeSec = this.prevClip.clip.durationSec;
+      }
     }
 
-    this.fadeElapsedSec += dt;
+    if (!justAutoStopped) {
+      this.fadeElapsedSec += dt;
+    }
     const fadeProgress =
       this.fadeDurationSec > 1e-4 ? clamp(this.fadeElapsedSec / this.fadeDurationSec, 0, 1) : 1;
+    const completedFadeOutClip = fadeProgress >= 1 && this.fadeOutOnly ? this.prevClip : null;
     if (fadeProgress >= 1) {
       this.prevClip = null;
       this.fadeOutOnly = false;
@@ -299,6 +308,25 @@ export class ProceduralAvatarController {
       for (const [bone, qp] of Object.entries(sampleP.humanoidRotations)) {
         const proc = boneRotations[bone] ?? [0, 0, 0, 1];
         boneRotations[bone] = slerpQuat(qp, proc, fadeProgress);
+      }
+      if (sampleP.hipsTranslation) {
+        const w = 1 - fadeProgress;
+        hipsOffset[0] += sampleP.hipsTranslation[0] * w;
+        hipsOffset[1] += sampleP.hipsTranslation[1] * w;
+        hipsOffset[2] += sampleP.hipsTranslation[2] * w;
+      }
+      for (const [k, v] of Object.entries(sampleP.expressions)) {
+        expressions[k] = v * (1 - fadeProgress);
+      }
+    } else if (completedFadeOutClip) {
+      // Explicitly reset every bone (legs, hands, fingers) & expression touched by the clip back to rest pose.
+      for (const bone of Object.keys(completedFadeOutClip.clip.humanoidRotations)) {
+        if (!(bone in boneRotations)) {
+          boneRotations[bone] = [0, 0, 0, 1];
+        }
+      }
+      for (const expr of Object.keys(completedFadeOutClip.clip.expressions)) {
+        expressions[expr] = 0;
       }
     }
 

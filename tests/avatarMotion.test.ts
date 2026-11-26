@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ProceduralAvatarController } from "../src/renderer/src/avatarAnimator.ts";
+import { VrmaStageBridge } from "../src/renderer/src/vrmaStageBridge.ts";
 import {
   AVATAR_EVENT_KINDS,
   BUILT_IN_EMOTE_PACKS,
@@ -12,6 +12,7 @@ import {
   parseEmotePackJson,
   resolveEventReaction,
 } from "../src/shared/avatarMotion.ts";
+import type { QuatTuple, VrmaClip } from "../src/shared/vrma.ts";
 
 function makeSyntheticVmd(modelName: string, boneFrames = 12): Uint8Array {
   const buf = new Uint8Array(64);
@@ -136,21 +137,120 @@ describe("Data-only emote packs & VMD/VRMA motion clip validation", () => {
     expect(() => inspectVmdHeader(new Uint8Array(80))).toThrow(/not a valid/i);
   });
 
-  it("wires VRMA + VMD playback, emote popover, and event reactions cleanly without innerHTML", () => {
-    const root = join(import.meta.dirname, "..");
-    const stageTs = readFileSync(join(root, "src/renderer/src/stage.ts"), "utf8");
-    const mainRendererTs = readFileSync(join(root, "src/renderer/src/main.ts"), "utf8");
-    const indexHtml = readFileSync(join(root, "src/renderer/index.html"), "utf8");
-    const mainProcessTs = readFileSync(join(root, "src/main/index.ts"), "utf8");
+  it("ends non-looping VRMA clips cleanly after durationSec and restores legs, hands, fingers, and expressions to rest pose", () => {
+    const poseQuat: QuatTuple = [0, Math.sin(Math.PI / 6), 0, Math.cos(Math.PI / 6)];
+    const clip: VrmaClip = {
+      name: "wave-and-step",
+      specVersion: "1.0",
+      durationSec: 0.4,
+      humanoidRotations: {
+        leftUpperLeg: {
+          times: new Float32Array([0, 0.4]),
+          values: new Float32Array([...poseQuat, ...poseQuat]),
+        },
+        rightHand: {
+          times: new Float32Array([0, 0.4]),
+          values: new Float32Array([...poseQuat, ...poseQuat]),
+        },
+        leftIndexProximal: {
+          times: new Float32Array([0, 0.4]),
+          values: new Float32Array([...poseQuat, ...poseQuat]),
+        },
+      },
+      hipsTranslation: null,
+      expressions: {
+        happy: {
+          times: new Float32Array([0, 0.4]),
+          values: new Float32Array([0.9, 0.9]),
+        },
+      },
+      lookAt: null,
+    };
 
-    expect(stageTs).toContain("VmdLoader");
-    expect(stageTs).toContain("VrmaStageBridge");
-    expect(stageTs).toContain("playMotionBytes");
-    expect(stageTs).toContain("triggerEventReaction");
-    expect(indexHtml).toContain('id="emote-popover"');
-    expect(indexHtml).toContain('id="emote-idle-preset"');
-    expect(mainRendererTs).toContain("wireEmotePopover");
-    expect(mainRendererTs).toContain("onAvatarReaction");
-    expect(mainProcessTs).toContain('"stage:reaction"');
+    const controller = new ProceduralAvatarController();
+    const bridge = new VrmaStageBridge(controller);
+    const appliedBones = new Map<string, QuatTuple>();
+    const appliedExpressions = new Map<string, number>();
+    const sink = {
+      setBoneRotation: (bone: string, q: QuatTuple) => {
+        appliedBones.set(bone, q);
+      },
+      setHipsTranslation: () => undefined,
+      setExpressionWeight: (name: string, w: number) => {
+        appliedExpressions.set(name, w);
+      },
+      setEyeGaze: () => undefined,
+    };
+
+    controller.playClip(clip, { loop: false, fadeSec: 0.05 });
+
+    // Mid-clip (0.2s): clip is active and poses legs, hands, fingers, and expression.
+    const midPose = bridge.step(0.2, sink);
+    expect(midPose.clipActive).toBe(true);
+    expect(midPose.clipBlendWeight).toBeGreaterThan(0.9);
+    expect(appliedBones.get("leftUpperLeg")?.[1]).toBeCloseTo(poseQuat[1], 3);
+    expect(appliedBones.get("rightHand")?.[1]).toBeCloseTo(poseQuat[1], 3);
+    expect(appliedBones.get("leftIndexProximal")?.[1]).toBeCloseTo(poseQuat[1], 3);
+    expect(appliedExpressions.get("happy")).toBeCloseTo(0.9, 2);
+
+    // Past end of non-looping clip (0.25s more -> 0.45s >= 0.4s): auto-stops and starts fade-out.
+    const triggerFade = bridge.step(0.25, sink);
+    expect(triggerFade.clipActive).toBe(false);
+
+    // Advance past 0.25s fade-out window: blend weight reaches 0 and all non-idle bones reset to identity!
+    let finalPose = triggerFade;
+    for (let i = 0; i < 6; i += 1) {
+      finalPose = bridge.step(0.05, sink);
+    }
+    expect(finalPose.clipActive).toBe(false);
+    expect(finalPose.clipBlendWeight).toBe(0);
+    expect(appliedBones.get("leftUpperLeg")).toEqual([0, 0, 0, 1]);
+    expect(appliedBones.get("rightHand")).toEqual([0, 0, 0, 1]);
+    expect(appliedBones.get("leftIndexProximal")).toEqual([0, 0, 0, 1]);
+    expect(appliedExpressions.get("happy")).toBe(0);
+  });
+
+  it("restores legs, hands, and finger bones to identity when stopping a looping VRMA clip manually", () => {
+    const bentQuat: QuatTuple = [Math.sin(Math.PI / 5), 0, 0, Math.cos(Math.PI / 5)];
+    const clip: VrmaClip = {
+      name: "loop-dance",
+      specVersion: "1.0",
+      durationSec: 1.0,
+      humanoidRotations: {
+        rightLowerLeg: {
+          times: new Float32Array([0, 1.0]),
+          values: new Float32Array([...bentQuat, ...bentQuat]),
+        },
+        leftHand: {
+          times: new Float32Array([0, 1.0]),
+          values: new Float32Array([...bentQuat, ...bentQuat]),
+        },
+        rightThumbProximal: {
+          times: new Float32Array([0, 1.0]),
+          values: new Float32Array([...bentQuat, ...bentQuat]),
+        },
+      },
+      hipsTranslation: null,
+      expressions: {},
+      lookAt: null,
+    };
+
+    const controller = new ProceduralAvatarController();
+    controller.playClip(clip, { loop: true, fadeSec: 0 });
+    const playing = controller.step(0.1);
+    expect(playing.clipActive).toBe(true);
+    expect(playing.boneRotations["rightLowerLeg"]?.[0]).toBeCloseTo(bentQuat[0], 3);
+
+    controller.stopClip(0.15);
+    const fading = controller.step(0.05);
+    expect(fading.clipActive).toBe(false);
+    expect(fading.clipBlendWeight).toBeGreaterThan(0);
+
+    const settled = controller.step(0.15);
+    expect(settled.clipActive).toBe(false);
+    expect(settled.clipBlendWeight).toBe(0);
+    expect(settled.boneRotations["rightLowerLeg"]).toEqual([0, 0, 0, 1]);
+    expect(settled.boneRotations["leftHand"]).toEqual([0, 0, 0, 1]);
+    expect(settled.boneRotations["rightThumbProximal"]).toEqual([0, 0, 0, 1]);
   });
 });

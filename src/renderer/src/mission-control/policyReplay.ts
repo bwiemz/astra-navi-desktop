@@ -180,7 +180,17 @@ export function renderPolicyReplayPanel(
   midGrid.appendChild(orderCard);
 
   const skillCard = el("div", "card");
-  skillCard.appendChild(el("h2", "card-title", `Compiled Skills (${skills.length})`));
+  const skillHead = el("div", "list-row-top");
+  skillHead.appendChild(el("h2", "card-title", `Compiled Skills (${skills.length})`));
+  skillHead.appendChild(el("span", "badge warn", "Preview Only — Not Wired to Chat"));
+  skillCard.appendChild(skillHead);
+  skillCard.appendChild(
+    el(
+      "p",
+      "muted",
+      "Experimental preview: automatic skill compilation and live chat tool injection are not wired into the runtime yet.",
+    ),
+  );
   if (skills.length === 0) {
     skillCard.appendChild(el("p", "muted", "No compiled skills registered."));
   } else {

@@ -1697,6 +1697,10 @@ function wireEmotePopover(): void {
   }
 
   if (stopClipBtn) {
+    stage?.setOnMotionClipEnded(() => {
+      stopClipBtn.hidden = true;
+      if (statusEl) statusEl.textContent = "Clip finished — returned to idle loop.";
+    });
     stopClipBtn.addEventListener("click", () => {
       stage?.stopMotionClip();
       stopClipBtn.hidden = true;

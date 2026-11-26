@@ -1023,7 +1023,11 @@ async function writingSpeed(): Promise<number | null> {
   if (!worker) return null;
   try {
     let first: number | null = null;
-    const before = worker.session.sequence.tokenMeter.usedOutputTokens;
+    const outputTokens = (): number =>
+      "sequence" in worker.session
+        ? worker.session.sequence.tokenMeter.usedOutputTokens
+        : worker.session.meter().output;
+    const before = outputTokens();
     await worker.session.prompt("Write about 200 words on why lighthouses were built.", {
       maxTokens: 320,
       temperature: 0,
@@ -1033,7 +1037,7 @@ async function writingSpeed(): Promise<number | null> {
         first ??= Date.now();
       },
     });
-    const written = worker.session.sequence.tokenMeter.usedOutputTokens - before;
+    const written = outputTokens() - before;
     const seconds = first === null ? 0 : (Date.now() - first) / 1000;
     return seconds > 0 && written > 1 ? (written - 1) / seconds : null;
   } catch {

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
 import { delimiter, dirname, join } from "node:path";
@@ -68,6 +68,10 @@ export interface LlamaVisionSidecarOptions {
   extraBinDirs?: readonly string[];
   /** True while a fullscreen game holds the GPU; forces CPU `-ngl 0` offload. */
   gpuBusy?(): boolean;
+  /** True while the main local `node-llama-cpp` model currently occupies GPU VRAM. */
+  localModelLoaded?(): boolean;
+  /** Optional probe for currently free GPU VRAM bytes to prevent double-copy GPU OOM. */
+  freeVramBytes?(): Promise<number | null>;
   /** Called right before spawning the sidecar so the main engine can optionally yield VRAM. */
   beforeSpawn?(): Promise<void>;
   idleUnloadMs?: number;
@@ -75,6 +79,9 @@ export interface LlamaVisionSidecarOptions {
   requestTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
+
+const MAX_STDERR_TAIL_CHARS = 4096;
+const SIDECAR_VRAM_HEADROOM_BYTES = Math.round(1.5 * 1024 ** 3);
 
 function hasUnsafeBinaryChars(cmd: string): boolean {
   for (let i = 0; i < cmd.length; i += 1) {
@@ -255,6 +262,7 @@ export class LlamaVisionSidecar implements VisionDescriber {
   private runningKey: string | null = null;
   private starting: Promise<{ baseUrl: string; apiKey: string | null } | null> | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
+  private stderrTail = "";
 
   constructor(options: LlamaVisionSidecarOptions) {
     this.opts = options;
@@ -372,12 +380,45 @@ export class LlamaVisionSidecar implements VisionDescriber {
     this.idleTimer.unref();
   }
 
-  private async waitForHealth(baseUrl: string, apiKey: string | null, signal?: AbortSignal): Promise<void> {
+  private async chooseGpuLayers(modelPath: string, mmprojPath: string): Promise<"0" | "99"> {
+    if (this.opts.gpuBusy?.()) return "0";
+    if (this.opts.localModelLoaded?.()) {
+      // Main local node-llama-cpp model is still loaded in VRAM (e.g. mid-turn look_at_screen).
+      // Only offload the sidecar to GPU if free VRAM comfortably fits a second copy + mmproj;
+      // otherwise run the sidecar on CPU/RAM (`-ngl 0`) to prevent double-copy GPU OOM.
+      const freeVram = (await this.opts.freeVramBytes?.().catch(() => null)) ?? null;
+      if (freeVram === null) return "0";
+      let requiredBytes = SIDECAR_VRAM_HEADROOM_BYTES;
+      try {
+        requiredBytes += statSync(modelPath).size + statSync(mmprojPath).size;
+      } catch {
+        return "0";
+      }
+      return freeVram >= requiredBytes ? "99" : "0";
+    }
+    return "99";
+  }
+
+  private async waitForHealth(
+    baseUrl: string,
+    apiKey: string | null,
+    getSpawnError: () => Error | null,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const deadline = Date.now() + (this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
     const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
     while (Date.now() < deadline) {
       if (signal?.aborted) throw new Error("Vision sidecar startup aborted.");
-      if (!this.child) throw new Error("llama-server exited before becoming ready.");
+      const spawnErr = getSpawnError();
+      if (spawnErr) {
+        throw new Error(`Failed to spawn llama-server: ${spawnErr.message}`);
+      }
+      if (!this.child) {
+        const tail = sanitizeVisionOutput(this.stderrTail).slice(-300);
+        throw new Error(
+          `llama-server exited before becoming ready.${tail ? ` (${tail})` : ""}`,
+        );
+      }
       try {
         const res = await this.fetchImpl(`${baseUrl}/health`, {
           headers,
@@ -410,9 +451,13 @@ export class LlamaVisionSidecar implements VisionDescriber {
     const binaryPath = st.binaryPath;
     const mmprojPath = st.mmprojPath;
 
-    const gpuLayers = this.opts.gpuBusy?.() ? "0" : "99";
-    const key = `${binaryPath}\0${st.modelPath}\0${mmprojPath}\0${gpuLayers}`;
-    if (this.child && this.runningBaseUrl && this.runningKey === key) {
+    const initialKeyPrefix = `${binaryPath}\0${st.modelPath}\0${mmprojPath}\0`;
+    if (
+      this.child &&
+      this.runningBaseUrl &&
+      this.runningKey?.startsWith(initialKeyPrefix) &&
+      (!this.opts.gpuBusy?.() || this.runningKey.endsWith("\x000"))
+    ) {
       this.scheduleIdleUnload();
       return { baseUrl: this.runningBaseUrl, apiKey: this.runningApiKey };
     }
@@ -422,6 +467,8 @@ export class LlamaVisionSidecar implements VisionDescriber {
     const boot = (async (): Promise<{ baseUrl: string; apiKey: string | null } | null> => {
       if (this.child) await this.dispose();
       await this.opts.beforeSpawn?.().catch(() => undefined);
+      const gpuLayers = await this.chooseGpuLayers(st.modelPath, mmprojPath);
+      const key = `${binaryPath}\0${st.modelPath}\0${mmprojPath}\0${gpuLayers}`;
       const port = await allocateLoopbackPort();
       const apiKey = randomBytes(24).toString("hex");
       const baseUrl = `http://127.0.0.1:${port}`;
@@ -441,6 +488,8 @@ export class LlamaVisionSidecar implements VisionDescriber {
         "-ngl",
         gpuLayers,
       ];
+      this.stderrTail = "";
+      let spawnError: Error | null = null;
       const child = spawn(binaryPath, args, {
         stdio: ["ignore", "ignore", "pipe"],
         shell: false,
@@ -450,6 +499,21 @@ export class LlamaVisionSidecar implements VisionDescriber {
       this.runningBaseUrl = baseUrl;
       this.runningApiKey = apiKey;
       this.runningKey = key;
+      // Continuously drain stderr into a bounded tail buffer so llama-server never stalls on a full OS pipe.
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_TAIL_CHARS);
+      });
+      // Always catch spawn errors (e.g. ENOENT / EACCES) so a bad binary path never crashes Electron.
+      child.on("error", (err: Error) => {
+        spawnError = err;
+        if (this.child === child) {
+          this.child = null;
+          this.runningBaseUrl = null;
+          this.runningApiKey = null;
+          this.runningKey = null;
+        }
+      });
       child.once("exit", () => {
         if (this.child === child) {
           this.child = null;
@@ -459,7 +523,7 @@ export class LlamaVisionSidecar implements VisionDescriber {
         }
       });
       try {
-        await this.waitForHealth(baseUrl, apiKey, signal);
+        await this.waitForHealth(baseUrl, apiKey, () => spawnError, signal);
         this.scheduleIdleUnload();
         return { baseUrl, apiKey };
       } catch (err) {

@@ -16,16 +16,32 @@ export function renderWorkbenchWave2Panel(
 ): void {
   const wrap = el("div", "stack");
 
+  const previewBanner = el("div", "card stack");
+  const bannerTop = el("div", "row-between");
+  bannerTop.append(
+    el("strong", undefined, "Experimental Preview — Not Connected to Live Chat Yet"),
+    el("span", "badge warn", "Preview Only"),
+  );
+  previewBanner.append(
+    bannerTop,
+    el(
+      "p",
+      "muted",
+      "Vault RAG indexing, LAN Peer Sync, and Wave 2 plugin toggles on this tab are staging previews. None of these give the chat model live tools yet, and LAN sync does not expose an inbound sync listener or persist node keys across restarts. For live external tools today, use Settings → External Tools (MCP).",
+    ),
+  );
+  wrap.append(previewBanner);
+
   // 1. Approved Local Vault RAG Directories
   const vaultCard = el("div", "card stack");
   const vaultHead = el("div", "card-header");
   const vaultTitle = el("div");
   vaultTitle.append(
-    el("h2", undefined, "Local Vault & Codebase RAG Folders"),
+    el("h2", undefined, "Local Vault & Codebase RAG Folders (Preview Only)"),
     el(
       "p",
       "muted",
-      "Opt-in only: approve specific Markdown, code, or PDF folders. Symlink escapes, .env, SSH keys, and broad home directories are always blocked.",
+      "Preview only (not wired to chat tools yet): approve and locally index Markdown, code, or PDF folders. Symlink escapes, .env, SSH keys, and broad home directories are always blocked.",
     ),
   );
   const reindexBtn = el("button", undefined, "Reindex All Approved");
@@ -97,11 +113,11 @@ export function renderWorkbenchWave2Panel(
   const syncHead = el("div", "card-header");
   const syncTitle = el("div");
   syncTitle.append(
-    el("h2", undefined, "Encrypted LAN PeerStateSyncEngine Nodes"),
+    el("h2", undefined, "Encrypted LAN PeerStateSyncEngine Nodes (Preview Only)"),
     el(
       "p",
       "muted",
-      `Local Node: ${snapshot.localNode.nodeId} · Key fp ${snapshot.localNode.publicKeyFingerprint} · ${snapshot.localNode.recordCount} CRDT record(s)`,
+      `Preview only (no inbound /sync listener yet; node identity resets on restart) · Local Node: ${snapshot.localNode.nodeId} · Key fp ${snapshot.localNode.publicKeyFingerprint} · ${snapshot.localNode.recordCount} CRDT record(s)`,
     ),
   );
   syncHead.append(syncTitle);
@@ -190,11 +206,11 @@ export function renderWorkbenchWave2Panel(
   const pluginsHead = el("div", "card-header");
   const pluginsTitle = el("div");
   pluginsTitle.append(
-    el("h2", undefined, "Opt-In Plugins & Declared Permission Scopes"),
+    el("h2", undefined, "Opt-In Plugins & Declared Permission Scopes (Preview Only)"),
     el(
       "p",
       "muted",
-      "Every Wave 2 plugin ships defaultEnabled=false. Inspect declared scopes and readOnly vs confirmation-gated tools before enabling.",
+      "Preview only (manifests & scopes are not wired into live chat tools yet; use Settings → External Tools (MCP) for live tools today). Every Wave 2 plugin ships defaultEnabled=false.",
     ),
   );
   pluginsHead.append(pluginsTitle);

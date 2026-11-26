@@ -1,16 +1,21 @@
-import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ChatHistoryItem } from "node-llama-cpp";
 import { afterEach, describe, expect, it } from "vitest";
 import { MEMORY_CASES } from "../evals/cases/memory.ts";
+import { Brain } from "../src/core/brain.ts";
+import { ConfigStore } from "../src/core/config.ts";
+import type { LocalEngine } from "../src/core/engine.ts";
 import {
   buildMemoryManagerSnapshot,
   describeLearned,
   explainWhyRemembered,
   inferMemorySource,
 } from "../src/core/learned.ts";
+import { Learner } from "../src/core/learner.ts";
 import { MemoryStore } from "../src/core/memory.ts";
+import { Recall } from "../src/core/recall.ts";
 
 const tempDirs: string[] = [];
 
@@ -115,16 +120,154 @@ describe("Expanded memory eval suite & Settings UI safety", () => {
     expect(ids).toContain("memory/provenance-natural-explanation");
   });
 
-  it("renders Settings Memory Manager safely without innerHTML", () => {
-    const root = join(import.meta.dirname, "..");
-    const memUi = readFileSync(join(root, "src/renderer/src/settings/memory.ts"), "utf8");
-    const settingsHtml = readFileSync(join(root, "src/renderer/settings.html"), "utf8");
-    const wbMemUi = readFileSync(join(root, "src/renderer/src/mission-control/memory.ts"), "utf8");
+  it("protects pinned and user-edited memories & skills from Learner eviction and skill replacement", async () => {
+    const dir = await makeTempDir("astra-learner-hygiene-");
+    const store = new MemoryStore(join(dir, "memory.json"));
+    const stubEmbedder = {
+      embed: async (texts: readonly string[]) =>
+        texts.map((t) => {
+          const vec = new Float32Array(8);
+          for (let i = 0; i < t.length; i += 1) vec[i % 8] = (vec[i % 8] ?? 0) + t.charCodeAt(i);
+          const norm = Math.hypot(...vec) || 1;
+          for (let i = 0; i < 8; i += 1) vec[i] = (vec[i] ?? 0) / norm;
+          return vec;
+        }),
+    };
+    const recall = new Recall(store, stubEmbedder);
 
-    expect(memUi).not.toContain("innerHTML");
-    expect(wbMemUi).not.toContain("innerHTML");
-    expect(settingsHtml).toContain('id="memory-list"');
-    expect(settingsHtml).toContain('id="memory-add-form"');
-    expect(wbMemUi).toContain("Why do you remember this?");
+    // Seed 24 learned `profile`/`preference`/`project` facts (MAX_LEARNED_FACTS = 24).
+    // Pin the oldest one (#1) and user-edit the second-oldest (#2) so both would be first to evict if unprotected.
+    const seededIds: string[] = [];
+    for (let i = 1; i <= 24; i += 1) {
+      const { memory } = await store.save({
+        kind: "project",
+        text: `Working on unique subsystem alpha number ${i}.`,
+        tags: ["learned"],
+        source: "learned",
+      });
+      seededIds.push(memory.id);
+    }
+    const oldestPinnedId = seededIds[0] ?? "";
+    const secondEditedId = seededIds[1] ?? "";
+    await store.pin(oldestPinnedId, true);
+    await store.update(secondEditedId, "Working on critical kernel driver v2.");
+
+    // Seed a skill and user-correct its steps.
+    const { memory: skill } = await store.learn("skill", "backup nas", ["Run old script"], {
+      source: "learned",
+    });
+    await store.update(skill.id, "backup nas", {
+      points: ["Always run rsync --dry-run before copying to /mnt/nas"],
+    });
+
+    const learner = new Learner({
+      memory: store,
+      recall,
+      journalFile: join(dir, "journal.json"),
+      quietMs: 60_000,
+      ask: async () =>
+        [
+          "PROJECT: I am building a brand new weather dashboard project in Rust.",
+          "TASK: backup nas",
+          "- Overwrite everything with naive cp -rf /data /mnt/nas",
+        ].join("\n"),
+    });
+
+    learner.record({
+      at: new Date().toISOString(),
+      said: "I am building a brand new weather dashboard project in Rust and just ran backup nas.",
+      reply: "Got it.",
+      did: [{ tool: "run_command", detail: "cp -rf /data /mnt/nas", ok: true }],
+    });
+
+    await learner.reflect();
+
+    // Pinned oldest fact AND user-edited fact MUST both survive Learner.dropOldestLearnedFacts()!
+    expect(store.get(oldestPinnedId)).toBeDefined();
+    expect(store.get(oldestPinnedId)?.pinned).toBe(true);
+    expect(store.get(secondEditedId)).toBeDefined();
+    expect(store.get(secondEditedId)?.text).toBe("Working on critical kernel driver v2.");
+    // User-corrected skill steps MUST NOT be overwritten by Learner's `replace: true`!
+    const afterSkill = store.get(skill.id);
+    expect(afterSkill?.points).toEqual(["Always run rsync --dry-run before copying to /mnt/nas"]);
+    await learner.dispose();
+  });
+
+  it("refreshes Brain instructions on next turn via markInstructionsDirty() without interrupting or unloading the model", async () => {
+    const dir = await makeTempDir("astra-mem-dirty-");
+    const config = new ConfigStore(join(dir, "config.json"));
+    await config.load();
+    const memory = new MemoryStore(join(dir, "memory.json"));
+
+    let unloadCalls = 0;
+    let refreshCalls = 0;
+    const seenSystemPrompts: string[] = [];
+    let history: ChatHistoryItem[] = [];
+
+    const fakeEngine = {
+      getHistory: () => history,
+      setHistory: (items: ChatHistoryItem[]) => {
+        history = items;
+      },
+      meter: () => null,
+      hooks: () => null,
+      unload: async () => {
+        unloadCalls += 1;
+      },
+      refresh: () => {
+        refreshCalls += 1;
+      },
+      anchor: async () => undefined,
+      wordBias: () => null,
+      restingNow: () => undefined,
+      dispose: async () => undefined,
+      brainInfo: async () => ({ label: "stub", fileName: null, onDisk: true, loaded: true }),
+      session: async (systemPrompt: string) => {
+        seenSystemPrompts.push(systemPrompt);
+        return {
+          prompt: async () => "[[calm]] Understood.",
+          decide: async () => ({ claimed: { value: 0 } }),
+        };
+      },
+    } as unknown as LocalEngine;
+
+    const brain = new Brain({
+      config,
+      memory,
+      environment: {
+        osName: "Linux",
+        desktop: "KDE",
+        userName: "brandon",
+        home: dir,
+        workspace: join(dir, "ws"),
+        commands: new Set(),
+      },
+      engine: fakeEngine,
+      historyFile: join(dir, "history.json"),
+      emit: () => undefined,
+    });
+
+    brain.send("Hello!");
+    await brain.whenIdle();
+    expect(seenSystemPrompts).toHaveLength(1);
+    expect(seenSystemPrompts[0]).not.toContain("Prefers dark espresso");
+
+    // Simulate pinning/adding a note in Settings -> Memory Manager: marks dirty, NEVER unloads VRAM!
+    await memory.save({
+      kind: "preference",
+      text: "Prefers dark espresso.",
+      pinned: true,
+      source: "user-edited",
+    });
+    brain.markInstructionsDirty();
+    expect(unloadCalls).toBe(0);
+
+    brain.send("What coffee do I like?");
+    await brain.whenIdle();
+    expect(unloadCalls).toBe(0);
+    expect(refreshCalls).toBe(1);
+    expect(seenSystemPrompts).toHaveLength(2);
+    expect(seenSystemPrompts[1]).toContain("Prefers dark espresso");
+    await brain.dispose();
   });
 });

@@ -296,6 +296,106 @@ describe("LlamaVisionSidecar loopback endpoint & managed process", () => {
     expect(disabled.status().available).toBe(false);
     expect(await disabled.describeImage(await makeTestPng(), { mode: "screen" })).toBeNull();
   });
+
+  it("handles non-executable llama-server paths cleanly without crashing the process", async () => {
+    const dir = await makeTempDir("astra-vis-eacces-");
+    const modelPath = join(dir, "Qwen3.5-9B-Q4_K_M.gguf");
+    const mmprojPath = join(dir, "Qwen3.5-9B-mmproj-F16.gguf");
+    const badBin = join(dir, "llama-server");
+    await writeFile(modelPath, "fake-gguf");
+    await writeFile(mmprojPath, "fake-mmproj");
+    await writeFile(badBin, "not executable", "utf8");
+    await chmod(badBin, 0o644); // intentionally non-executable -> EACCES on spawn
+
+    const sidecar = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => badBin,
+      startupTimeoutMs: 4000,
+    });
+
+    await expect(sidecar.describeImage(await makeTestPng(), { mode: "screen" })).rejects.toThrow(
+      /Failed to spawn llama-server|exited/i,
+    );
+    await sidecar.dispose();
+  });
+
+  it("drains heavy stderr logs (>256 KiB) without stalling, resolves auto VRAM to 9B, invokes beforeSpawn, and avoids double-copy GPU OOM", async () => {
+    const dir = await makeTempDir("astra-vis-stderr-");
+    const modelPath = join(dir, "Qwen3.5-9B-Q4_K_M.gguf");
+    const mmprojPath = join(dir, "Qwen3.5-9B-mmproj-F16.gguf");
+    const argsLog = join(dir, "spawn-args.json");
+    const stubBin = join(dir, "llama-server");
+
+    await writeFile(modelPath, "fake-gguf");
+    await writeFile(mmprojPath, "fake-mmproj");
+
+    const script = [
+      `#!${process.execPath}`,
+      `import { createServer } from "node:http";`,
+      `import { writeFileSync } from "node:fs";`,
+      `const args = process.argv.slice(2);`,
+      `const arg = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };`,
+      `writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify(args));`,
+      // Flood stderr with 256 KiB (4x Linux 64 KiB pipe capacity) before serving requests.
+      `const chunk = "llama_log_line_" + "x".repeat(1000) + "\\n";`,
+      `for (let i = 0; i < 260; i += 1) process.stderr.write(chunk);`,
+      `const host = arg("--host") || "127.0.0.1";`,
+      `const port = Number(arg("--port") || 0);`,
+      `const apiKey = arg("--api-key") || "";`,
+      `const server = createServer((req, res) => {`,
+      `  const auth = req.headers.authorization || "";`,
+      `  if (apiKey && auth !== "Bearer " + apiKey) { res.writeHead(401); res.end("unauthorized"); return; }`,
+      `  if (req.url === "/health") { res.writeHead(200); res.end("ok"); return; }`,
+      `  if (req.url === "/v1/chat/completions") {`,
+      `    req.resume();`,
+      `    req.on("end", () => {`,
+      `      res.writeHead(200, { "content-type": "application/json" });`,
+      `      res.end(JSON.stringify({ choices: [{ message: { content: "Drained stderr cleanly." } }] }));`,
+      `    });`,
+      `    return;`,
+      `  }`,
+      `  res.writeHead(404); res.end();`,
+      `});`,
+      `server.listen(port, host);`,
+      `process.on("SIGTERM", () => server.close(() => process.exit(0)));`,
+    ].join("\n");
+    await writeFile(stubBin, script, "utf8");
+    await chmod(stubBin, 0o755);
+
+    let beforeSpawnCalls = 0;
+    const sidecar = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "auto",
+      // 8 GiB VRAM -> resolves "auto" to 9B (standard), NOT 4B (small)!
+      totalVramBytes: () => 8 * 1024 ** 3,
+      binaryPath: () => stubBin,
+      // Simulate main local 9B model still loaded with only 1 GiB free VRAM -> MUST force -ngl 0!
+      localModelLoaded: () => true,
+      freeVramBytes: async () => 1 * 1024 ** 3,
+      beforeSpawn: async () => {
+        beforeSpawnCalls += 1;
+      },
+      startupTimeoutMs: 10_000,
+      idleUnloadMs: 0,
+    });
+
+    const st = sidecar.status();
+    expect(st.mmprojPath).toBe(mmprojPath);
+    expect(st.modelPath).toBe(modelPath);
+    expect(st.available).toBe(true);
+
+    const out = await sidecar.describeImage(await makeTestPng(), { mode: "screen" });
+    expect(out).toBe("Drained stderr cleanly.");
+    expect(beforeSpawnCalls).toBe(1);
+
+    const { readFile } = await import("node:fs/promises");
+    const spawnedArgs = JSON.parse(await readFile(argsLog, "utf8")) as string[];
+    const nglIndex = spawnedArgs.indexOf("-ngl");
+    expect(spawnedArgs[nglIndex + 1]).toBe("0");
+
+    await sidecar.dispose();
+  });
 });
 
 describe("Sight native vision sidecar preference", () => {

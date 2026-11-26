@@ -311,6 +311,77 @@ function namesAMachine(message: string, machines: readonly string[]): boolean {
   return machines.some((name) => name.length >= 2 && said.includes(name.toLowerCase()));
 }
 
+const MCP_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "by", "call", "can", "do", "does",
+  "external", "for", "from", "get", "has", "have", "how", "i", "in", "info",
+  "information", "instructions", "into", "is", "it", "its", "mcp", "me", "metadata",
+  "my", "not", "of", "on", "only", "or", "output", "please", "run", "server", "set",
+  "that", "the", "their", "this", "to", "tool", "tools", "use", "what", "when",
+  "where", "which", "who", "will", "with", "you", "your",
+]);
+
+/** Maximum MCP tools offered by lexical/description routing on a single turn. */
+export const MAX_ROUTED_MCP_TOOLS = 8;
+
+function splitIdentifierWords(raw: string): string[] {
+  const expanded = raw.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  const matches = expanded.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [];
+  return matches.filter((w) => !MCP_STOP_WORDS.has(w));
+}
+
+function tokenMatches(queryToken: string, targetTokens: ReadonlySet<string>): boolean {
+  if (targetTokens.has(queryToken)) return true;
+  if (queryToken.length >= 4) {
+    // Handle simple English singular/plural stems (e.g. "lights" <-> "light", "issues" <-> "issue").
+    if (queryToken.endsWith("s") && targetTokens.has(queryToken.slice(0, -1))) return true;
+    if (queryToken.endsWith("es") && targetTokens.has(queryToken.slice(0, -2))) return true;
+    if (targetTokens.has(`${queryToken}s`)) return true;
+  }
+  return false;
+}
+
+function scoreMcpToolMatch(
+  queryTokens: readonly string[],
+  rawTextLower: string,
+  fullName: string,
+  description: string | undefined,
+): { score: number; reason: string } {
+  const rest = fullName.slice("mcp:".length);
+  const dotIdx = rest.indexOf(".");
+  const serverId = dotIdx >= 0 ? rest.slice(0, dotIdx) : rest;
+  const toolName = dotIdx >= 0 ? rest.slice(dotIdx + 1) : "";
+
+  const serverTokens = new Set(splitIdentifierWords(serverId));
+  const toolTokens = new Set(splitIdentifierWords(toolName));
+  const descTokens = new Set(splitIdentifierWords(description ?? ""));
+
+  let score = 0;
+  let matchedBy = "mcp description";
+
+  const spacedServer = serverId.replace(/[-_]+/g, " ").toLowerCase();
+  if (
+    (serverId.length >= 3 && rawTextLower.includes(serverId.toLowerCase())) ||
+    (spacedServer.length >= 3 && rawTextLower.includes(spacedServer))
+  ) {
+    score += 4;
+    matchedBy = "mcp server";
+  }
+
+  for (const qt of queryTokens) {
+    if (tokenMatches(qt, toolTokens)) {
+      score += 3;
+      matchedBy = "mcp name";
+    } else if (tokenMatches(qt, serverTokens)) {
+      score += 2;
+      if (matchedBy === "mcp description") matchedBy = "mcp server";
+    } else if (tokenMatches(qt, descTokens)) {
+      score += 1.5;
+    }
+  }
+
+  return { score, reason: matchedBy };
+}
+
 function nearness(a: Float32Array, b: Float32Array): number {
   let sum = 0;
   for (let index = 0; index < a.length && index < b.length; index += 1) {
@@ -328,6 +399,8 @@ export interface RouteOptions {
   before?: string;
   /** What the user's other machines are called. */
   machines?: readonly string[];
+  /** Optional descriptions keyed by tool name, used to route external `mcp:*` tools selectively. */
+  toolDescriptions?: Readonly<Record<string, string>>;
 }
 
 export interface Route {
@@ -392,9 +465,15 @@ export class ToolRouter {
         why[tool] = reason;
       }
     };
-    // A tool with no entry here is one nobody has written hints for: offer it always.
+    const mcpTools: string[] = [];
+    // Built-in tools with no hints are offered unconditionally; external `mcp:*` tools
+    // are routed selectively by server/tool name & description so large servers never flood context.
     for (const tool of available) {
-      if (!CORE_TOOLS.includes(tool) && HINTS[tool] === undefined) add(tool, "no hints");
+      if (tool.startsWith("mcp:")) {
+        mcpTools.push(tool);
+      } else if (!CORE_TOOLS.includes(tool) && HINTS[tool] === undefined) {
+        add(tool, "no hints");
+      }
     }
     const text = `${options.before ? `${options.before}\n` : ""}${message}`;
     for (const [tool, hint] of Object.entries(HINTS)) {
@@ -402,6 +481,26 @@ export class ToolRouter {
     }
     if (namesAMachine(text, options.machines ?? [])) add(TOOLS.remote, "names a machine");
     for (const tool of options.recent ?? []) add(tool, "used just now");
+    if (mcpTools.length > 0 && text.trim().length > 0) {
+      const queryTokens = [...new Set(splitIdentifierWords(text))];
+      const rawLower = text.toLowerCase();
+      const scoredMcp = mcpTools
+        .map((tool) => {
+          const { score, reason } = scoreMcpToolMatch(
+            queryTokens,
+            rawLower,
+            tool,
+            options.toolDescriptions?.[tool],
+          );
+          return { tool, score, reason };
+        })
+        .filter((entry) => entry.score >= 2)
+        .sort((a, b) => b.score - a.score || a.tool.localeCompare(b.tool))
+        .slice(0, MAX_ROUTED_MCP_TOOLS);
+      for (const entry of scoredMcp) {
+        add(entry.tool, entry.reason);
+      }
+    }
     try {
       const known = await this.known();
       if (this.embedder && known.size > 0 && message.trim().length > 0) {
@@ -453,7 +552,12 @@ export class ToolRouter {
     gbnfGrammar: string;
   }> {
     const available = Object.keys(allFunctions);
-    const route = await this.route(message, { ...options, available });
+    const toolDescriptions =
+      options.toolDescriptions ??
+      Object.fromEntries(
+        Object.entries(allFunctions).map(([name, fn]) => [name, fn.description ?? ""]),
+      );
+    const route = await this.route(message, { ...options, available, toolDescriptions });
     const selected = Object.fromEntries(
       route.offered
         .map((name) => [name, allFunctions[name]] as const)

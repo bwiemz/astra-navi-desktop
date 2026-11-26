@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   ChatHistoryItem,
   ChatModelResponse,
@@ -173,6 +174,13 @@ export function classifyInferenceEndpoint(rawUrl: string): EndpointCheckResult {
       ? "private-lan"
       : "remote-internet";
 
+  if (scope === "remote-internet" && url.protocol === "http:") {
+    return {
+      ok: false,
+      reason: `Plaintext http:// is only allowed for localhost or private LAN hosts; use https:// for external server "${host}".`,
+    };
+  }
+
   return {
     ok: true,
     apiBaseUrl,
@@ -237,22 +245,70 @@ export function describeInferenceLocality(config: InferenceBackendConfig): {
   };
 }
 
+const OPENAI_TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+export interface OpenAiToolNameMap {
+  /** Maps internal tool name (e.g. `mcp:home-assistant.dim_light`) -> OpenAI wire name (`^[a-zA-Z0-9_-]{1,64}$`). */
+  realToWire: Map<string, string>;
+  /** Reverse map from OpenAI wire name -> internal tool name. */
+  wireToReal: Map<string, string>;
+}
+
+/** Deterministically maps arbitrary internal tool names (including `mcp:server.tool`) to OpenAI-valid wire names. */
+export function sanitizeOpenAiToolName(realName: string, forceHash = false): string {
+  if (!forceHash && OPENAI_TOOL_NAME_RE.test(realName)) {
+    return realName;
+  }
+  const cleaned = realName.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/^_+/, "") || "tool";
+  const hash = createHash("sha256").update(realName).digest("hex").slice(0, 8);
+  if (!forceHash && cleaned.length <= 64 && OPENAI_TOOL_NAME_RE.test(cleaned)) {
+    return cleaned;
+  }
+  const prefix = cleaned.slice(0, 55);
+  return `${prefix}_${hash}`;
+}
+
+/** Builds a bijective mapping between internal tool names and OpenAI-compliant wire names (`^[a-zA-Z0-9_-]{1,64}$`). */
+export function buildOpenAiToolNameMap(toolNames: Iterable<string>): OpenAiToolNameMap {
+  const realToWire = new Map<string, string>();
+  const wireToReal = new Map<string, string>();
+  for (const realName of toolNames) {
+    if (realToWire.has(realName)) continue;
+    let wire = sanitizeOpenAiToolName(realName, false);
+    if (wireToReal.has(wire)) {
+      wire = sanitizeOpenAiToolName(realName, true);
+    }
+    let attempt = 1;
+    while (wireToReal.has(wire)) {
+      const suffix = `_${attempt}`;
+      wire = `${wire.slice(0, 64 - suffix.length)}${suffix}`;
+      attempt += 1;
+    }
+    realToWire.set(realName, wire);
+    wireToReal.set(wire, realName);
+  }
+  return { realToWire, wireToReal };
+}
+
 /** Converts `node-llama-cpp` function definitions (including MCP tools) into OpenAI `tools`. */
 export function convertFunctionsToOpenAiTools(
   functions: ChatSessionModelFunctions | undefined,
+  nameMap?: OpenAiToolNameMap,
 ): OpenAiToolSpec[] {
   if (!functions) return [];
+  const mapping = nameMap ?? buildOpenAiToolNameMap(Object.keys(functions));
   const out: OpenAiToolSpec[] = [];
-  for (const [name, fn] of Object.entries(functions)) {
+  for (const [realName, fn] of Object.entries(functions)) {
     const rawParams = fn.params as Record<string, unknown> | undefined;
     const parameters: Record<string, unknown> =
       rawParams && typeof rawParams === "object"
         ? rawParams
         : { type: "object", properties: {} };
+    const wireName = mapping.realToWire.get(realName) ?? sanitizeOpenAiToolName(realName);
     out.push({
       type: "function",
       function: {
-        name,
+        name: wireName,
         description: fn.description ?? "",
         parameters,
       },
@@ -264,6 +320,7 @@ export function convertFunctionsToOpenAiTools(
 function historyToWireMessages(
   systemPrompt: string,
   history: readonly ChatHistoryItem[],
+  nameMap?: OpenAiToolNameMap,
 ): WireMessage[] {
   const wire: WireMessage[] = [];
   if (systemPrompt.trim()) {
@@ -286,11 +343,12 @@ function historyToWireMessages(
         } else if (part.type === "functionCall") {
           callCounter += 1;
           const callId = `hist_call_${callCounter}`;
+          const wireName = nameMap?.realToWire.get(part.name) ?? sanitizeOpenAiToolName(part.name);
           toolCalls.push({
             id: callId,
             type: "function",
             function: {
-              name: part.name,
+              name: wireName,
               arguments: JSON.stringify(part.params ?? {}),
             },
           });
@@ -533,8 +591,80 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     };
   }
 
-  async decide(): Promise<{ claimed: { value: number } }> {
-    return { claimed: { value: 0 } };
+  async decide(
+    checkSpec: unknown,
+    extra?: { functions?: ChatSessionModelFunctions; signal?: AbortSignal },
+  ): Promise<{ claimed: { value: number } }> {
+    const lastModel = [...this.history].reverse().find((item) => item.type === "model");
+    const lastReply =
+      lastModel && lastModel.type === "model"
+        ? lastModel.response
+            .filter((part): part is string => typeof part === "string")
+            .join("")
+            .trim()
+        : "";
+    if (!lastReply) return { claimed: { value: 0 } };
+
+    const specRoot =
+      typeof checkSpec === "object" && checkSpec !== null
+        ? (checkSpec as Record<string, unknown>)
+        : {};
+    const claimedSpec =
+      typeof specRoot["claimed"] === "object" && specRoot["claimed"] !== null
+        ? (specRoot["claimed"] as Record<string, unknown>)
+        : {};
+    const instruction =
+      typeof claimedSpec["instruction"] === "string"
+        ? claimedSpec["instruction"]
+        : "Does the assistant's most recent reply claim that an action was carried out or started?";
+    const criteria =
+      typeof claimedSpec["criteria"] === "object" && claimedSpec["criteria"] !== null
+        ? (claimedSpec["criteria"] as Record<string, unknown>)
+        : {};
+    const trueRule = typeof criteria["true"] === "string" ? criteria["true"] : "Claimed an action.";
+    const falseRule =
+      typeof criteria["false"] === "string" ? criteria["false"] : "Only talked, asked, or declined.";
+
+    const res = await this.fetchImpl(`${this.locality.apiBaseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        ...authHeaders(this.config.apiKey),
+      },
+      body: JSON.stringify({
+        model: this.config.model.trim(),
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a strict binary verifier. Reply ONLY with a single JSON object " +
+              '{"claimed": <number between 0.0 and 1.0>} and nothing else. ' +
+              `1.0 means: ${trueRule}. 0.0 means: ${falseRule}.`,
+          },
+          {
+            role: "user",
+            content: `${instruction}\n\nAssistant's most recent reply:\n${lastReply.slice(0, 1600)}`,
+          },
+        ],
+        temperature: 0,
+        max_tokens: 64,
+        stream: false,
+      }),
+      signal: extra?.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`OpenAI-compatible claim-check returned HTTP ${res.status}`);
+    }
+    const data = (await res.json()) as {
+      choices?: { message?: { content?: string | null } }[];
+    };
+    const raw = (data.choices?.[0]?.message?.content ?? "").trim();
+    const score = parseClaimDecisionScore(raw);
+    if (score === null) {
+      throw new Error(`Could not parse claim-check decision from response: "${raw.slice(0, 80)}"`);
+    }
+    return { claimed: { value: score } };
   }
 
   dispose(): void {
@@ -543,78 +673,120 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
 
   async prompt(text: string, options: ChatSessionPromptOptions = {}): Promise<string> {
     const userItem: ChatHistoryItem = { type: "user", text };
-    const wire = historyToWireMessages(this.systemPrompt, [...this.history, userItem]);
-    const tools = convertFunctionsToOpenAiTools(options.functions);
+    const knownToolNames = new Set<string>(Object.keys(options.functions ?? {}));
+    for (const item of this.history) {
+      if (item.type !== "model") continue;
+      for (const part of item.response) {
+        if (typeof part === "object" && part.type === "functionCall") {
+          knownToolNames.add(part.name);
+        }
+      }
+    }
+    const nameMap = buildOpenAiToolNameMap(knownToolNames);
+    const wire = historyToWireMessages(this.systemPrompt, [...this.history, userItem], nameMap);
+    const tools = convertFunctionsToOpenAiTools(options.functions, nameMap);
     const modelResponseParts: ChatModelResponse["response"] = [];
     let finalAssistantText = "";
+    let completedNormally = false;
 
-    for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
-      if (options.signal?.aborted) break;
-
-      const stepResult = await this.streamOneStep(wire, tools, options);
-      if (stepResult.text) {
-        finalAssistantText += stepResult.text;
-        modelResponseParts.push(stepResult.text);
-      }
-
-      if (stepResult.toolCalls.length === 0 || !options.functions) {
-        break;
-      }
-
-      wire.push({
-        role: "assistant",
-        content: stepResult.text || null,
-        tool_calls: stepResult.toolCalls.map((call) => ({
-          id: call.id,
-          type: "function",
-          function: { name: call.name, arguments: call.argumentsJson },
-        })),
-      });
-
-      const limit = options.maxParallelFunctionCalls ?? stepResult.toolCalls.length;
-      const callsToRun = stepResult.toolCalls.slice(0, Math.max(1, limit));
-
-      for (const call of callsToRun) {
+    try {
+      for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
         if (options.signal?.aborted) break;
-        const fn = options.functions[call.name];
-        let parsedParams: Record<string, unknown> = {};
-        try {
-          const parsed = JSON.parse(call.argumentsJson || "{}") as unknown;
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            parsedParams = parsed as Record<string, unknown>;
-          }
-        } catch {
-          parsedParams = {};
+
+        const stepResult = await this.streamOneStep(wire, tools, options, nameMap);
+        if (stepResult.text) {
+          finalAssistantText += stepResult.text;
+          modelResponseParts.push(stepResult.text);
         }
 
-        let resultText: string;
-        if (!fn) {
-          resultText = `That failed: unknown tool "${call.name}".`;
-        } else {
-          try {
-            const rawResult = await fn.handler(parsedParams as never);
-            resultText =
-              typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult ?? "");
-          } catch (error) {
-            resultText = `That failed: ${error instanceof Error ? error.message : String(error)}`;
-          }
+        if (stepResult.toolCalls.length === 0 || !options.functions) {
+          break;
         }
 
-        modelResponseParts.push({
-          type: "functionCall",
-          name: call.name,
-          params: parsedParams,
-          result: resultText,
-        });
         wire.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: resultText,
+          role: "assistant",
+          content: stepResult.text || null,
+          tool_calls: stepResult.toolCalls.map((call) => ({
+            id: call.id,
+            type: "function",
+            function: { name: call.name, arguments: call.argumentsJson },
+          })),
         });
+
+        const limit = Math.max(
+          1,
+          options.maxParallelFunctionCalls ?? stepResult.toolCalls.length,
+        );
+
+        // Emit a matching `role: "tool"` reply for EVERY `tool_call_id` so strict OpenAI servers never HTTP 400.
+        for (let idx = 0; idx < stepResult.toolCalls.length; idx += 1) {
+          const call = stepResult.toolCalls[idx];
+          if (!call) continue;
+          const realName = nameMap.wireToReal.get(call.name) ?? call.name;
+
+          if (options.signal?.aborted) {
+            wire.push({
+              role: "tool",
+              tool_call_id: call.id,
+              content: "Cancelled before running.",
+            });
+            continue;
+          }
+
+          if (idx >= limit) {
+            wire.push({
+              role: "tool",
+              tool_call_id: call.id,
+              content: "Skipped: execute one tool call at a time and wait for its result before calling another.",
+            });
+            continue;
+          }
+
+          const fn = options.functions[realName];
+          let parsedParams: Record<string, unknown> = {};
+          try {
+            const parsed = JSON.parse(call.argumentsJson || "{}") as unknown;
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              parsedParams = parsed as Record<string, unknown>;
+            }
+          } catch {
+            parsedParams = {};
+          }
+
+          let resultText: string;
+          if (!fn) {
+            resultText = `That failed: unknown tool "${realName}".`;
+          } else {
+            try {
+              const rawResult = await fn.handler(parsedParams as never);
+              resultText =
+                typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult ?? "");
+            } catch (error) {
+              resultText = `That failed: ${error instanceof Error ? error.message : String(error)}`;
+            }
+          }
+
+          modelResponseParts.push({
+            type: "functionCall",
+            name: realName,
+            params: parsedParams,
+            result: resultText,
+          });
+          wire.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: resultText,
+          });
+        }
+      }
+      completedNormally = true;
+    } finally {
+      // Preserve executed tool calls (e.g. write_file) and streamed text even on abort or mid-turn error.
+      if (completedNormally || modelResponseParts.length > 0) {
+        this.history.push(userItem, { type: "model", response: modelResponseParts });
       }
     }
 
-    this.history.push(userItem, { type: "model", response: modelResponseParts });
     return finalAssistantText;
   }
 
@@ -622,6 +794,7 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     messages: readonly WireMessage[],
     tools: readonly OpenAiToolSpec[],
     options: ChatSessionPromptOptions,
+    nameMap: OpenAiToolNameMap,
   ): Promise<{
     text: string;
     toolCalls: { id: string; name: string; argumentsJson: string }[];
@@ -635,7 +808,12 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     };
     if (options.topP !== undefined) bodyPayload["top_p"] = options.topP;
     if (options.seed !== undefined) bodyPayload["seed"] = options.seed;
-    if (tools.length > 0) bodyPayload["tools"] = tools;
+    if (tools.length > 0) {
+      bodyPayload["tools"] = tools;
+      if (options.maxParallelFunctionCalls === 1) {
+        bodyPayload["parallel_tool_calls"] = false;
+      }
+    }
 
     const encodedBody = JSON.stringify(bodyPayload);
     this.inputTokens += approxTokens(encodedBody);
@@ -734,7 +912,7 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
           acc.args += entry.function.arguments;
           options.onFunctionCallParamsChunk?.({
             callIndex: idx,
-            functionName: acc.name,
+            functionName: nameMap.wireToReal.get(acc.name) ?? acc.name,
             paramsChunk: entry.function.arguments,
             done: false,
           });
@@ -771,4 +949,40 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
 
     return { text: fullText, toolCalls };
   }
+}
+
+/** Parses `{"claimed": 0..1}` or `{"claimed": true|false}` from an OpenAI-compatible claim-check reply. */
+export function parseClaimDecisionScore(raw: string): number | null {
+  const cleaned = raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  const candidates: string[] = [cleaned];
+  const braceMatch = /\{[\s\S]*\}/.exec(cleaned);
+  if (braceMatch) candidates.push(braceMatch[0]);
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        const val = (parsed as Record<string, unknown>)["claimed"];
+        if (typeof val === "boolean") return val ? 1 : 0;
+        if (typeof val === "number" && Number.isFinite(val)) {
+          return Math.max(0, Math.min(1, val));
+        }
+        if (typeof val === "string") {
+          const num = Number(val);
+          if (Number.isFinite(num)) return Math.max(0, Math.min(1, num));
+          if (/^true|yes$/i.test(val.trim())) return 1;
+          if (/^false|no$/i.test(val.trim())) return 0;
+        }
+      }
+    } catch {
+      // Try next fallback below.
+    }
+  }
+
+  if (/^(?:true|yes)\b/i.test(cleaned)) return 1;
+  if (/^(?:false|no)\b/i.test(cleaned)) return 0;
+  return null;
 }

@@ -266,6 +266,22 @@ export function compileJsonSchemaToGbnf(schema: unknown, rootRule = "root"): str
     }
 
     const typ = clean["type"];
+    if (Array.isArray(typ) && typ.length > 0) {
+      const alts: string[] = [];
+      for (const t of typ) {
+        if (t === "string") alts.push("json-string");
+        else if (t === "integer") alts.push("json-integer");
+        else if (t === "number") alts.push("json-number");
+        else if (t === "boolean") alts.push("json-boolean");
+        else if (t === "null") alts.push("json-null");
+        else if (t === "array") alts.push("json-array");
+        else if (t === "object") alts.push("json-object");
+      }
+      if (alts.length > 0) {
+        rules.set(id, [...new Set(alts)].join(" | "));
+        return id;
+      }
+    }
     if (typ === "string") return "json-string";
     if (typ === "integer") return "json-integer";
     if (typ === "number") return "json-number";

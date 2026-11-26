@@ -122,11 +122,38 @@ export interface SettingsIpcDeps {
   importModel?(): Promise<void>;
   loadCharacterBundle?(bundlePath: string): Promise<{ name: string }>;
   onCharacterChanged?(): void;
+  /** Lightweight instruction refresh after memory edits (must NOT interrupt or unload VRAM). */
+  onMemoryChanged?(): void;
   onCharacterReset?(): Promise<void>;
   onInferenceChanged?(): Promise<void>;
+  /** Optional fetch override used by `settings:test-inference` (for deterministic testing). */
+  probeFetch?: typeof fetch;
   detectGameOnCard?(): Promise<string | null>;
   sendToWindow(channel: string, payload?: unknown): void;
   rebuildTrayMenu(): void;
+}
+
+/**
+ * Resolves the API key to send for `settings:test-inference`: uses the typed key if given,
+ * and ONLY reuses the saved key when the probed URL shares the exact same `origin`
+ * (`scheme + host + port`) as the saved inference server URL.
+ */
+export function resolveProbeApiKey(
+  targetBaseUrl: string,
+  typedKey: string,
+  savedBaseUrl: string,
+  savedApiKey: string,
+): string {
+  const cleanTyped = typedKey.trim();
+  if (cleanTyped) return cleanTyped;
+  if (!savedApiKey.trim()) return "";
+  try {
+    const targetOrigin = new URL(targetBaseUrl.trim()).origin;
+    const savedOrigin = new URL(savedBaseUrl.trim()).origin;
+    return targetOrigin === savedOrigin ? savedApiKey : "";
+  } catch {
+    return "";
+  }
 }
 
 export interface SettingsController {
@@ -1307,7 +1334,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
             source: "user-edited",
             reason: "Added directly by you in Settings → Memory.",
           });
-          deps.onCharacterChanged?.();
+          deps.onMemoryChanged?.();
           return { ok: true, snapshot: memorySnapshotNow(), view: settingsView() };
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -1336,7 +1363,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         try {
           const updated = await store.update(id, text, { kind, points });
           if (!updated) return { ok: false, error: `No memory found with ID "${id}".` };
-          deps.onCharacterChanged?.();
+          deps.onMemoryChanged?.();
           return { ok: true, snapshot: memorySnapshotNow(), view: settingsView() };
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -1360,7 +1387,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         if (!id) return { ok: false, error: "Memory ID is required." };
         const updated = await store.pin(id, pinned);
         if (!updated) return { ok: false, error: `No memory found with ID "${id}".` };
-        deps.onCharacterChanged?.();
+        deps.onMemoryChanged?.();
         return { ok: true, snapshot: memorySnapshotNow(), view: settingsView() };
       },
     );
@@ -1378,7 +1405,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         if (typeof id !== "string" || !id.trim()) return { ok: false, error: "Memory ID is required." };
         const removed = await store.forget(id.trim());
         if (!removed) return { ok: false, error: `No memory found with ID "${id}".` };
-        deps.onCharacterChanged?.();
+        deps.onMemoryChanged?.();
         return { ok: true, snapshot: memorySnapshotNow(), view: settingsView() };
       },
     );
@@ -1392,8 +1419,16 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
             ? rec["baseUrl"].trim()
             : config.value.inference.baseUrl;
         const typedKey = typeof rec["apiKey"] === "string" ? rec["apiKey"].trim() : "";
-        const apiKey = typedKey || config.value.inference.apiKey;
-        return probeOpenAiModels({ baseUrl, apiKey });
+        const apiKey = resolveProbeApiKey(
+          baseUrl,
+          typedKey,
+          config.value.inference.baseUrl,
+          config.value.inference.apiKey,
+        );
+        return probeOpenAiModels(
+          { baseUrl, apiKey },
+          deps.probeFetch ? { fetchImpl: deps.probeFetch } : {},
+        );
       },
     );
     ipcMain.handle("settings:export-profile", async (event): Promise<ProfileBackupActionResult> => {

@@ -312,6 +312,12 @@ export class Brain {
    * are checked with the user. Cleared only by starting a new conversation.
    */
   private readOutsideText = false;
+  /**
+   * True once any external MCP tool schema (with server-supplied parameter descriptions)
+   * has been placed into the model's prompt in this conversation. Taints built-in tools
+   * without blocking a server's own first `readOnlyAutoAllow` call.
+   */
+  private mcpSchemaExposed = false;
   private idleWaiters: (() => void)[] = [];
   private historyLoaded = false;
   /** Counts replies begun, so work done between replies can tell that one has started since. */
@@ -336,6 +342,8 @@ export class Brain {
   private pickedFor: Record<string, string> | null = null;
   /** The abilities her current instructions were written for; null before the first reply. */
   private instructedFor: string | null = null;
+  /** Set when memory/persona changed outside a turn so the next turn refreshes instructions in-place. */
+  private instructionsDirty = false;
   private disposed = false;
   private saveChain: Promise<void> = Promise.resolve();
   /** Tracks the latest completed user turn for "Forget Last Turn" / "Edit & Resend". */
@@ -495,12 +503,28 @@ export class Brain {
     this.clock.reset();
     this.deps.screen?.reset();
     this.readOutsideText = false;
+    this.mcpSchemaExposed = false;
+    this.instructionsDirty = false;
     this.deps.engine.setHistory([]);
     // Unloading makes the next message start from a fresh system prompt with current memories.
     // Her test suite starts over hundreds of times and keeps the model in memory instead.
     if (options.keepLoaded) this.deps.engine.renew();
     else await this.deps.engine.unload();
     await this.saveHistory();
+  }
+
+  /** True while a chat turn is actively running. */
+  isTurnActive(): boolean {
+    return this.turnActive;
+  }
+
+  /**
+   * Marks the system prompt dirty (e.g. after editing/pinning a memory note or changing
+   * character fields) so the next reply picks up fresh instructions via `engine.refresh()`
+   * without interrupting the current reply or unloading the model from VRAM.
+   */
+  markInstructionsDirty(): void {
+    this.instructionsDirty = true;
   }
 
   /**
@@ -578,10 +602,14 @@ export class Brain {
     const wanted = deps.lab?.fittingTools ?? deps.config.value.fittingTools;
     if (!wanted || message.event || Object.keys(all).length === 0) return all;
     this.router ??= new ToolRouter(deps.recall?.embedder ?? null);
+    const toolDescriptions = Object.fromEntries(
+      Object.entries(all).map(([name, fn]) => [name, fn.description ?? ""]),
+    );
     const route = await this.router.route(message.text, {
       available: Object.keys(all),
       recent: this.toolsOfLate.flat(),
       machines: deps.fleet?.machines().map((machine) => machine.name) ?? [],
+      toolDescriptions,
       ...(this.saidBefore === undefined ? {} : { before: this.saidBefore }),
     });
     const offered = new Set(route.offered);
@@ -589,7 +617,7 @@ export class Brain {
     // because it was on offer a moment ago, or because it goes with another, would
     // otherwise keep itself on offer for ever.
     this.pickedOut = Object.entries(route.why)
-      .filter(([, reason]) => /^(?:words|meaning|names a machine)/.test(reason))
+      .filter(([, reason]) => /^(?:words|meaning|names a machine|mcp)/.test(reason))
       .map(([tool]) => tool);
     this.pickedFor = route.why;
     this.offeredFewer = offered.size < Object.keys(all).length;
@@ -667,7 +695,13 @@ export class Brain {
         abilities: this.abilities(),
         character: characterOverride ?? null,
       });
-      if (this.instructedFor !== null && this.instructedFor !== abilities) deps.engine.refresh();
+      if (
+        this.instructionsDirty ||
+        (this.instructedFor !== null && this.instructedFor !== abilities)
+      ) {
+        deps.engine.refresh();
+        this.instructionsDirty = false;
+      }
       this.instructedFor = abilities;
       const hookPipeline = deps.engine.hooks?.() ?? null;
       const hookCtx: TurnHookContext | null =
@@ -759,6 +793,9 @@ export class Brain {
       );
       if (signal.aborted) return;
       this.offeredNow = Object.keys(functions);
+      if (this.offeredNow.some((name) => name.startsWith("mcp:"))) {
+        this.mcpSchemaExposed = true;
+      }
       if (hookCtx) hookCtx.offeredTools = [...this.offeredNow];
       // So that a later change to the conversation does not cost reading the
       // instructions again; see the engine.
@@ -1200,7 +1237,8 @@ export class Brain {
         workspace: deps.environment.workspace,
         home: deps.environment.home,
         isKnownAddress: (url) => this.knownAddresses.has(Brain.addressKey(url)),
-        readOutsideText: this.readOutsideText,
+        // Server-supplied MCP parameter descriptions are untrusted text and taint built-in tools once offered.
+        readOutsideText: this.readOutsideText || this.mcpSchemaExposed,
         protectedFiles: deps.ship ? [deps.ship.deckLogFile] : [],
         // Standing permission to look is for whoever is at the PC.
         maySeeScreen: deps.config.value.sight.withoutAsking && !this.turnAway,

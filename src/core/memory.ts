@@ -181,7 +181,11 @@ export class MemoryStore {
       (m) => m.kind === input.kind && m.namespace === input.namespace && normalize(m.text) === key,
     );
     if (existing) {
-      existing.tags = [...new Set([...existing.tags, ...tags])];
+      const nextTags =
+        input.source === "learned" && (existing.pinned === true || existing.source === "user-edited")
+          ? tags.filter((t) => t !== "learned")
+          : tags;
+      existing.tags = [...new Set([...existing.tags, ...nextTags])];
       if (input.pinned !== undefined) existing.pinned = input.pinned;
       if (input.source && !existing.source) existing.source = input.source;
       if (input.reason && !existing.reason) existing.reason = oneLine(input.reason).slice(0, 240);
@@ -249,7 +253,15 @@ export class MemoryStore {
         : undefined) ??
       this.memories.find((m) => m.kind === kind && normalize(m.text) === normalize(cleanTitle));
     if (existing) {
-      if (options.replace && cleanPoints.length > 0) {
+      const userProtected = existing.pinned === true || existing.source === "user-edited";
+      if (userProtected && options.source === "learned") {
+        // Never overwrite pinned or user-corrected skill/topic steps with automatic learner output.
+        existing.hits += 1;
+        existing.updatedAt = now;
+        await this.persist();
+        return { memory: existing, created: false };
+      }
+      if (options.replace && cleanPoints.length > 0 && !userProtected) {
         existing.points = cleanPoints.slice(0, MAX_POINTS);
       } else {
         const known = new Set(existing.points.map(normalize));
@@ -259,7 +271,7 @@ export class MemoryStore {
       }
       if (options.source && !existing.source) existing.source = options.source;
       if (cleanReason && !existing.reason) existing.reason = cleanReason;
-      if (cleanExcerpt) existing.sourceExcerpt = cleanExcerpt;
+      if (cleanExcerpt && !userProtected) existing.sourceExcerpt = cleanExcerpt;
       existing.hits += 1;
       existing.updatedAt = now;
       await this.persist();

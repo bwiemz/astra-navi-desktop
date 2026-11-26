@@ -272,7 +272,7 @@ async function isFile(path: string): Promise<boolean> {
 
 /** A separate conversation with the model for work done beside the main one. */
 export interface EngineWorker {
-  session: LlamaChatSession;
+  session: LlamaChatSession | OpenAiCompatibleSession;
   /** Fires when the work must stop: the model is being let go. */
   signal: AbortSignal;
   /** Frees the worker's memory. Must always be called, however the work ended. */
@@ -410,9 +410,33 @@ export class LocalEngine {
   /** True between a reply ending and the next one starting. */
   private resting = false;
   private disposed = false;
+  /** Last observed GPU total VRAM in bytes, shared with vision sidecar `"auto"` resolution. */
+  private lastTotalVramBytes: number | null = null;
 
   constructor(options: EngineOptions) {
     this.options = options;
+  }
+
+  /** Returns the last observed GPU total VRAM in bytes, or null if not yet probed / CPU-only. */
+  knownTotalVramBytes(): number | null {
+    return this.lastTotalVramBytes;
+  }
+
+  /** True when a local `node-llama-cpp` GGUF model is currently resident in memory/VRAM. */
+  isLocalModelLoaded(): boolean {
+    return this.loaded !== null;
+  }
+
+  /** Probes current free GPU VRAM in bytes if `llama` has a GPU backend initialized. */
+  async freeVramBytes(): Promise<number | null> {
+    if (!this.llama || this.llama.gpu === false) return null;
+    try {
+      const state = await this.llama.getVramState();
+      this.lastTotalVramBytes = state.total;
+      return state.free;
+    } catch {
+      return null;
+    }
   }
 
   /** Optional turn hook pipeline registered on the engine (null by default). */
@@ -444,6 +468,7 @@ export class LocalEngine {
         : await getLlama();
       if (this.llama.gpu !== false) {
         totalVram = (await this.llama.getVramState()).total;
+        this.lastTotalVramBytes = totalVram;
       }
     } catch {
       totalVram = null;
@@ -710,13 +735,35 @@ export class LocalEngine {
     return this.startBackgroundDownload(this.lastDownloadChoice ?? this.options.choice);
   }
 
-  /** Switches to another model. It is loaded (and downloaded if needed) on the next message. */
+  /** Returns a validated OpenAI-compatible backend config, or null when local GGUF is active or remote is incomplete. */
   private activeRemoteConfig(): InferenceBackendConfig | null {
     const inf = this.options.inference;
     if (!inf || inf.provider !== "openai-compatible") return null;
     if (!inf.model.trim()) return null;
     const checked = classifyInferenceEndpoint(inf.baseUrl);
     if (!checked.ok) return null;
+    return inf;
+  }
+
+  /**
+   * When the user explicitly selected `provider: "openai-compatible"`, validates that
+   * `baseUrl` and `model` are configured and throws a clear error if not — NEVER silently
+   * falling back to downloading multi-gigabyte local GGUF weights.
+   */
+  private requireRemoteConfigIfSelected(): InferenceBackendConfig | null {
+    const inf = this.options.inference;
+    if (!inf || inf.provider !== "openai-compatible") return null;
+    const checked = classifyInferenceEndpoint(inf.baseUrl);
+    if (!checked.ok) {
+      throw new Error(
+        `OpenAI-compatible backend is selected, but the server URL is invalid: ${checked.reason} Update Settings → Mind or switch back to Built-in local model.`,
+      );
+    }
+    if (!inf.model.trim()) {
+      throw new Error(
+        "OpenAI-compatible backend is selected, but no model name is set. Enter a model name in Settings → Mind or switch back to Built-in local model.",
+      );
+    }
     return inf;
   }
 
@@ -761,7 +808,9 @@ export class LocalEngine {
    * download of several gigabytes. Things she brings up by herself must never do that.
    */
   async isDownloaded(): Promise<boolean> {
-    if (this.activeRemoteConfig()) return true;
+    if (this.options.inference?.provider === "openai-compatible") {
+      return this.activeRemoteConfig() !== null;
+    }
     if (this.loaded) return true;
     try {
       // Without asking the graphics card: "auto" then checks for the small model, which
@@ -785,13 +834,13 @@ export class LocalEngine {
     onDisk: boolean;
     loaded: boolean;
   }> {
-    const remote = this.activeRemoteConfig();
-    if (remote) {
+    if (this.options.inference?.provider === "openai-compatible") {
+      const ready = this.activeRemoteConfig() !== null;
       return {
         label: this.inferenceLocality().label,
         fileName: null,
-        onDisk: true,
-        loaded: true,
+        onDisk: ready,
+        loaded: ready,
       };
     }
     if (this.loaded) {
@@ -868,7 +917,7 @@ export class LocalEngine {
    */
   async session(systemPrompt: string): Promise<LlamaChatSession | OpenAiCompatibleSession> {
     if (this.disposed) throw new Error("The engine has been shut down.");
-    const remote = this.activeRemoteConfig();
+    const remote = this.requireRemoteConfigIfSelected();
     if (remote) {
       this.cancelIdleUnload();
       this.resting = false;
@@ -1183,8 +1232,32 @@ export class LocalEngine {
     instructions: string,
     workerOptions?: { adapterPath?: string | null; contextMax?: number },
   ): Promise<EngineWorker | null> {
+    if (this.disposed || this.unloading) return null;
+    const remote = this.activeRemoteConfig();
+    if (remote) {
+      const stop = new AbortController();
+      let finish: () => void = () => undefined;
+      const entry = { done: new Promise<void>((resolve) => (finish = resolve)), stop };
+      this.sideWorks.add(entry);
+      const session = new OpenAiCompatibleSession(remote, instructions, this.options.fetchImpl);
+      let closed = false;
+      return {
+        session,
+        signal: stop.signal,
+        close: async () => {
+          if (closed) return;
+          closed = true;
+          try {
+            session.dispose();
+          } finally {
+            this.sideWorks.delete(entry);
+            finish();
+          }
+        },
+      };
+    }
     const { loaded } = this;
-    if (!loaded || this.disposed || this.unloading) return null;
+    if (!loaded) return null;
     const stop = new AbortController();
     let finish: () => void = () => undefined;
     const entry = { done: new Promise<void>((resolve) => (finish = resolve)), stop };
@@ -1377,6 +1450,7 @@ export class LocalEngine {
       : await getLlama();
     const llama = this.llama;
     const card = llama.gpu === false ? null : await llama.getVramState();
+    if (card) this.lastTotalVramBytes = card.total;
     let chosen = resolveBrain(options.choice, options.modelsDir, card?.total ?? null);
     let effectiveContextSize = options.contextSize;
     let effectiveLean = Boolean(options.lean);

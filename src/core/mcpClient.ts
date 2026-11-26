@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { win32 as win32Path } from "node:path";
 import { z } from "zod";
 import { isPrivateIpv4, type PolicyContext, type Verdict } from "./permissions.ts";
 import { isPrivateLanHost } from "./workerMesh.ts";
@@ -14,15 +16,20 @@ import { isPrivateLanHost } from "./workerMesh.ts";
 
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
 export const MAX_MCP_SERVERS = 16;
-const MAX_OUTPUT_CHARS = 32_768;
+/** Matches web-page truncation (`~6K`) so chatty MCP servers cannot crowd out a 16K context. */
+export const MAX_MCP_OUTPUT_CHARS = 6_000;
+const MAX_OUTPUT_CHARS = MAX_MCP_OUTPUT_CHARS;
 const MAX_STDIO_BUFFER_BYTES = 2 * 1024 * 1024;
 const MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_TOOLS_PER_SERVER = 128;
-const MAX_TOOL_DESCRIPTION_CHARS = 320;
+const MAX_TOOL_DESCRIPTION_CHARS = 200;
 const MAX_INPUT_SCHEMA_BYTES = 16_384;
 const MAX_INPUT_SCHEMA_DEPTH = 8;
 const MAX_CALL_CONTENT_ITEMS = 64;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_RECONNECT_BASE_MS = 1_000;
+const DEFAULT_RECONNECT_MAX_MS = 30_000;
+const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
 
 const BLOCKED_METADATA_HOSTS = new Set([
   "169.254.169.254",
@@ -86,6 +93,112 @@ function sanitizeUntrustedText(raw: string, collapseWhitespace: boolean): string
   }
   const withoutMood = cleaned.replaceAll("[[", "[").replaceAll("]]", "]");
   return collapseWhitespace ? withoutMood.replace(/\s+/g, " ").trim() : withoutMood;
+}
+
+/**
+ * Aggressively sanitizes server-supplied MCP tool & parameter descriptions before they
+ * enter the model prompt/tool schema: strips control/BiDi chars, ChatML delimiters,
+ * XML tool/system/memory tags, and mood markers.
+ */
+export function sanitizeMcpMetadataText(raw: string, maxChars = MAX_TOOL_DESCRIPTION_CHARS): string {
+  const base = sanitizeUntrustedText(raw, true)
+    .replaceAll("<|im_start|>", "")
+    .replaceAll("<|im_end|>", "")
+    .replace(/<\/?(?:tool_call|tool_response|system|memories|assistant|user)[^>]*>/gi, "")
+    .replace(/<function=[^>]*>/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return base.length > maxChars ? `${base.slice(0, maxChars).trim()}…` : base;
+}
+
+/**
+ * Resolves a stdio MCP command safely while keeping `shell: false` (never spawning `cmd.exe`).
+ * On Windows, Node 20+ rejects `.cmd`/`.bat` shims like `npx` with `EINVAL` under `shell: false`;
+ * this resolves `npx`/`npm` directly to `node.exe` + `npx-cli.js`/`npm-cli.js` when present.
+ */
+export function resolveStdioCommand(
+  command: string,
+  args: readonly string[],
+  options: {
+    platform?: NodeJS.Platform;
+    envPath?: string;
+    nodeExecPath?: string;
+    fileExists?: (path: string) => boolean;
+  } = {},
+): { command: string; args: string[] } {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") {
+    return { command, args: [...args] };
+  }
+  const pathLib = win32Path;
+  const exists = options.fileExists ?? existsSync;
+  const envPath = options.envPath ?? process.env["PATH"] ?? "";
+  const nodeExec = options.nodeExecPath ?? process.execPath;
+  const trimmed = command.trim();
+  const baseLower = pathLib.basename(trimmed).toLowerCase();
+  const extLower = pathLib.extname(trimmed).toLowerCase();
+  const pathDirs = envPath.split(";").map((d) => d.trim()).filter(Boolean);
+  const nodeDirs = [pathLib.dirname(nodeExec), ...pathDirs];
+
+  const findNodeCliScript = (scriptName: "npx-cli.js" | "npm-cli.js"): string | null => {
+    const candidates: string[] = [];
+    if (trimmed.includes("\\") || trimmed.includes("/")) {
+      const cmdDir = pathLib.dirname(trimmed);
+      candidates.push(pathLib.join(cmdDir, "node_modules", "npm", "bin", scriptName));
+    }
+    for (const dir of nodeDirs) {
+      candidates.push(pathLib.join(dir, "node_modules", "npm", "bin", scriptName));
+    }
+    for (const cand of candidates) {
+      if (exists(cand)) return cand;
+    }
+    return null;
+  };
+
+  const findNodeExe = (): string => {
+    if (pathLib.basename(nodeExec).toLowerCase() === "node.exe" && exists(nodeExec)) {
+      return nodeExec;
+    }
+    for (const dir of pathDirs) {
+      const cand = pathLib.join(dir, "node.exe");
+      if (exists(cand)) return cand;
+    }
+    return nodeExec;
+  };
+
+  if (baseLower === "npx" || baseLower === "npx.cmd") {
+    const cli = findNodeCliScript("npx-cli.js");
+    if (cli) {
+      return { command: findNodeExe(), args: [cli, ...args] };
+    }
+    throw new Error(
+      `Windows cannot run "${trimmed}" directly without a shell and npx-cli.js was not found on PATH. Install Node.js (with npm) or configure "node" with the server script path, or use "uvx".`,
+    );
+  }
+  if (baseLower === "npm" || baseLower === "npm.cmd") {
+    const cli = findNodeCliScript("npm-cli.js");
+    if (cli) {
+      return { command: findNodeExe(), args: [cli, ...args] };
+    }
+    throw new Error(
+      `Windows cannot run "${trimmed}" directly without a shell and npm-cli.js was not found on PATH.`,
+    );
+  }
+  if (extLower === ".cmd" || extLower === ".bat") {
+    throw new Error(
+      `Windows batch/shim script "${trimmed}" cannot be executed safely with shell: false. Point the MCP server command at a native .exe (such as "node", "python", or "uvx") instead.`,
+    );
+  }
+  // For bare executable names without extension (e.g. "uvx", "python"), prefer a concrete `.exe` on PATH.
+  if (!extLower && !trimmed.includes("\\") && !trimmed.includes("/")) {
+    for (const dir of pathDirs) {
+      const exeCandidate = pathLib.join(dir, `${trimmed}.exe`);
+      if (exists(exeCandidate)) {
+        return { command: exeCandidate, args: [...args] };
+      }
+    }
+  }
+  return { command: trimmed, args: [...args] };
 }
 
 function assertSafeEnvOverrides(env: Record<string, string> | undefined): Record<string, string> {
@@ -243,6 +356,10 @@ export interface McpTransport {
   request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
   notify(method: string, params?: Record<string, unknown>): Promise<void>;
   close(): Promise<void>;
+  /** Optional live-liveness check (e.g. active child process for stdio). */
+  isConnected?(): boolean;
+  /** Optional callback fired when an active transport drops unexpectedly (e.g. crashed process). */
+  onDisconnect?(listener: (reason: string) => void): void;
 }
 
 function normalizeMappedIpv4(host: string): string {
@@ -308,19 +425,33 @@ export class StdioMcpTransport implements McpTransport {
   private stdoutBuf = "";
   private readonly pending = new Map<number, PendingRpc>();
   private stderrTail = "";
+  private closedByCaller = false;
+  private disconnectListener: ((reason: string) => void) | null = null;
 
   constructor(cfg: McpServerConfig) {
     this.cfg = cfg;
   }
 
+  isConnected(): boolean {
+    return this.child !== null && this.child.exitCode === null && this.child.signalCode === null;
+  }
+
+  onDisconnect(listener: (reason: string) => void): void {
+    this.disconnectListener = listener;
+  }
+
   async connect(): Promise<void> {
-    if (this.child) return;
-    const command = this.cfg.command ?? "";
-    if (!command || hasUnsafeCommandChars(command)) {
-      throw new Error(`Unsafe or missing MCP stdio command "${command}".`);
+    if (this.isConnected()) return;
+    const rawCommand = this.cfg.command ?? "";
+    if (!rawCommand || hasUnsafeCommandChars(rawCommand)) {
+      throw new Error(`Unsafe or missing MCP stdio command "${rawCommand}".`);
     }
+    const resolved = resolveStdioCommand(rawCommand, this.cfg.args ?? []);
     const cleanEnv = assertSafeEnvOverrides(this.cfg.env);
-    const child = spawn(command, [...(this.cfg.args ?? [])], {
+    this.closedByCaller = false;
+    this.stderrTail = "";
+    this.stdoutBuf = "";
+    const child = spawn(resolved.command, resolved.args, {
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
       ...(this.cfg.cwd ? { cwd: this.cfg.cwd } : {}),
@@ -335,15 +466,22 @@ export class StdioMcpTransport implements McpTransport {
       this.stderrTail = (this.stderrTail + chunk).slice(-2048);
     });
     child.on("error", (err) => {
-      this.rejectAll(new Error(`MCP stdio error: ${err.message}`));
+      const reason = `MCP stdio error: ${err.message}`;
+      const wasActive = this.child === child;
+      if (wasActive) this.child = null;
+      this.rejectAll(new Error(reason));
+      if (wasActive && !this.closedByCaller) {
+        this.disconnectListener?.(reason);
+      }
     });
     child.on("exit", (code, signal) => {
-      this.child = null;
-      this.rejectAll(
-        new Error(
-          `MCP stdio process exited (${code ?? signal ?? "unknown"})${this.stderrTail ? `: ${this.stderrTail.trim()}` : ""}`,
-        ),
-      );
+      const reason = `MCP stdio process exited (${code ?? signal ?? "unknown"})${this.stderrTail ? `: ${this.stderrTail.trim()}` : ""}`;
+      const wasActive = this.child === child;
+      if (wasActive) this.child = null;
+      this.rejectAll(new Error(reason));
+      if (wasActive && !this.closedByCaller) {
+        this.disconnectListener?.(reason);
+      }
     });
   }
 
@@ -473,6 +611,7 @@ export class StdioMcpTransport implements McpTransport {
   }
 
   async close(): Promise<void> {
+    this.closedByCaller = true;
     this.rejectAll(new Error("MCP stdio transport closed."));
     this.killChildQuietly();
   }
@@ -657,6 +796,7 @@ export class McpClient {
   private readonly transport: McpTransport;
   private initialized = false;
   private cachedTools: McpToolDescriptor[] = [];
+  private disconnectHandler: ((reason: string) => void) | null = null;
 
   constructor(config: McpServerConfigInput, customTransport?: McpTransport) {
     this.config = McpServerConfigSchema.parse(config);
@@ -665,10 +805,20 @@ export class McpClient {
       (this.config.transport === "stdio"
         ? new StdioMcpTransport(this.config)
         : new HttpMcpTransport(this.config));
+    this.transport.onDisconnect?.((reason) => {
+      this.initialized = false;
+      this.cachedTools = [];
+      this.disconnectHandler?.(reason);
+    });
+  }
+
+  /** Subscribes to unexpected transport disconnects (e.g., crashed stdio child process). */
+  setOnDisconnect(handler: ((reason: string) => void) | null): void {
+    this.disconnectHandler = handler;
   }
 
   get isConnected(): boolean {
-    return this.initialized;
+    return this.initialized && (this.transport.isConnected ? this.transport.isConnected() : true);
   }
 
   get tools(): readonly McpToolDescriptor[] {
@@ -711,7 +861,7 @@ export class McpClient {
       const rawDesc = typeof obj["description"] === "string" ? obj["description"] : undefined;
       const description =
         rawDesc !== undefined
-          ? sanitizeUntrustedText(rawDesc, true).slice(0, MAX_TOOL_DESCRIPTION_CHARS)
+          ? sanitizeMcpMetadataText(rawDesc, MAX_TOOL_DESCRIPTION_CHARS)
           : undefined;
       const inputSchema = sanitizeInputSchema(obj["inputSchema"]);
       const rawAnn = obj["annotations"];
@@ -867,26 +1017,88 @@ export interface McpServerRuntimeStatus {
   error: string | null;
 }
 
+export interface McpHubOptions {
+  /** Initial delay before auto-reconnecting a crashed MCP server (default 1000ms). */
+  reconnectBaseMs?: number;
+  /** Cap for exponential backoff between reconnect attempts (default 30000ms). */
+  reconnectMaxMs?: number;
+  /** Maximum consecutive automatic reconnect attempts after a crash (default 5; 0 disables). */
+  maxReconnectAttempts?: number;
+}
+
 /** Multi-server MCP coordinator integrated with `permissions.ts` and `semanticBridge.ts`. */
 export class McpHub {
   private readonly clients = new Map<string, McpClient>();
   private readonly configSnapshots = new Map<string, string>();
   private readonly lastErrors = new Map<string, string>();
+  private readonly reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly reconnectAttempts = new Map<string, number>();
+  private readonly reconnectBaseMs: number;
+  private readonly reconnectMaxMs: number;
+  private readonly maxReconnectAttempts: number;
+
+  constructor(options: McpHubOptions = {}) {
+    this.reconnectBaseMs = Math.max(10, options.reconnectBaseMs ?? DEFAULT_RECONNECT_BASE_MS);
+    this.reconnectMaxMs = Math.max(this.reconnectBaseMs, options.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS);
+    this.maxReconnectAttempts = Math.max(0, options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS);
+  }
+
+  private clearReconnectTimer(serverId: string): void {
+    const timer = this.reconnectTimers.get(serverId);
+    if (timer) {
+      clearTimeout(timer);
+      this.reconnectTimers.delete(serverId);
+    }
+  }
+
+  private scheduleReconnect(serverId: string): void {
+    if (this.maxReconnectAttempts <= 0) return;
+    const client = this.clients.get(serverId);
+    if (!client || client.config.enabled === false) return;
+    if (this.reconnectTimers.has(serverId)) return;
+
+    const attempt = (this.reconnectAttempts.get(serverId) ?? 0) + 1;
+    if (attempt > this.maxReconnectAttempts) return;
+    this.reconnectAttempts.set(serverId, attempt);
+
+    const delayMs = Math.min(this.reconnectMaxMs, this.reconnectBaseMs * 2 ** (attempt - 1));
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(serverId);
+      const current = this.clients.get(serverId);
+      if (!current || current.config.enabled === false || current.isConnected) return;
+      void this.connectServer(serverId, { fromAutoReconnect: true }).then((res) => {
+        if (!res.ok) this.scheduleReconnect(serverId);
+      });
+    }, delayMs);
+    timer.unref?.();
+    this.reconnectTimers.set(serverId, timer);
+  }
 
   registerServer(config: McpServerConfigInput, customTransport?: McpTransport): McpClient {
     const client = new McpClient(config, customTransport);
-    this.clients.set(client.config.id, client);
-    this.configSnapshots.set(client.config.id, JSON.stringify(client.config));
-    this.lastErrors.delete(client.config.id);
+    const id = client.config.id;
+    this.clearReconnectTimer(id);
+    this.reconnectAttempts.delete(id);
+    client.setOnDisconnect((reason) => {
+      if (this.clients.get(id) !== client) return;
+      this.lastErrors.set(id, reason);
+      this.scheduleReconnect(id);
+    });
+    this.clients.set(id, client);
+    this.configSnapshots.set(id, JSON.stringify(client.config));
+    this.lastErrors.delete(id);
     return client;
   }
 
   async unregisterServer(serverId: string): Promise<void> {
+    this.clearReconnectTimer(serverId);
+    this.reconnectAttempts.delete(serverId);
     const existing = this.clients.get(serverId);
     this.clients.delete(serverId);
     this.configSnapshots.delete(serverId);
     this.lastErrors.delete(serverId);
     if (existing) {
+      existing.setOnDisconnect(null);
       await existing.close().catch(() => undefined);
     }
   }
@@ -937,7 +1149,12 @@ export class McpHub {
 
   async connectServer(
     serverId: string,
+    options: { fromAutoReconnect?: boolean } = {},
   ): Promise<{ ok: boolean; tools: readonly McpToolDescriptor[]; error?: string }> {
+    this.clearReconnectTimer(serverId);
+    if (!options.fromAutoReconnect) {
+      this.reconnectAttempts.delete(serverId);
+    }
     const client = this.clients.get(serverId);
     if (!client) {
       return { ok: false, tools: [], error: `Unknown MCP server "${serverId}".` };
@@ -954,6 +1171,7 @@ export class McpHub {
       await client.initialize();
       await client.listTools();
       this.lastErrors.delete(serverId);
+      this.reconnectAttempts.delete(serverId);
       return { ok: true, tools: client.tools };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1109,8 +1327,12 @@ export class McpHub {
   }
 
   async closeAll(): Promise<void> {
+    for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
+    this.reconnectTimers.clear();
+    this.reconnectAttempts.clear();
     this.lastErrors.clear();
     for (const client of this.clients.values()) {
+      client.setOnDisconnect(null);
       await client.close().catch(() => undefined);
     }
   }
