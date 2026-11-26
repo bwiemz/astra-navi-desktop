@@ -1,0 +1,338 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import sharp from "sharp";
+import { afterEach, describe, expect, it } from "vitest";
+import { BRAIN_MODELS, MOE_WORKSTATION_MODELS, resolveVisionMmproj } from "../src/core/models.ts";
+import { Sight } from "../src/core/sight.ts";
+import {
+  buildVisionMessages,
+  LlamaVisionSidecar,
+  sanitizeVisionOutput,
+  validateLoopbackVisionUrl,
+  type VisionDescribeOptions,
+  type VisionDescriber,
+} from "../src/core/visionSidecar.ts";
+
+const tempDirs: string[] = [];
+
+async function makeTempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+async function makeTestPng(width = 64, height = 48): Promise<Buffer> {
+  return sharp({
+    create: {
+      width,
+      height,
+      channels: 4,
+      background: { r: 24, g: 36, b: 64, alpha: 1 },
+    },
+  })
+    .png()
+    .toBuffer();
+}
+
+afterEach(async () => {
+  while (tempDirs.length > 0) {
+    const dir = tempDirs.pop();
+    if (dir) await rm(dir, { recursive: true, force: true });
+  }
+});
+
+describe("models.ts vision mmproj resolution", () => {
+  it("gives every built-in Qwen brain tier and MoE workstation entry a unique model-scoped mmproj asset", () => {
+    const fileNames = new Set<string>();
+    const allModels = [
+      BRAIN_MODELS.small,
+      BRAIN_MODELS.standard,
+      BRAIN_MODELS.large,
+      BRAIN_MODELS.xl,
+      MOE_WORKSTATION_MODELS.largeMoe,
+      MOE_WORKSTATION_MODELS.xlMoe,
+    ];
+    for (const model of allModels) {
+      expect(model.mmproj).toBeDefined();
+      expect(model.mmproj?.url).toMatch(/^https:\/\/huggingface\.co\/unsloth\/Qwen3\.(5|8)-/);
+      expect(model.mmproj?.sizeBytes).toBeGreaterThan(500_000_000);
+      expect(model.mmproj?.fileName).toMatch(/mmproj-F16\.gguf$/);
+      if (model.mmproj) fileNames.add(model.mmproj.fileName);
+    }
+    // Distinct base models (4B, 9B, 27B, 35B-A3B, 122B-A10B) must never collide on disk.
+    expect(fileNames.size).toBe(5);
+  });
+
+  it("detects downloaded built-in mmproj and sibling custom mmproj files", async () => {
+    const dir = await makeTempDir("astra-mmproj-");
+    const stdBefore = resolveVisionMmproj("standard", dir, null);
+    expect(stdBefore.downloaded).toBe(false);
+    expect(stdBefore.mmprojPath).toBe(join(dir, "Qwen3.5-9B-mmproj-F16.gguf"));
+
+    await writeFile(join(dir, "Qwen3.5-9B-mmproj-F16.gguf"), "stub");
+    const stdAfter = resolveVisionMmproj("standard", dir, null);
+    expect(stdAfter.downloaded).toBe(true);
+
+    const customGguf = join(dir, "custom-vl.gguf");
+    const customMmproj = join(dir, "custom-mmproj-f16.gguf");
+    await writeFile(customGguf, "stub");
+    await writeFile(customMmproj, "stub");
+    const custom = resolveVisionMmproj(customGguf, dir, null);
+    expect(custom.downloaded).toBe(true);
+    expect(custom.mmprojPath).toBe(customMmproj);
+  });
+});
+
+describe("validateLoopbackVisionUrl", () => {
+  it("allows http loopback endpoints only", () => {
+    expect(validateLoopbackVisionUrl("http://127.0.0.1:8081").ok).toBe(true);
+    expect(validateLoopbackVisionUrl("http://localhost:8080/v1").ok).toBe(true);
+    expect(validateLoopbackVisionUrl("http://[::1]:8082").ok).toBe(true);
+  });
+
+  it("rejects remote hosts, LAN IPs, https, and embedded credentials", () => {
+    expect(validateLoopbackVisionUrl("http://192.168.1.20:8081").ok).toBe(false);
+    expect(validateLoopbackVisionUrl("http://api.openai.com/v1").ok).toBe(false);
+    expect(validateLoopbackVisionUrl("https://127.0.0.1:8081").ok).toBe(false);
+    expect(validateLoopbackVisionUrl("http://user:pass@127.0.0.1:8081").ok).toBe(false);
+    expect(validateLoopbackVisionUrl("").ok).toBe(false);
+  });
+});
+
+describe("vision prompts & output sanitization", () => {
+  it("builds Set-of-Mark aware messages with anti-injection instructions", () => {
+    const messages = buildVisionMessages("BASE64PNG", {
+      mode: "som",
+      windowTitle: "Settings - Firefox",
+      question: "Which numbered button saves changes?",
+      marksHint: "[1] Save (button)\n[2] Cancel (button)",
+    });
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.role).toBe("system");
+    expect(String(messages[0]?.content)).toMatch(/untrusted/i);
+    const userContent = messages[1]?.content;
+    expect(Array.isArray(userContent)).toBe(true);
+    if (Array.isArray(userContent)) {
+      const textPart = userContent.find((part) => part.type === "text");
+      const imagePart = userContent.find((part) => part.type === "image_url");
+      expect(textPart && "text" in textPart ? textPart.text : "").toContain("[1] Save");
+      expect(textPart && "text" in textPart ? textPart.text : "").toContain(
+        "Which numbered button saves changes?",
+      );
+      expect(imagePart && "image_url" in imagePart ? imagePart.image_url?.url : "").toBe(
+        "data:image/png;base64,BASE64PNG",
+      );
+    }
+  });
+
+  it("strips mood tags, BiDi overrides, and control characters from vision output", () => {
+    const raw = "  [[excited]] Error dialog\u202E says \u0007Port 8080 in use  ";
+    const cleaned = sanitizeVisionOutput(raw);
+    expect(cleaned).not.toContain("[[");
+    expect(cleaned).not.toContain("\u202E");
+    expect(cleaned).not.toContain("\u0007");
+    expect(cleaned).toContain("Error dialog");
+    expect(cleaned).toContain("Port 8080 in use");
+  });
+});
+
+describe("LlamaVisionSidecar loopback endpoint & managed process", () => {
+  it("sends resized PNG data URLs to a configured loopback endpoint and sanitizes the response", async () => {
+    let seenPath = "";
+    let seenImageUrl = "";
+    let seenPromptText = "";
+    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      seenPath = req.url ?? "";
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+          messages: { role: string; content: unknown }[];
+        };
+        const userMsg = body.messages.find((m) => m.role === "user");
+        if (userMsg && Array.isArray(userMsg.content)) {
+          for (const part of userMsg.content as { type: string; text?: string; image_url?: { url: string } }[]) {
+            if (part.type === "text" && part.text) seenPromptText = part.text;
+            if (part.type === "image_url" && part.image_url) seenImageUrl = part.image_url.url;
+          }
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "[[happy]] Red error banner at top; click [3] Retry button.",
+                },
+              },
+            ],
+          }),
+        );
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+
+    try {
+      const modelsDir = await makeTempDir("astra-vis-ep-");
+      const sidecar = new LlamaVisionSidecar({
+        modelsDir,
+        brainChoice: () => "standard",
+        endpoint: () => `http://127.0.0.1:${port}`,
+      });
+      const st = sidecar.status();
+      expect(st.available).toBe(true);
+      expect(st.mode).toBe("loopback-endpoint");
+
+      const bigPng = await makeTestPng(1800, 900);
+      const reply = await sidecar.describeImage(bigPng, {
+        mode: "som",
+        question: "What is wrong on this screen?",
+        marksHint: "[3] Retry (button)",
+      });
+
+      expect(seenPath).toBe("/v1/chat/completions");
+      expect(seenPromptText).toContain("What is wrong on this screen?");
+      expect(seenPromptText).toContain("[3] Retry");
+      expect(seenImageUrl.startsWith("data:image/png;base64,")).toBe(true);
+      // Confirm sharp resized the 1800px image down to <= 1280px wide.
+      const sentBuf = Buffer.from(seenImageUrl.slice("data:image/png;base64,".length), "base64");
+      const sentMeta = await sharp(sentBuf).metadata();
+      expect(sentMeta.width).toBeLessThanOrEqual(1280);
+
+      expect(reply).toContain("Red error banner at top; click [3] Retry button.");
+      expect(reply).not.toContain("[[happy]]");
+      await sidecar.dispose();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("spawns a managed loopback llama-server stub with random bearer auth, respects gpuBusy (-ngl 0), and disposes cleanly", async () => {
+    const dir = await makeTempDir("astra-vis-spawn-");
+    const modelPath = join(dir, "Qwen3.5-9B-Q4_K_M.gguf");
+    const mmprojPath = join(dir, "Qwen3.5-9B-mmproj-F16.gguf");
+    const argsLog = join(dir, "spawn-args.json");
+    const stubBin = join(dir, "llama-server");
+
+    await writeFile(modelPath, "fake-gguf");
+    await writeFile(mmprojPath, "fake-mmproj");
+
+    const script = [
+      `#!${process.execPath}`,
+      `import { createServer } from "node:http";`,
+      `import { writeFileSync } from "node:fs";`,
+      `const args = process.argv.slice(2);`,
+      `const arg = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };`,
+      `writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify(args));`,
+      `const host = arg("--host") || "127.0.0.1";`,
+      `const port = Number(arg("--port") || 0);`,
+      `const apiKey = arg("--api-key") || "";`,
+      `const server = createServer((req, res) => {`,
+      `  const auth = req.headers.authorization || "";`,
+      `  if (apiKey && auth !== "Bearer " + apiKey) { res.writeHead(401); res.end("unauthorized"); return; }`,
+      `  if (req.url === "/health") { res.writeHead(200); res.end("ok"); return; }`,
+      `  if (req.url === "/v1/chat/completions") {`,
+      `    req.resume();`,
+      `    req.on("end", () => {`,
+      `      res.writeHead(200, { "content-type": "application/json" });`,
+      `      res.end(JSON.stringify({ choices: [{ message: { content: "Managed sidecar sees dialog [1] OK." } }] }));`,
+      `    });`,
+      `    return;`,
+      `  }`,
+      `  res.writeHead(404); res.end();`,
+      `});`,
+      `server.listen(port, host);`,
+      `process.on("SIGTERM", () => server.close(() => process.exit(0)));`,
+    ].join("\n");
+    await writeFile(stubBin, script, "utf8");
+    await chmod(stubBin, 0o755);
+
+    const sidecar = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => stubBin,
+      gpuBusy: () => true,
+      startupTimeoutMs: 10_000,
+      idleUnloadMs: 0,
+    });
+
+    const before = sidecar.status();
+    expect(before.available).toBe(true);
+    expect(before.mode).toBe("managed-sidecar");
+    expect(before.running).toBe(false);
+
+    const png = await makeTestPng(120, 80);
+    const out = await sidecar.describeImage(png, { mode: "screen" });
+    expect(out).toBe("Managed sidecar sees dialog [1] OK.");
+    expect(sidecar.status().running).toBe(true);
+
+    const { readFile } = await import("node:fs/promises");
+    const spawnedArgs = JSON.parse(await readFile(argsLog, "utf8")) as string[];
+    expect(spawnedArgs).toContain("--model");
+    expect(spawnedArgs).toContain(modelPath);
+    expect(spawnedArgs).toContain("--mmproj");
+    expect(spawnedArgs).toContain(mmprojPath);
+    expect(spawnedArgs).toContain("127.0.0.1");
+    expect(spawnedArgs).toContain("--api-key");
+    const nglIndex = spawnedArgs.indexOf("-ngl");
+    expect(spawnedArgs[nglIndex + 1]).toBe("0");
+
+    await sidecar.dispose();
+    expect(sidecar.status().running).toBe(false);
+  });
+
+  it("reports unavailable gracefully when disabled or missing binary/mmproj", async () => {
+    const dir = await makeTempDir("astra-vis-off-");
+    const disabled = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      enabled: () => false,
+    });
+    expect(disabled.status().available).toBe(false);
+    expect(await disabled.describeImage(await makeTestPng(), { mode: "screen" })).toBeNull();
+  });
+});
+
+describe("Sight native vision sidecar preference", () => {
+  it("prefers the local vision sidecar over Florence-2 and forwards SoM marks + question", async () => {
+    const dir = await makeTempDir("astra-sight-");
+    const pngPath = join(dir, "frame.png");
+    await writeFile(pngPath, await makeTestPng(320, 200));
+
+    const calls: VisionDescribeOptions[] = [];
+    let disposed = false;
+    const stubSidecar: VisionDescriber = {
+      async describeImage(_png, options) {
+        calls.push(options);
+        return "Dark IDE window showing TypeScript error on line 42.";
+      },
+      async dispose() {
+        disposed = true;
+      },
+    };
+
+    const sight = new Sight(join(dir, "cache"), join(dir, "work"), {
+      visionSidecar: stubSidecar,
+    });
+
+    const seen = await sight.read(pngPath, undefined, {
+      question: "What error is shown?",
+      windowTitle: "VS Code",
+    });
+
+    expect(seen.description).toBe("Dark IDE window showing TypeScript error on line 42.");
+    expect(seen.visionEngine).toBe("llama-mmproj");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.mode).toBe("screen");
+    expect(calls[0]?.question).toBe("What error is shown?");
+    expect(calls[0]?.windowTitle).toBe("VS Code");
+
+    await sight.rest();
+    expect(disposed).toBe(true);
+  });
+});

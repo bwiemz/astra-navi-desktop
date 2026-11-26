@@ -133,6 +133,12 @@ import { cardHolders, gameNow, runningCommands, whyNotNow } from "../evals/guard
 import { gameOnCard } from "../src/core/cardWatch.ts";
 import { compareReports, describeReport, rescore, scoreCase, summarise } from "../evals/scoring.ts";
 import {
+  DEFAULT_CHARACTER_GATE_MAX_DROP,
+  DEFAULT_CHARACTER_GATE_MIN_PASS_RATE,
+  evaluateCharacterGate,
+  formatCharacterGateReport,
+} from "../evals/characterGate.ts";
+import {
   keepBeforeRescore,
   loadReport as loadReportFile,
   reportFile,
@@ -236,6 +242,13 @@ interface Options {
   rescore: string | null;
   list: boolean;
   noExportPairs: boolean;
+  /** Run only `character` cases and exit non-zero if Character & Form drifts below threshold. */
+  gateCharacter: boolean;
+  /** Offline check of a saved report (and optional baseline) against the Character & Form gate. */
+  checkCharacterGate: { candidate: string; baseline?: string } | null;
+  characterBaseline: string | null;
+  minCharacterPassRate: number;
+  maxCharacterDrop: number;
 }
 
 function fail(message: string): never {
@@ -268,6 +281,11 @@ function readOptions(args: readonly string[]): Options {
     rescore: null,
     list: false,
     noExportPairs: false,
+    gateCharacter: false,
+    checkCharacterGate: null,
+    characterBaseline: null,
+    minCharacterPassRate: DEFAULT_CHARACTER_GATE_MIN_PASS_RATE,
+    maxCharacterDrop: DEFAULT_CHARACTER_GATE_MAX_DROP,
   };
   const rest = [...args];
   const value = (flag: string): string => rest.shift() ?? fail(`${flag} needs a value.`);
@@ -318,7 +336,22 @@ function readOptions(args: readonly string[]): Options {
     else if (flag === "--compare") options.compare = [value(flag), value(flag)];
     else if (flag === "--rescore") options.rescore = value(flag);
     else if (flag === "--no-export-pairs") options.noExportPairs = true;
-    else fail(`Unknown option ${flag}. See evals/README.md.`);
+    else if (flag === "--gate-character") {
+      options.gateCharacter = true;
+      if (!options.only.includes("character")) options.only.push("character");
+    } else if (flag === "--check-character-gate") {
+      const candidate = value(flag);
+      const maybeBase = rest[0] && !rest[0].startsWith("--") ? rest.shift() : undefined;
+      options.checkCharacterGate = maybeBase ? { candidate, baseline: maybeBase } : { candidate };
+    } else if (flag === "--baseline") {
+      options.characterBaseline = value(flag);
+    } else if (flag === "--min-character") {
+      const parsed = count(flag, 0);
+      options.minCharacterPassRate = Math.min(1, parsed > 1 ? parsed / 100 : parsed);
+    } else if (flag === "--max-drop") {
+      const parsed = count(flag, 0);
+      options.maxCharacterDrop = Math.min(1, parsed > 1 ? parsed / 100 : parsed);
+    } else fail(`Unknown option ${flag}. See evals/README.md.`);
   }
   return options;
 }
@@ -441,6 +474,18 @@ function onlyItsTools(functions: ChatSessionModelFunctions): ChatSessionModelFun
  */
 const STAMP_AT_START = suiteStamp(ALL_CASES);
 
+if (options.checkCharacterGate) {
+  const candidate = await loadReport(options.checkCharacterGate.candidate);
+  const baselineName = options.checkCharacterGate.baseline ?? options.characterBaseline;
+  const baseline = baselineName ? await loadReport(baselineName) : undefined;
+  const result = evaluateCharacterGate(candidate, {
+    ...(baseline ? { baseline } : {}),
+    minPassRate: options.minCharacterPassRate,
+    maxDrop: options.maxCharacterDrop,
+  });
+  console.log(formatCharacterGateReport(result));
+  process.exit(result.passed ? 0 : 1);
+}
 if (options.compare) {
   const [first, second] = options.compare;
   console.log(compareReports(await loadReport(first), await loadReport(second)));
@@ -1388,7 +1433,20 @@ try {
       })}`,
     );
   }
-  await finish(partial ? stopCode : 0);
+  let exitCode = partial ? stopCode : 0;
+  if (options.gateCharacter && !partial) {
+    const baseline = options.characterBaseline
+      ? await loadReport(options.characterBaseline)
+      : undefined;
+    const gate = evaluateCharacterGate(written.report, {
+      ...(baseline ? { baseline } : {}),
+      minPassRate: options.minCharacterPassRate,
+      maxDrop: options.maxCharacterDrop,
+    });
+    console.log(`\n${formatCharacterGateReport(gate)}`);
+    if (!gate.passed) exitCode = 1;
+  }
+  await finish(exitCode);
 } catch (error) {
   console.error(error);
   await finish(1);

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   AutoProcessor,
@@ -23,7 +23,8 @@ import {
   type VideoPushResult,
 } from "./multimodal.ts";
 import type { PlatformAdapter } from "./platform/adapter.ts";
-import { buildSomMarks, renderSomOverlay, type SomMark } from "./som.ts";
+import { buildSomMarks, describeSomMarks, renderSomOverlay, type SomMark } from "./som.ts";
+import type { VisionDescriber, VisionDescribeOptions } from "./visionSidecar.ts";
 
 /**
  * Her eyes. A picture (usually the screen) is turned into words in two ways and both are
@@ -64,6 +65,8 @@ export interface Seen {
   description: string;
   /** The text visible in it. */
   text: string;
+  /** Which local visual describer produced `description`. */
+  visionEngine?: "llama-mmproj" | "florence-2";
 }
 
 export interface SomSeen extends Seen {
@@ -229,12 +232,15 @@ export interface SightOptions {
   videoBufferMaxFrames?: number;
   videoChangeThreshold?: number;
   onVideoChange?: (event: { frame: VideoFrameInput; changeScore: number }) => void;
+  /** Optional local `llama-server` + `mmproj` multimodal describer preferred over Florence-2 when ready. */
+  visionSidecar?: VisionDescriber;
 }
 
 export class Sight {
   private readonly cacheDir: string;
   private readonly workDir: string;
   private readonly adapter?: PlatformAdapter;
+  private readonly visionSidecar?: VisionDescriber;
   private readonly ocr: FastOcr;
   private readonly videoBuffer: VideoBufferWatch;
   private videoTimer: NodeJS.Timeout | null = null;
@@ -251,6 +257,7 @@ export class Sight {
     this.cacheDir = cacheDir;
     this.workDir = workDir;
     this.adapter = options?.adapter;
+    this.visionSidecar = options?.visionSidecar;
     this.ocr = new FastOcr({ cacheDir, gpuBusy: options?.gpuBusy });
     this.videoBuffer = new VideoBufferWatch({
       maxFrames: options?.videoBufferMaxFrames,
@@ -341,12 +348,15 @@ export class Sight {
   }
 
   /** Takes a picture of the whole screen, reads it, and deletes it. */
-  async lookAtScreen(signal?: AbortSignal): Promise<Seen> {
+  async lookAtScreen(
+    signal?: AbortSignal,
+    options?: { question?: string; windowTitle?: string },
+  ): Promise<Seen> {
     await mkdir(this.workDir, { recursive: true, mode: 0o700 });
     const file = join(this.workDir, `screen-${randomBytes(6).toString("hex")}.png`);
     try {
       await this.captureWholeScreen(file, signal);
-      return await this.read(file, signal);
+      return await this.read(file, signal, options);
     } finally {
       await rm(file, { force: true });
     }
@@ -354,13 +364,15 @@ export class Sight {
 
   /**
    * Captures a single window, runs fast local OCR + merges AT-SPI controls into numbered
-   * Set-of-Mark boxes, composites the visual marks onto the image, and asks Florence-2
-   * to describe the annotated window. Deletes all temporary images before returning.
+   * Set-of-Mark boxes, composites the visual marks onto the image, and describes the
+   * annotated pixels via the local `llama-server` + `mmproj` sidecar when ready (falling
+   * back to Florence-2). Deletes all temporary images before returning.
    */
   async lookAtWindowWithSom(options: {
-    window: { x: number; y: number; width: number; height: number };
+    window: { x: number; y: number; width: number; height: number; title?: string };
     desktop: { width: number; height: number };
     controls: readonly Control[];
+    question?: string;
     signal?: AbortSignal;
   }): Promise<SomSeen> {
     await mkdir(this.workDir, { recursive: true, mode: 0o700 });
@@ -411,16 +423,23 @@ export class Sight {
         });
         const somBuf = await renderSomOverlay(cropBuf, marks, { width: cropW, height: cropH });
         await writeFile(annotatedFile, somBuf, { mode: 0o600 });
-        const description = await this.describe(annotatedFile).catch((error: unknown) => {
+        const visual = await this.describeWithFallback(annotatedFile, somBuf, {
+          mode: "som",
+          ...(options.question ? { question: options.question } : {}),
+          ...(options.window.title ? { windowTitle: options.window.title } : {}),
+          marksHint: describeSomMarks(marks),
+          signal: options.signal,
+        }).catch((error: unknown) => {
           console.warn("[sight] the SoM window could not be described:", error);
-          return "";
+          return { description: "", visionEngine: undefined };
         });
         return {
-          description,
+          description: visual.description,
           text: ocr.text,
           marks,
           ocrMs: ocr.ms,
           engine: ocr.engine,
+          ...(visual.visionEngine ? { visionEngine: visual.visionEngine } : {}),
         };
       } finally {
         this.busy -= 1;
@@ -511,20 +530,33 @@ export class Sight {
   }
 
   /** Describes a picture file and reads the text in it. */
-  async read(file: string, signal?: AbortSignal): Promise<Seen> {
+  async read(
+    file: string,
+    signal?: AbortSignal,
+    options?: { question?: string; windowTitle?: string },
+  ): Promise<Seen> {
     this.busy += 1;
     if (this.restTimer) clearTimeout(this.restTimer);
     try {
-      const [description, ocrResult] = await Promise.all([
-        this.describe(file).catch((error: unknown) => {
+      const [visual, ocrResult] = await Promise.all([
+        this.describeWithFallback(file, null, {
+          mode: "screen",
+          ...(options?.question ? { question: options.question } : {}),
+          ...(options?.windowTitle ? { windowTitle: options.windowTitle } : {}),
+          signal,
+        }).catch((error: unknown) => {
           console.warn("[sight] the picture could not be described:", error);
-          return "";
+          return { description: "", visionEngine: undefined };
         }),
         this.ocr
           .recognize(file, { signal })
           .catch(() => ({ boxes: [], text: "", engine: "tesseract" as const, ms: 0 })),
       ]);
-      return { description, text: tidyRecognisedText(ocrResult.text) };
+      return {
+        description: visual.description,
+        text: tidyRecognisedText(ocrResult.text),
+        ...(visual.visionEngine ? { visionEngine: visual.visionEngine } : {}),
+      };
     } finally {
       this.busy -= 1;
       if (this.busy === 0) {
@@ -544,8 +576,32 @@ export class Sight {
     this.vision = null;
     await Promise.allSettled([
       loaded ? loaded.then((vision) => vision.model.dispose()) : Promise.resolve(),
+      this.visionSidecar ? this.visionSidecar.dispose() : Promise.resolve(),
       this.ocr.rest(),
     ]);
+  }
+
+  private async describeWithFallback(
+    file: string,
+    imageBuf: Buffer | null,
+    options: VisionDescribeOptions,
+  ): Promise<{ description: string; visionEngine?: "llama-mmproj" | "florence-2" }> {
+    if (this.visionSidecar) {
+      try {
+        const png = imageBuf ?? (await readFile(file));
+        const nativeDesc = await this.visionSidecar.describeImage(png, options);
+        if (nativeDesc && nativeDesc.trim().length > 0) {
+          return { description: nativeDesc, visionEngine: "llama-mmproj" };
+        }
+      } catch (error) {
+        console.warn("[sight] local llama-server vision fallback to Florence-2:", error);
+      }
+    }
+    const description = await this.describe(file);
+    return {
+      description,
+      ...(description ? { visionEngine: "florence-2" as const } : {}),
+    };
   }
 
   private async describe(file: string): Promise<string> {

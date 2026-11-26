@@ -1,7 +1,7 @@
 import { createHash, sign, timingSafeEqual, verify } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync, readdirSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 
 /**
@@ -58,6 +58,13 @@ const KV_PRECISION_FACTOR: Record<KvCachePrecision, number> = {
   tq3: 0.21,
 };
 
+export interface BrainMmprojAsset {
+  /** Model-scoped local filename so switching brain tiers never collides on `mmproj-F16.gguf`. */
+  fileName: string;
+  url: string;
+  sizeBytes: number;
+}
+
 export interface BrainModel {
   id: "small" | "standard" | "large" | "xl";
   label: string;
@@ -74,6 +81,8 @@ export interface BrainModel {
   activeParamsB?: number;
   /** Optional expected lowercase SHA-256 hex digest for first-launch bundle verification. */
   sha256?: string;
+  /** Matching multimodal projector (`mmproj`) GGUF for native vision via `llama-server`. */
+  mmproj?: BrainMmprojAsset;
 }
 
 export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
@@ -89,6 +98,11 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     kvBytesPerToken: 73_728,
     totalParamsB: 4,
     activeParamsB: 4,
+    mmproj: {
+      fileName: "Qwen3.5-4B-mmproj-F16.gguf",
+      url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/mmproj-F16.gguf",
+      sizeBytes: 672_423_616,
+    },
   },
   standard: {
     id: "standard",
@@ -102,6 +116,11 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     kvBytesPerToken: 98_304,
     totalParamsB: 9,
     activeParamsB: 9,
+    mmproj: {
+      fileName: "Qwen3.5-9B-mmproj-F16.gguf",
+      url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/mmproj-F16.gguf",
+      sizeBytes: 918_166_080,
+    },
   },
   large: {
     id: "large",
@@ -115,6 +134,11 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     kvBytesPerToken: 147_456,
     totalParamsB: 27,
     activeParamsB: 27,
+    mmproj: {
+      fileName: "Qwen3.8-27B-mmproj-F16.gguf",
+      url: "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/mmproj-F16.gguf",
+      sizeBytes: 927_607_488,
+    },
   },
   xl: {
     id: "xl",
@@ -128,6 +152,11 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     kvBytesPerToken: 163_840,
     totalParamsB: 122,
     activeParamsB: 10,
+    mmproj: {
+      fileName: "Qwen3.5-122B-A10B-mmproj-F16.gguf",
+      url: "https://huggingface.co/unsloth/Qwen3.5-122B-A10B-GGUF/resolve/main/mmproj-F16.gguf",
+      sizeBytes: 908_724_960,
+    },
   },
 };
 
@@ -145,6 +174,11 @@ export const MOE_WORKSTATION_MODELS: Record<"largeMoe" | "xlMoe", BrainModel> = 
     kvBytesPerToken: 98_304,
     totalParamsB: 35,
     activeParamsB: 3,
+    mmproj: {
+      fileName: "Qwen3.5-35B-A3B-mmproj-F16.gguf",
+      url: "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf",
+      sizeBytes: 899_283_648,
+    },
   },
   xlMoe: {
     id: "xl",
@@ -158,6 +192,11 @@ export const MOE_WORKSTATION_MODELS: Record<"largeMoe" | "xlMoe", BrainModel> = 
     kvBytesPerToken: 163_840,
     totalParamsB: 122,
     activeParamsB: 10,
+    mmproj: {
+      fileName: "Qwen3.5-122B-A10B-mmproj-F16.gguf",
+      url: "https://huggingface.co/unsloth/Qwen3.5-122B-A10B-GGUF/resolve/main/mmproj-F16.gguf",
+      sizeBytes: 908_724_960,
+    },
   },
 };
 
@@ -356,6 +395,81 @@ export async function isDownloaded(model: ResolvedModel): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export interface ResolvedVisionMmproj {
+  modelLabel: string;
+  modelPath: string;
+  mmprojPath: string | null;
+  download: BrainMmprojAsset | null;
+  downloaded: boolean;
+}
+
+/**
+ * Resolves the matching multimodal projector (`mmproj`) GGUF for the selected brain:
+ * checks the model-scoped filename in `modelsDir` first, or any sibling `*mmproj*.gguf`
+ * next to a custom local GGUF file.
+ */
+export function resolveVisionMmproj(
+  choice: BrainChoice,
+  modelsDir: string,
+  totalVramBytes: number | null,
+): ResolvedVisionMmproj {
+  const resolved = resolveBrain(choice, modelsDir, totalVramBytes);
+  const mmprojAsset = resolved.download?.mmproj ?? null;
+  if (mmprojAsset) {
+    const scopedPath = join(modelsDir, mmprojAsset.fileName);
+    if (existsSync(scopedPath)) {
+      return {
+        modelLabel: resolved.label,
+        modelPath: resolved.path,
+        mmprojPath: scopedPath,
+        download: mmprojAsset,
+        downloaded: true,
+      };
+    }
+    return {
+      modelLabel: resolved.label,
+      modelPath: resolved.path,
+      mmprojPath: scopedPath,
+      download: mmprojAsset,
+      downloaded: false,
+    };
+  }
+  // Custom GGUF path: check for a sibling mmproj*.gguf file in the same directory,
+  // preferring one whose filename shares the custom GGUF's stem prefix.
+  const folder = dirname(resolved.path);
+  try {
+    if (existsSync(folder)) {
+      const entries = readdirSync(folder).filter(
+        (name) => /mmproj/i.test(name) && name.toLowerCase().endsWith(".gguf"),
+      );
+      const baseStem = basename(resolved.path, ".gguf").toLowerCase();
+      const prefix = baseStem.split(/[-_.]/)[0] ?? "";
+      const sibling =
+        (prefix.length >= 3
+          ? entries.find((name) => name.toLowerCase().startsWith(prefix))
+          : undefined) ?? entries[0];
+      if (sibling) {
+        return {
+          modelLabel: resolved.label,
+          modelPath: resolved.path,
+          mmprojPath: join(folder, sibling),
+          download: null,
+          downloaded: true,
+        };
+      }
+    }
+  } catch {
+    // Unreadable directory: treat mmproj as unavailable.
+  }
+  return {
+    modelLabel: resolved.label,
+    modelPath: resolved.path,
+    mmprojPath: null,
+    download: null,
+    downloaded: false,
+  };
 }
 
 /** Streams a local model file and verifies its SHA-256 digest in constant time. */

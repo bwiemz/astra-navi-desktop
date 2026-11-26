@@ -110,6 +110,10 @@ export interface SettingsView {
   machines: MachineView[];
   /** Configured external MCP servers (header/env values are redacted; only key names are sent). */
   mcpServers: McpServerView[];
+  /** Active companion identity, user address, traits, and persona/bundle source. */
+  character: CharacterSettingsView;
+  /** Local `llama-server` + `mmproj` native vision sidecar configuration and readiness. */
+  vision: VisionSidecarView;
   /** The desktop has a password window she can have SSH ask with. */
   canAskPassword: boolean;
   /** Whether the first-run setup wizard has been completed. */
@@ -216,6 +220,33 @@ export interface McpServerAddRequest {
   readOnlyAutoAllow?: boolean;
 }
 
+/** Editable companion character & persona state shown in Settings. */
+export interface CharacterSettingsView {
+  userAddress: string;
+  displayName: string;
+  greetingStyle: string;
+  traits: string[];
+  speakInThirdPerson: boolean;
+  bio: string;
+  source: "default" | "custom" | "bundle" | "card";
+  sourceName: string;
+  characterBundle: string | null;
+}
+
+/** Local `llama-server` + `mmproj` native vision status shown in Settings. */
+export interface VisionSidecarView {
+  nativeVision: boolean;
+  llamaServerPath: string;
+  visionEndpoint: string;
+  available: boolean;
+  mode: "managed-sidecar" | "loopback-endpoint" | "unavailable";
+  mmprojReady: boolean;
+  mmprojFileName: string | null;
+  mmprojSizeBytes: number | null;
+  binaryFound: boolean;
+  reason: string;
+}
+
 /** One kept backup on a remote machine, as the Settings rollback drawer shows it. */
 export interface RemoteBackupView {
   id: string;
@@ -277,6 +308,9 @@ export interface SettingsPatch {
   needsName?: boolean;
   otherNames?: string[];
   lookWithoutAsking?: boolean;
+  nativeVision?: boolean;
+  llamaServerPath?: string;
+  visionEndpoint?: string;
   handsOff?: boolean;
   keepConversations?: boolean;
   doNotDisturb?: boolean;
@@ -307,6 +341,14 @@ export interface SettingsPatch {
   windowMode?: "floating" | "solid-docked";
   lowPowerStage?: boolean;
   hotkeys?: Partial<{ pushToTalk: string; summonHide: string; clickThrough: string }>;
+  character?: Partial<{
+    userAddress: string;
+    displayName: string;
+    greetingStyle: string;
+    traits: string[];
+    speakInThirdPerson: boolean;
+    bio: string;
+  }>;
   tier10?: Partial<Tier10Settings>;
 }
 
@@ -389,6 +431,20 @@ export interface SettingsBridge {
   setMcpReadOnlyAuto(id: string, on: boolean): Promise<SettingsView>;
   /** Reconnects an external MCP server and refreshes its tool list. */
   reconnectMcpServer(id: string): Promise<{ ok: boolean; view: SettingsView; error?: string }>;
+  /** Opens a file picker to import a Character Card (.json or .png) and applies its persona. */
+  importPersonaCard(): Promise<
+    { ok: true; canceled: false; view: SettingsView; name: string } | { ok: false; canceled: boolean; error?: string }
+  >;
+  /** Opens a file picker for a `.bundle` character pack and binds its 3D avatar, persona, and voice. */
+  loadCharacterBundle(): Promise<
+    { ok: true; canceled: false; view: SettingsView; name: string } | { ok: false; canceled: boolean; error?: string }
+  >;
+  /** Resets persona fields back to default Astra Navi / Captain. */
+  resetCharacter(): Promise<SettingsView>;
+  /** Downloads the matching `mmproj-F16.gguf` vision projector for the selected brain tier. */
+  downloadVisionMmproj(): Promise<
+    { ok: true; view: SettingsView; path: string } | { ok: false; view: SettingsView; error: string }
+  >;
   /** Probes local GPU/VRAM/RAM and recommends the optimal brain tier & quantization. */
   hardwareProfile(force?: boolean): Promise<HardwareRecommendationView>;
   /** Reads a bundled voice sample wav as a base64 data URI, or null if missing. */

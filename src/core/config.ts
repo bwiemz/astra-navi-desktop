@@ -113,6 +113,12 @@ const ConfigSchema = z.object({
       watch: z.boolean().default(false),
       /** Programs she never reads while watching, besides the built-in list (password managers and the like). */
       watchSkip: z.array(z.string().max(60)).max(30).default([]),
+      /** Prefer local `llama-server` + `mmproj` native multimodal vision over Florence-2 when installed. */
+      nativeVision: z.boolean().default(true),
+      /** Optional explicit path to `llama-server` executable (empty = auto-detect on PATH). */
+      llamaServerPath: z.string().max(300).default(""),
+      /** Optional user-run loopback multimodal server (http://127.0.0.1:<port>) instead of managed spawn. */
+      visionEndpoint: z.string().max(240).default(""),
     })
     .prefault({}),
   hands: z
@@ -233,6 +239,27 @@ const ConfigSchema = z.object({
   noticeShown: z.boolean().default(false),
   /** Optional selected custom character bundle directory name or path. */
   characterBundle: z.string().max(300).nullable().default(null),
+  /** Active character/persona layer (user address, companion identity, traits, imported card or bundle). */
+  character: z
+    .object({
+      /** How the companion addresses the user ("Captain" by default, custom name, or "" for no fixed title). */
+      userAddress: z.string().max(40).default("Captain"),
+      /** Companion display name (empty = default "Astra Navi"). */
+      displayName: z.string().max(40).default(""),
+      /** Optional short greeting style note. */
+      greetingStyle: z.string().max(160).default(""),
+      /** Extra personality traits layered into the persona prompt. */
+      traits: z.array(z.string().max(160)).max(8).default([]),
+      /** True for Astra's classic third-person style ("Astra thinks…"); false for natural first-person ("I"). */
+      speakInThirdPerson: z.boolean().default(true),
+      /** Optional short backstory/bio from an imported persona card or character bundle. */
+      bio: z.string().max(800).default(""),
+      /** Where the active character settings came from. */
+      source: z.enum(["default", "custom", "bundle", "card"]).default("default"),
+      /** Name of the active imported persona card or character bundle. */
+      sourceName: z.string().max(80).default(""),
+    })
+    .prefault({}),
   /** Desktop presentation mode: transparent always-on-top overlay or solid opaque docked window. */
   windowMode: z.enum(["floating", "solid-docked"]).default("floating"),
   /** Caps 3D stage FPS and resolution scaling for battery-conscious laptops. */

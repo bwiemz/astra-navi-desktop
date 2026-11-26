@@ -52,6 +52,8 @@ import { ActionLog } from "../core/actionLog.ts";
 import { searchEverywhere } from "../core/knowledge.ts";
 import { ResearchDesk, researchReport } from "../core/research.ts";
 import { Sight } from "../core/sight.ts";
+import { LlamaVisionSidecar } from "../core/visionSidecar.ts";
+import { characterFromBundleManifest, resolveBundleVoiceBinding } from "../core/characterLayer.ts";
 import { Reach } from "../core/reach.ts";
 import { Fleet } from "../core/fleet.ts";
 import { SearchBudget } from "../core/searchBudget.ts";
@@ -203,6 +205,7 @@ let compiledSkills: CompiledSkillStore | null = null;
 let recallRef: Recall | null = null;
 let workspaceRoot = workspaceDir();
 let sight: Sight | null = null;
+let visionSidecar: LlamaVisionSidecar | null = null;
 let research: ResearchDesk | null = null;
 let reach: Reach | null = null;
 let platformAdapter: PlatformAdapter | null = null;
@@ -624,6 +627,7 @@ function chooseBrain(choice: string): void {
     await config.update({ brain: choice });
     interruptBrain();
     await brain?.whenIdle();
+    await visionSidecar?.dispose().catch(() => undefined);
     await engine?.setChoice(choice);
     rebuildTrayMenu();
   })().catch((error: unknown) => console.error(error));
@@ -650,6 +654,30 @@ function chooseLanguage(language: LanguageCode): void {
     await voice.createVoice();
     rebuildTrayMenu();
   })().catch((error: unknown) => console.error(error));
+}
+
+/** Opens an avatar `.bundle` and binds its declared name, personality, and voice together. */
+async function loadAndBindCharacterBundle(bundlePath: string): Promise<{ name: string }> {
+  const manifest = await modelFiles.switchCharacterBundle(bundlePath);
+  const nextCharacter = characterFromBundleManifest(manifest, config.value.character.userAddress);
+  const boundVoice = resolveBundleVoiceBinding(
+    manifest.voice,
+    voice.designedVoices(),
+    voice.fullVoiceReady(),
+  );
+  await config.update({
+    characterBundle: bundlePath,
+    character: nextCharacter,
+    ...(boundVoice?.speed !== undefined
+      ? { voice: { ...config.value.voice, speed: boundVoice.speed } }
+      : {}),
+  });
+  if (boundVoice) {
+    voice.chooseVoice(boundVoice.engine, boundVoice.design);
+  }
+  void brain?.refreshInstructions().catch(() => undefined);
+  rebuildTrayMenu();
+  return { name: manifest.persona?.displayName ?? manifest.name };
 }
 
 const voice = createVoiceController({
@@ -700,6 +728,7 @@ const settings = createSettingsController({
   initiative: () => initiative,
   reach: () => reach,
   mcpHub: () => mcpHub,
+  visionSidecar: () => visionSidecar,
   board: () => board,
   searchBudget: () => searchBudget,
   designedVoices: () => voice.designedVoices(),
@@ -746,6 +775,15 @@ const settings = createSettingsController({
   },
   showAvatarWindow: () => showWindow(false),
   importModel,
+  loadCharacterBundle: loadAndBindCharacterBundle,
+  onCharacterChanged: () => {
+    void brain?.refreshInstructions().catch(() => undefined);
+    rebuildTrayMenu();
+  },
+  onCharacterReset: async () => {
+    await loadModelBundle();
+    sendToWindow("app:state", appState(false));
+  },
   detectGameOnCard: gameOnCard,
   sendToWindow,
   rebuildTrayMenu: () => rebuildTrayMenu(),
@@ -1184,8 +1222,9 @@ async function morningBriefing(): Promise<void> {
     .filter(Boolean)
     .slice(-3)
     .map((line) => line.slice(0, 400));
+  const addressee = config.value.character.userAddress.trim() || "the user";
   const parts = [
-    `This is the first start today, and the time is ${new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}. Greet Captain to suit the time of day and give a short briefing: anything that needs attention first, then one line on the ship, then what is planned. Leave out anything unremarkable.`,
+    `This is the first start today, and the time is ${new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}. Greet ${addressee} to suit the time of day and give a short briefing: anything that needs attention first, then one line on the ship, then what is planned. Leave out anything unremarkable.`,
     `Ship status:\n${describeShipStatus(status)}`,
     findAlerts(status).length > 0
       ? `Problems: ${findAlerts(status)
@@ -1343,6 +1382,8 @@ async function shutDown(): Promise<void> {
     // First, so the window manager's script, the virtual devices and the open port go
     // even if something further down hangs.
     await reach?.dispose();
+    await visionSidecar?.dispose();
+    visionSidecar = null;
     await mcpHub?.closeAll();
     mcpHub = null;
     platformAdapter?.dispose?.();
@@ -1480,9 +1521,19 @@ async function main(): Promise<void> {
   await actions.load();
   // A crash while she was looking at the screen could have left the picture behind.
   await rm(scratchDir(), { recursive: true, force: true }).catch(() => undefined);
+  visionSidecar = new LlamaVisionSidecar({
+    modelsDir: modelsDir(),
+    brainChoice: () => config.value.brain,
+    enabled: () => config.value.sight.nativeVision,
+    binaryPath: () => config.value.sight.llamaServerPath,
+    endpoint: () => config.value.sight.visionEndpoint,
+    extraBinDirs: [join(dataDir(), "bin")],
+    gpuBusy: () => (gameWatch?.current()?.game ?? null) !== null,
+  });
   sight = new Sight(join(modelsDir(), "speech"), scratchDir(), {
     adapter: platformAdapter ?? undefined,
     gpuBusy: () => (gameWatch?.current()?.game ?? null) !== null,
+    visionSidecar,
   });
   noticeWatch = new NoticeWatch({
     adapter: platformAdapter ?? undefined,
@@ -1679,6 +1730,11 @@ async function main(): Promise<void> {
   await voice.createVoice();
 
   await loadModelBundle();
+  if (config.value.characterBundle && existsSync(config.value.characterBundle)) {
+    await modelFiles.switchCharacterBundle(config.value.characterBundle).catch((error: unknown) => {
+      console.warn("[character-bundle] could not reopen saved bundle; using default avatar:", error);
+    });
+  }
   registerProtocol();
   restrictPermissions();
   registerDesktopIpc({

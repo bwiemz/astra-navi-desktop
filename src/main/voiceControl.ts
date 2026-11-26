@@ -26,18 +26,31 @@ const CONVERSATION_WINDOW_MS = 25_000;
  */
 const NAMELESS_FOLLOW_UPS_MS = 90_000;
 
-/** What she says when only her name is called. */
-const WAKE_REPLIES: Record<LanguageCode, string> = {
-  en: "Yes, Captain?",
-  ja: "はい、艦長？",
-  zh: "在呢，舰长？",
-};
+/** What she says when only her name is called, adapting to the configured user address. */
+export function wakeReplyFor(language: LanguageCode, userAddress: string): string {
+  const addr = userAddress.trim();
+  if (language === "ja") return addr ? `はい、${addr === "Captain" ? "艦長" : addr}？` : "はい？";
+  if (language === "zh") return addr ? `在呢，${addr === "Captain" ? "舰长" : addr}？` : "在呢？";
+  return addr ? `Yes, ${addr}?` : "Yes?";
+}
 
-const VOICE_SAMPLES: Record<LanguageCode, string> = {
-  en: "Captain! This is how Astra sounds now. What do you think?",
-  ja: "艦長！アストラの声はこんな感じだよ。どうかな？",
-  zh: "舰长！阿斯特拉现在的声音是这样的。你觉得怎么样？",
-};
+export function voiceSampleFor(language: LanguageCode, userAddress: string, displayName: string): string {
+  const addr = userAddress.trim();
+  const shortName = displayName.trim() || "Astra";
+  if (language === "ja") {
+    const prefix = addr ? `${addr === "Captain" ? "艦長" : addr}！` : "";
+    const who = shortName === "Astra" || shortName === "Astra Navi" ? "アストラ" : shortName;
+    return `${prefix}${who}の声はこんな感じだよ。どうかな？`;
+  }
+  if (language === "zh") {
+    const prefix = addr ? `${addr === "Captain" ? "舰长" : addr}！` : "";
+    const who = shortName === "Astra" || shortName === "Astra Navi" ? "阿斯特拉" : shortName;
+    return `${prefix}${who}现在的声音是这样的。你觉得怎么样？`;
+  }
+  const prefix = addr ? `${addr}! ` : "";
+  const who = shortName === "Astra Navi" ? "Astra" : shortName;
+  return `${prefix}This is how ${who} sounds now. What do you think?`;
+}
 
 export function toSamples(value: unknown): Float32Array | null {
   if (value instanceof Float32Array) return value;
@@ -256,7 +269,11 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
             if (rest.length === 0) {
               // Just her name. Answer at once, without waiting on a whole reply, and listen.
               sendVoice({ type: "heard", text, noReply: true });
-              if (speaker?.canSpeak) speaker.say(WAKE_REPLIES[deps.config.value.language]);
+              if (speaker?.canSpeak) {
+                speaker.say(
+                  wakeReplyFor(deps.config.value.language, deps.config.value.character.userAddress),
+                );
+              }
               return;
             }
             said = rest;
@@ -300,7 +317,15 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       await createVoice();
       deps.rebuildTrayMenu();
       // Let the new voice introduce itself, so it can be judged by ear straight away.
-      if (speaker?.canSpeak) speaker.say(VOICE_SAMPLES[deps.config.value.language]);
+      if (speaker?.canSpeak) {
+        speaker.say(
+          voiceSampleFor(
+            deps.config.value.language,
+            deps.config.value.character.userAddress,
+            deps.config.value.character.displayName,
+          ),
+        );
+      }
     })().catch((error: unknown) => console.error(error));
   }
 

@@ -11,6 +11,10 @@ import {
 } from "../core/bootstrap.ts";
 import { gameOnCard as cardGameOnCard } from "../core/cardWatch.ts";
 import { daysAboard } from "../core/clock.ts";
+import {
+  characterFromImportedCard,
+  defaultCharacterConfig,
+} from "../core/characterLayer.ts";
 import type { ConfigStore } from "../core/config.ts";
 import type { LocalEngine } from "../core/engine.ts";
 import { benchmarkFirstLaunchHardware } from "../core/hardwareTuner.ts";
@@ -22,6 +26,11 @@ import type { McpHub } from "../core/mcpClient.ts";
 import type { MissionBoard } from "../core/missionPlan.ts";
 import type { NoticeWatch } from "../core/notices.ts";
 import { dataDir, ordersFile, resolveBundledRoot, stationDir } from "../core/paths.ts";
+import { importPersonaCardFile, sanitizePersonaText } from "../core/personaCard.ts";
+import {
+  validateLoopbackVisionUrl,
+  type LlamaVisionSidecar,
+} from "../core/visionSidecar.ts";
 import {
   exportProfileBackup,
   importProfileBackup,
@@ -78,6 +87,7 @@ export interface SettingsIpcDeps {
   initiative(): Initiative | null;
   reach(): Reach | null;
   mcpHub?(): McpHub | null;
+  visionSidecar?(): LlamaVisionSidecar | null;
   board?(): MissionBoard | null;
   searchBudget(): SearchBudget | null;
   designedVoices(): string[];
@@ -103,6 +113,9 @@ export interface SettingsIpcDeps {
   relaunchAfterRestore?(): void;
   showAvatarWindow?(): void;
   importModel?(): Promise<void>;
+  loadCharacterBundle?(bundlePath: string): Promise<{ name: string }>;
+  onCharacterChanged?(): void;
+  onCharacterReset?(): Promise<void>;
   detectGameOnCard?(): Promise<string | null>;
   sendToWindow(channel: string, payload?: unknown): void;
   rebuildTrayMenu(): void;
@@ -324,6 +337,32 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       pingPhone: config.value.devices.pingPhone,
       machines: config.value.fleet.machines.map((machine) => ({ ...machine })),
       mcpServers: buildMcpServerViews(config.value.mcp.servers, deps.mcpHub?.() ?? null),
+      character: {
+        userAddress: config.value.character.userAddress,
+        displayName: config.value.character.displayName,
+        greetingStyle: config.value.character.greetingStyle,
+        traits: [...config.value.character.traits],
+        speakInThirdPerson: config.value.character.speakInThirdPerson,
+        bio: config.value.character.bio,
+        source: config.value.character.source,
+        sourceName: config.value.character.sourceName,
+        characterBundle: config.value.characterBundle,
+      },
+      vision: (() => {
+        const st = deps.visionSidecar?.()?.status();
+        return {
+          nativeVision: config.value.sight.nativeVision,
+          llamaServerPath: config.value.sight.llamaServerPath,
+          visionEndpoint: config.value.sight.visionEndpoint,
+          available: st?.available ?? false,
+          mode: st?.mode ?? "unavailable",
+          mmprojReady: st?.mmprojReady ?? false,
+          mmprojFileName: st?.mmprojDownload?.fileName ?? null,
+          mmprojSizeBytes: st?.mmprojDownload?.sizeBytes ?? null,
+          binaryFound: st?.binaryPath !== null && st?.binaryPath !== undefined,
+          reason: st?.reason ?? "Local vision sidecar status unavailable.",
+        };
+      })(),
       canAskPassword,
       onboardingComplete: config.value.onboardingComplete,
       advancedSettings: config.value.advancedSettings,
@@ -425,6 +464,11 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       }
     }
 
+    if (patch.visionEndpoint !== undefined && patch.visionEndpoint.trim() !== "") {
+      const check = validateLoopbackVisionUrl(patch.visionEndpoint);
+      if (!check.ok) throw new Error(check.reason);
+    }
+
     const leanWas = config.value.leanMemory;
     // Plain values first, in one write.
     const voice = { ...config.value.voice };
@@ -437,9 +481,48 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         .map((name) => name.trim())
         .filter((name) => name.length >= 2);
     }
+    const sightChanged =
+      patch.lookWithoutAsking !== undefined ||
+      patch.watchSkip !== undefined ||
+      patch.nativeVision !== undefined ||
+      patch.llamaServerPath !== undefined ||
+      patch.visionEndpoint !== undefined;
+    const nextCharacter = patch.character
+      ? {
+          ...config.value.character,
+          ...(patch.character.userAddress !== undefined
+            ? { userAddress: sanitizePersonaText(patch.character.userAddress, 40) }
+            : {}),
+          ...(patch.character.displayName !== undefined
+            ? { displayName: sanitizePersonaText(patch.character.displayName, 40) }
+            : {}),
+          ...(patch.character.greetingStyle !== undefined
+            ? { greetingStyle: sanitizePersonaText(patch.character.greetingStyle, 160) }
+            : {}),
+          ...(patch.character.traits !== undefined
+            ? {
+                traits: patch.character.traits
+                  .map((t) => sanitizePersonaText(t, 160))
+                  .filter(Boolean)
+                  .slice(0, 8),
+              }
+            : {}),
+          ...(patch.character.speakInThirdPerson !== undefined
+            ? { speakInThirdPerson: patch.character.speakInThirdPerson }
+            : {}),
+          ...(patch.character.bio !== undefined
+            ? { bio: sanitizePersonaText(patch.character.bio, 800) }
+            : {}),
+          source:
+            config.value.character.source === "default"
+              ? ("custom" as const)
+              : config.value.character.source,
+        }
+      : undefined;
+
     await config.update({
       voice,
-      ...(patch.lookWithoutAsking !== undefined || patch.watchSkip !== undefined
+      ...(sightChanged
         ? {
             sight: {
               ...config.value.sight,
@@ -453,9 +536,17 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
                       .filter((name) => name.length >= 2),
                   }
                 : {}),
+              ...(patch.nativeVision !== undefined ? { nativeVision: patch.nativeVision } : {}),
+              ...(patch.llamaServerPath !== undefined
+                ? { llamaServerPath: patch.llamaServerPath.trim() }
+                : {}),
+              ...(patch.visionEndpoint !== undefined
+                ? { visionEndpoint: patch.visionEndpoint.trim() }
+                : {}),
             },
           }
         : {}),
+      ...(nextCharacter !== undefined ? { character: nextCharacter } : {}),
       ...(patch.pingPhone !== undefined
         ? { devices: { ...config.value.devices, pingPhone: patch.pingPhone } }
         : {}),
@@ -585,6 +676,16 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     }
     if (patch.language !== undefined && patch.language !== config.value.language) {
       deps.chooseLanguage(patch.language);
+    }
+    if (patch.character !== undefined) {
+      deps.onCharacterChanged?.();
+    }
+    if (
+      patch.nativeVision !== undefined ||
+      patch.llamaServerPath !== undefined ||
+      patch.visionEndpoint !== undefined
+    ) {
+      void deps.visionSidecar?.()?.dispose().catch(() => undefined);
     }
     if (patch.voice !== undefined) {
       const designedVoices = deps.designedVoices();
@@ -1020,6 +1121,114 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       await deps.clearSafeMode?.();
       return settingsView();
     });
+    ipcMain.handle(
+      "settings:import-persona-card",
+      async (
+        event,
+      ): Promise<
+        { ok: true; canceled: false; view: SettingsView; name: string } | { ok: false; canceled: boolean; error?: string }
+      > => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const owner = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : undefined;
+        const openOptions: Electron.OpenDialogOptions = {
+          title: "Import Persona Card (.json or .png)",
+          properties: ["openFile"],
+          filters: [
+            { name: "Persona Card (.json, .png)", extensions: ["json", "png"] },
+          ],
+        };
+        const picked = owner
+          ? await dialog.showOpenDialog(owner, openOptions)
+          : await dialog.showOpenDialog(openOptions);
+        const filePath = picked.filePaths[0];
+        if (picked.canceled || !filePath) return { ok: false, canceled: true };
+        try {
+          const card = await importPersonaCardFile(filePath);
+          const next = characterFromImportedCard(card, config.value.character.userAddress);
+          await config.update({ character: next });
+          deps.onCharacterChanged?.();
+          return { ok: true, canceled: false, view: settingsView(), name: card.displayName };
+        } catch (error) {
+          return {
+            ok: false,
+            canceled: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    );
+    ipcMain.handle(
+      "settings:load-character-bundle",
+      async (
+        event,
+      ): Promise<
+        { ok: true; canceled: false; view: SettingsView; name: string } | { ok: false; canceled: boolean; error?: string }
+      > => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        if (!deps.loadCharacterBundle) {
+          return { ok: false, canceled: false, error: "Character bundle loader is not available." };
+        }
+        const owner = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : undefined;
+        const openOptions: Electron.OpenDialogOptions = {
+          title: "Load Character Bundle (.bundle)",
+          properties: ["openFile"],
+          filters: [{ name: "Astra Character Bundle (.bundle)", extensions: ["bundle"] }],
+        };
+        const picked = owner
+          ? await dialog.showOpenDialog(owner, openOptions)
+          : await dialog.showOpenDialog(openOptions);
+        const filePath = picked.filePaths[0];
+        if (picked.canceled || !filePath) return { ok: false, canceled: true };
+        try {
+          const loaded = await deps.loadCharacterBundle(filePath);
+          return { ok: true, canceled: false, view: settingsView(), name: loaded.name };
+        } catch (error) {
+          return {
+            ok: false,
+            canceled: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    );
+    ipcMain.handle("settings:reset-character", async (event): Promise<SettingsView> => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      const hadBundle = Boolean(config.value.characterBundle);
+      await config.update({
+        character: defaultCharacterConfig(),
+        characterBundle: null,
+      });
+      if (hadBundle) await deps.onCharacterReset?.();
+      deps.onCharacterChanged?.();
+      return settingsView();
+    });
+    ipcMain.handle(
+      "settings:download-mmproj",
+      async (
+        event,
+      ): Promise<
+        { ok: true; view: SettingsView; path: string } | { ok: false; view: SettingsView; error: string }
+      > => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const sidecar = deps.visionSidecar?.();
+        if (!sidecar) {
+          return { ok: false, view: settingsView(), error: "Vision sidecar is not initialized." };
+        }
+        try {
+          const res = await sidecar.ensureMmprojDownloaded();
+          if (!res.ok) {
+            return { ok: false, view: settingsView(), error: res.reason };
+          }
+          return { ok: true, view: settingsView(), path: res.path };
+        } catch (error) {
+          return {
+            ok: false,
+            view: settingsView(),
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    );
     ipcMain.handle("settings:export-profile", async (event): Promise<ProfileBackupActionResult> => {
       if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
       const owner = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : undefined;

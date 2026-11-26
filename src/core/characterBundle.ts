@@ -50,9 +50,11 @@ export const CharacterBundleManifestSchema = z.object({
   persona: z
     .object({
       displayName: z.string().min(1).max(40),
-      greetingStyle: z.string().max(120).optional(),
-      traits: z.array(z.string().max(120)).max(6).optional(),
+      userAddress: z.string().max(40).optional(),
+      greetingStyle: z.string().max(160).optional(),
+      traits: z.array(z.string().max(160)).max(8).optional(),
       speakInThirdPerson: z.boolean().optional(),
+      bio: z.string().max(800).optional(),
     })
     .optional(),
   voice: z

@@ -173,6 +173,7 @@
 
     <!-- Stays at the top while the page scrolls: where each section is, and which one is in view. -->
     <nav id="sections" class="sections" aria-label="Sections">
+      <a href="#sec-character">Character</a>
       <a href="#sec-voice">Voice</a>
       <a href="#sec-senses">Eyes &amp; hands</a>
       <a href="#sec-watch">Watch</a>
@@ -187,6 +188,90 @@
     <p id="saved" class="saved" role="status" aria-live="polite"></p>
 
     <main>
+      <section id="sec-character" class="panel">
+        <h2>Character &amp; persona</h2>
+        <p class="note">
+          Customize how your companion addresses you, bind an avatar <code>.bundle</code>
+          (model, persona, and voice together), or import a Character Card (<code>.json</code> or
+          <code>.png</code>). All card text is sanitized locally so prompt tags cannot hijack tools.
+        </p>
+        <div class="row">
+          <span class="what">Active profile</span>
+          <span id="char-source" class="mcp-badge mcp-badge-off">Built-in Astra Navi</span>
+        </div>
+        <label class="row">
+          <span class="what">How she calls you</span>
+          <input
+            id="char-userAddress"
+            type="text"
+            maxlength="40"
+            placeholder="Captain (leave blank for no fixed title)"
+            autocomplete="off"
+          />
+          <span class="why"
+            >Defaults to "Captain". Set your name, a nickname, or leave it blank to drop the title.</span
+          >
+        </label>
+        <label class="row">
+          <span class="what">Companion name</span>
+          <input
+            id="char-displayName"
+            type="text"
+            maxlength="40"
+            placeholder="Astra Navi"
+            autocomplete="off"
+          />
+          <span class="why">Leave blank for built-in Astra Navi.</span>
+        </label>
+        <label class="row switch">
+          <input id="char-thirdPerson" type="checkbox" />
+          <span class="what">Refers to herself by name instead of "I"</span>
+          <span class="why"
+            >Turn off for standard first-person speech ("I") when using imported persona cards.</span
+          >
+        </label>
+        <label class="row">
+          <span class="what">Greeting style</span>
+          <input
+            id="char-greetingStyle"
+            type="text"
+            maxlength="160"
+            placeholder="Warm and concise"
+            autocomplete="off"
+          />
+          <span class="why">Short hint for how she opens a conversation.</span>
+        </label>
+        <label class="row">
+          <span class="what">Personality traits</span>
+          <textarea
+            id="char-traits"
+            rows="2"
+            placeholder="Dry humor, calm under pressure, loves astronomy"
+          ></textarea>
+          <span class="why">Up to 8 traits, separated by commas or new lines.</span>
+        </label>
+        <label class="row">
+          <span class="what">Character background</span>
+          <textarea
+            id="char-bio"
+            rows="3"
+            maxlength="800"
+            placeholder="Optional short bio, role, or backstory (max 800 characters)."
+          ></textarea>
+        </label>
+        <div class="row">
+          <span class="what">Cards &amp; bundles</span>
+          <div class="backup-actions">
+            <button id="char-import-card" type="button">Import Persona Card (.json / .png)</button>
+            <button id="char-load-bundle" type="button" class="quiet">
+              Load Character Bundle (.bundle)
+            </button>
+            <button id="char-reset" type="button" class="danger">Reset to Default Astra</button>
+          </div>
+          <span id="char-status" class="why" role="status" aria-live="polite"></span>
+        </div>
+      </section>
+
       <section id="sec-voice" class="panel">
         <h2>Her voice and ears</h2>
         <label class="row">
@@ -233,6 +318,48 @@
           <span class="what">She may look at the screen without asking</span>
           <span class="why"
             >Otherwise she asks each time. The picture never leaves this computer.</span
+          >
+        </label>
+        <label class="row switch">
+          <input id="nativeVision" type="checkbox" />
+          <span class="what">Use native vision (llama-server + mmproj)</span>
+          <span class="why">
+            Lets the multimodal brain inspect real screenshots and numbered Set-of-Mark overlays on
+            <code>127.0.0.1</code> alongside exact OCR text. Falls back to Florence-2 + OCR when
+            unavailable.
+          </span>
+        </label>
+        <div class="row">
+          <span class="what">Native vision status</span>
+          <div class="backup-actions">
+            <span id="vision-badge" class="mcp-badge mcp-badge-off">Checking…</span>
+            <button id="vision-download-mmproj" type="button" class="quiet" hidden>
+              Download vision projector (mmproj)
+            </button>
+          </div>
+          <span id="vision-status" class="why" role="status" aria-live="polite"></span>
+        </div>
+        <label class="row advanced-only">
+          <span class="what">llama-server binary path</span>
+          <input
+            id="llamaServerPath"
+            type="text"
+            placeholder="Auto-detected from PATH or data/bin"
+            autocomplete="off"
+          />
+          <span class="why">Optional explicit path to a local <code>llama-server</code> executable.</span>
+        </label>
+        <label class="row advanced-only">
+          <span class="what">Loopback vision endpoint</span>
+          <input
+            id="visionEndpoint"
+            type="text"
+            placeholder="http://127.0.0.1:8081"
+            autocomplete="off"
+          />
+          <span class="why"
+            >Optional already-running multimodal server. Strictly limited to <code>127.0.0.1</code>,
+            <code>localhost</code>, or <code>[::1]</code>.</span
           >
         </label>
         <label class="row switch warn">

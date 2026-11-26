@@ -30,12 +30,12 @@ import {
   buildSystemPrompt,
   EVENT_MARK,
   FORM_MARK,
-  FORM_SPOKEN,
-  FORM_TYPED,
+  formLine,
   NOTES_MARK,
   VOICE_MARK,
   type Abilities,
 } from "./persona.ts";
+import { characterOverrideFromConfig } from "./characterLayer.ts";
 import { describeRecalled, type Recall } from "./recall.ts";
 import { desktopLayout } from "./desktop.ts";
 import { SCREEN_MARK } from "./watch.ts";
@@ -532,6 +532,7 @@ export class Brain {
       deps.config.value.language,
       daysAboard(deps.config.value.firstMetAt, new Date()),
       this.abilities(),
+      characterOverrideFromConfig(deps.config.value.character),
     );
   }
 
@@ -659,9 +660,13 @@ export class Brain {
         if (saved.length > 0) this.readOutsideText = true;
       }
       await mkdir(deps.environment.workspace, { recursive: true });
-      // Her instructions only describe the abilities that are switched on. When one is
-      // switched on or off mid-conversation they are written afresh; the conversation stays.
-      const abilities = JSON.stringify(this.abilities());
+      // Her instructions only describe the abilities & character that are active. When one is
+      // changed mid-conversation they are written afresh; the conversation stays.
+      const characterOverride = characterOverrideFromConfig(deps.config.value.character);
+      const abilities = JSON.stringify({
+        abilities: this.abilities(),
+        character: characterOverride ?? null,
+      });
       if (this.instructedFor !== null && this.instructedFor !== abilities) deps.engine.refresh();
       this.instructedFor = abilities;
       const hookPipeline = deps.engine.hooks?.() ?? null;
@@ -769,7 +774,7 @@ export class Brain {
       const aside = [this.clock.next(deps.lab?.now?.()), onScreen].filter(Boolean).join("\n");
       // Last, so that it is the nearest thing to her answer. Not when she is telling
       // of an event, which has its own instructions in it.
-      const form = message.event ? "" : `\n\n${message.spoken ? FORM_SPOKEN : FORM_TYPED}`;
+      const form = message.event ? "" : `\n\n${formLine(message.spoken, characterOverride)}`;
       const prompt = `${mark}${message.text}${aside ? `\n\n${aside}` : ""}${notes?.text ?? ""}${form}`;
       deps.lab?.onPrompt?.(prompt);
       const promptTextTokens = deps.engine.countTokens?.(prompt) ?? null;
@@ -781,13 +786,12 @@ export class Brain {
             ? promptTextTokens
             : heldBeforePrompt + promptTextTokens;
       const seed = deps.lab?.seed?.();
-      // She speaks of herself by name. Told so, a small model still slips into "I" in
-      // about one reply in three, so the words themselves are made a little less
-      // likely while she is speaking. Not while she is thinking, which nobody reads and
-      // which she does better in her own way, and not in the other languages, whose
-      // words for "I" this does not know.
+      // She speaks of herself by name when third-person mode is on. Told so, a small model still
+      // slips into "I" in about one reply in three, so the words themselves are made a little less
+      // likely while she is speaking. Disabled when a custom persona speaks in first person.
+      const thirdPerson = characterOverride?.speakInThirdPerson !== false;
       const bias =
-        deps.config.value.language === "en" && deps.lab?.plainWords !== true
+        deps.config.value.language === "en" && thirdPerson && deps.lab?.plainWords !== true
           ? deps.engine.wordBias(FIRST_PERSON_WORDS)
           : null;
       let thinking = false;

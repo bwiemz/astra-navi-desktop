@@ -149,9 +149,14 @@ export function createDesktopTools(
                   description:
                     "Optional words from a window's title or program name when inspecting it with Set-of-Mark targets.",
                 },
+                question: {
+                  type: "string",
+                  description:
+                    "Optional visual focus question for the local vision model, e.g. 'what error dialog is shown' or 'which numbered box saves the file'.",
+                },
               },
             },
-            handler: guarded<{ when?: string; window?: string }>(
+            handler: guarded<{ when?: string; window?: string; question?: string }>(
               host,
               TOOLS.lookAtScreen,
               (input) =>
@@ -198,6 +203,7 @@ export function createDesktopTools(
                         window: chosen,
                         desktop: { width: layout.width, height: layout.height },
                         controls,
+                        ...(input.question ? { question: input.question } : {}),
                         signal: host.signal(),
                       });
                       host.noteOutsideText();
@@ -219,7 +225,10 @@ export function createDesktopTools(
                 }
 
                 const [seen, windows] = await Promise.all([
-                  sight.lookAtScreen(host.signal()),
+                  sight.lookAtScreen(
+                    host.signal(),
+                    input.question ? { question: input.question } : undefined,
+                  ),
                   getWindows().catch(() => []),
                 ]);
                 // Whatever is on screen may have been written by anyone: a web page, a chat, a document.

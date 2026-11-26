@@ -10,6 +10,7 @@ import { showPosture, wireSearchAndPresets } from "./settings/searchAndPresets.t
 import { showStation, wireDevices } from "./settings/devices.ts";
 import { showMachines, wireFleet } from "./settings/fleet.ts";
 import { showMcpServers, wireMcpSettings } from "./settings/mcp.ts";
+import { showCharacterAndVision, wireCharacterAndVision } from "./settings/character.ts";
 import { wireTraces } from "./settings/traces.ts";
 import { showSystem, wireSystem } from "./settings/system.ts";
 
@@ -23,6 +24,7 @@ function show(view: SettingsView): void {
 
   showPosture(view);
   showOnboarding(view);
+  showCharacterAndVision(view);
   showSystem(view);
 
   fill(
@@ -322,6 +324,7 @@ onChange<HTMLInputElement>("advancedSettings", (control) => {
 wireSearchAndPresets(save);
 wireOnboarding(show, save);
 wireDevices(show);
+wireCharacterAndVision(show, save);
 wireMcpSettings(show);
 wireFleet(show);
 wireTraces();

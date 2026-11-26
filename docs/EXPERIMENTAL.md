@@ -181,5 +181,21 @@ All pre-release Android 15, Windows Authenticode signing pipeline, packaging, ex
 | `9cad960` | `fix(bootstrap): pass --clear to venv, align qwen-tts pins, verify packages installed, and fix wizard button widths` (`bootstrap.ts`, `fullVoice.ts`, `voice-server/requirements.txt`, `scripts/setup-voice.sh`, `scripts/setup-ocr.sh`, `settings.css`, `windowsRcFixes.test.ts`) |
 | `9ecebcf` | `feat(mcp,catalog): wire live MCP runtime & Settings UI, replace dead models, hide inactive toggles, and fix UA` (`mcpTools.ts`, `mcpIpc.ts`, `settings/mcp.ts`, `mcpClient.ts`, `config.ts`, `brain.ts`, `models.ts`, `web.ts`, `settings.html`, `README.md`, `mcpIntegration.test.ts`) |
 
+---
+
+## 11. Roadmap Items 3 & 4 — Native Vision Sidecar & Real Character Layer (`2026-11-26`)
+
+- **Native Multimodal Vision Sidecar (`src/core/visionSidecar.ts`, `src/core/models.ts`, `src/core/sight.ts`, `src/core/desktopTools.ts`):**
+  - Added model-scoped Hugging Face `mmproj-F16.gguf` descriptors for all built-in Qwen tiers (`small` `4B`, `standard` `9B`, `large` `27B`, `xl` `122B-A10B`, `largeMoe` `35B-A3B`) plus sibling `*mmproj*.gguf` prefix auto-detection for custom local GGUFs (`resolveVisionMmproj()`).
+  - Implemented strictly loopback-only (`127.0.0.1` / `localhost` / `[::1]`) `LlamaVisionSidecar`: lazy on-demand `llama-server` spawning with per-session random `--api-key` Bearer auth, `sharp` max-1280px downscaling, Set-of-Mark `[N]` overlay cross-referencing alongside exact OCR text, anti-injection framing & output sanitization, `-ngl 0` CPU fallback while fullscreen games run, idle auto-unload (`2 min`), and transparent Florence-2 + OCR fallback when unavailable.
+  - Added optional `question` parameter to `look_at_screen`, Settings UI controls (`#nativeVision`, mmproj download, Advanced `llamaServerPath` & `visionEndpoint`), and `tests/visionSidecar.test.ts` (`10/10` tests covering catalog resolution, loopback enforcement, real HTTP endpoint + managed subprocess spawn/auth/disposal, and `Sight` sidecar preference).
+- **Real Character Layer & Brain-Tier Personality Drift Gate (`src/core/characterLayer.ts`, `src/core/personaCard.ts`, `src/core/persona.ts`, `src/core/characterBundle.ts`, `src/core/brain.ts`, `src/main/voiceControl.ts`, `src/renderer/src/settings/character.ts`, `evals/characterGate.ts`, `scripts/eval.ts`):**
+  - Customizable user address (`config.character.userAddress`, defaulting to `"Captain"` with byte-identical default system prompt, or custom name / empty string to drop `"Captain"` across `persona.ts`, `formLine`, `morningBriefing`, `wakeReplyFor`, and `voiceSampleFor`).
+  - Automatic first-person speech mode (`speakInThirdPerson: false`) disabling the `FIRST_PERSON_WORDS` negative logit bias in `Brain` when imported cards or custom characters use `"I"`.
+  - Avatar `.bundle` binding (`loadAndBindCharacterBundle` in `src/main/index.ts`): switching a `.bundle` applies its 3D avatar, declared persona (`displayName`, `userAddress`, `greetingStyle`, `traits`, `speakInThirdPerson`, `bio`), and voice binding (`resolveBundleVoiceBinding`) together and persists across restarts.
+  - Security-hardened Persona Card Importer (`src/core/personaCard.ts`): supports Character Card V3 (`ccv3`), V2 (`chara`), V1 JSON, native Astra JSON, and `.png` `tEXt` chunks (`8 MB` cap) while stripping ChatML/tool tags, control chars, BiDi overrides, and `[[mood]]` spoofing.
+  - Brain-tier personality drift gate (`evals/characterGate.ts`, `scripts/eval.ts`): `--gate-character` (live eval gate) and `--check-character-gate <candidate> [<baseline>] [--min-character <n>] [--max-drop <n>]` (offline report comparison enforcing default `85%` floor and `<= 5 pt` max regression), verified with `tests/characterLayer.test.ts` (`9/9` tests).
+
+
 
 

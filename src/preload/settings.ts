@@ -86,6 +86,19 @@ const bridge: SettingsBridge = {
       view: SettingsView;
       error?: string;
     }>,
+  importPersonaCard: () =>
+    ipcRenderer.invoke("settings:import-persona-card") as Promise<
+      { ok: true; canceled: false; view: SettingsView; name: string } | { ok: false; canceled: boolean; error?: string }
+    >,
+  loadCharacterBundle: () =>
+    ipcRenderer.invoke("settings:load-character-bundle") as Promise<
+      { ok: true; canceled: false; view: SettingsView; name: string } | { ok: false; canceled: boolean; error?: string }
+    >,
+  resetCharacter: () => ipcRenderer.invoke("settings:reset-character") as Promise<SettingsView>,
+  downloadVisionMmproj: () =>
+    ipcRenderer.invoke("settings:download-mmproj") as Promise<
+      { ok: true; view: SettingsView; path: string } | { ok: false; view: SettingsView; error: string }
+    >,
   hardwareProfile: (force?: boolean) =>
     ipcRenderer.invoke("settings:hardware-profile", Boolean(force)) as Promise<HardwareRecommendationView>,
   previewVoice: (name: string) =>

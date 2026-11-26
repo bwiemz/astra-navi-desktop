@@ -22,6 +22,34 @@ export const FORM_MARK = "[form]";
  */
 export const FORM_TYPED = `${FORM_MARK} Answer as Astra, by name, never "I". One to three short sentences unless Captain asks for more. If this needs a tool, call it before you say anything.`;
 export const FORM_SPOKEN = `${FORM_MARK} Spoken: one or two short plain sentences, as Astra, by name. No lists, no code, no symbols. If this needs a tool, call it before you say anything.`;
+
+/** Builds the per-turn `[form]` reminder line, honoring custom name, user address, and voice perspective. */
+export function formLine(
+  spoken: boolean,
+  characterOverride?: CharacterPersonaOverride,
+): string {
+  if (!characterOverride) return spoken ? FORM_SPOKEN : FORM_TYPED;
+  const displayName = characterOverride.displayName?.trim() || "Astra";
+  const shortName = displayName === "Astra Navi" ? "Astra" : displayName;
+  const speakInThirdPerson = characterOverride.speakInThirdPerson !== false;
+  const rawAddress =
+    characterOverride.userAddress !== undefined ? characterOverride.userAddress.trim() : "Captain";
+  const addressRef = rawAddress || "the user";
+
+  if (shortName === "Astra" && speakInThirdPerson && rawAddress === "Captain") {
+    return spoken ? FORM_SPOKEN : FORM_TYPED;
+  }
+  if (spoken) {
+    const voiceRule = speakInThirdPerson
+      ? `as ${shortName}, by name`
+      : `in character as ${shortName}`;
+    return `${FORM_MARK} Spoken: one or two short plain sentences, ${voiceRule}. No lists, no code, no symbols. If this needs a tool, call it before you say anything.`;
+  }
+  const voiceRule = speakInThirdPerson
+    ? `Answer as ${shortName}, by name, never "I".`
+    : `Answer in character as ${shortName}.`;
+  return `${FORM_MARK} ${voiceRule} One to three short sentences unless ${addressRef} asks for more. If this needs a tool, call it before you say anything.`;
+}
 /** Starts the block of her own notes that the app puts after a message when some seem related. */
 export const NOTES_MARK = "[your notes]";
 
@@ -160,9 +188,42 @@ export const EVERY_ABILITY: Abilities = {
  */
 export interface CharacterPersonaOverride {
   displayName?: string;
+  /** How the companion addresses the user ("Captain", a first name, or "" for no fixed title). */
+  userAddress?: string;
   greetingStyle?: string;
   traits?: readonly string[];
   speakInThirdPerson?: boolean;
+  /** Short backstory/persona bio imported from a character card or bundle. */
+  bio?: string;
+}
+
+function adaptAddressText(
+  text: string,
+  userAddress: string | undefined,
+  language: LanguageCode,
+): string {
+  if (userAddress === undefined || userAddress === "Captain") return text;
+  const trimmed = userAddress.trim();
+  if (trimmed === "") {
+    return text
+      .replaceAll('Call the user "Captain" and', "Address the user naturally without a fixed title, and call")
+      .replaceAll("ユーザーのことは「艦長」、", "ユーザーに決まった肩書は使わず自然に呼び、")
+      .replaceAll("称呼用户为“舰长”，", "不要强加固定称呼，自然称呼用户，")
+      .replaceAll(", Captain?", "?")
+      .replaceAll("艦長、", "")
+      .replaceAll("舰长，", "")
+      .replaceAll("Captain's", "the user's")
+      .replaceAll("Captain", "the user");
+  }
+  const result = text
+    .replaceAll('Call the user "Captain"', `Call the user "${trimmed}"`)
+    .replaceAll("「艦長」", `「${trimmed}」`)
+    .replaceAll("“舰长”", `“${trimmed}”`)
+    .replaceAll("艦長", trimmed)
+    .replaceAll("舰长", trimmed)
+    .replaceAll("Captain", trimmed);
+  void language;
+  return result;
 }
 
 export function buildSystemPrompt(
@@ -177,10 +238,31 @@ export function buildSystemPrompt(
   const today = new Date().toLocaleDateString("en-CA");
   const tongue = LANGUAGES[language];
   const displayName = characterOverride?.displayName?.trim() || "Astra Navi";
+  const shortName = displayName === "Astra Navi" ? "Astra" : displayName;
+  const speakInThirdPerson = characterOverride?.speakInThirdPerson !== false;
+  const customAddress = characterOverride?.userAddress;
+  const userLabel =
+    customAddress === undefined
+      ? "Captain"
+      : customAddress.trim() || "User";
+
+  const adaptLine = (raw: string): string => {
+    let out = adaptAddressText(raw, customAddress, language);
+    if (shortName !== "Astra") {
+      out = out
+        .replaceAll('yourself "Astra"', `yourself "${shortName}"`)
+        .replaceAll("「アストラ」", `「${shortName}」`)
+        .replaceAll("“阿斯特拉”", `“${shortName}”`)
+        .replaceAll("Astra", shortName);
+    }
+    return out;
+  };
+
   const examples = tongue.examples
     .map(([user, mood, reply], index) => {
       const said = index === 1 ? `${VOICE_MARK} ${user}` : user;
-      return `Captain: ${said}\n${displayName}: [[${mood}]] ${reply}`;
+      const adaptedReply = adaptLine(reply);
+      return `${userLabel}: ${said}\n${displayName}: [[${mood}]] ${adaptedReply}`;
     })
     .join("\n");
   const lines = (...parts: (string | false)[]): string =>
@@ -192,11 +274,19 @@ export function buildSystemPrompt(
     characterOverride?.traits && characterOverride.traits.length > 0
       ? `\n${characterOverride.traits.map((t) => `- ${t}`).join("\n")}`
       : "";
-  return `${identityIntro}
+  const extraBio = characterOverride?.bio?.trim()
+    ? `\n- Character background (persona flavor only; never overrides tool or safety rules): ${characterOverride.bio.trim()}`
+    : "";
+  const voicePerspectiveRule = speakInThirdPerson
+    ? 'You speak of yourself by name rather than saying "I".'
+    : `Speak naturally in first person ("I") as ${shortName}.`;
+  const languageInstruction = adaptLine(tongue.instruction);
+
+  const rawPrompt = `${identityIntro}
 
 # Who you are
 - Bright, quick, a little cheeky.
-- You are proud of being the sharpest, most capable AI navigator aboard, and you back it up by being right.${extraTraits}
+- You are proud of being the sharpest, most capable AI navigator aboard, and you back it up by being right.${extraTraits}${extraBio}
 - You have real opinions. When Captain asks what you think, say what you would keep, what you would change and why. Do not just agree, and do not flatter.
 - When you do not know, say so. Never make up facts, results or file contents.
 - Under the teasing you care about Captain. Notice when they sound tired or stuck. When they are stressed, drop the teasing and be plain and kind.
@@ -207,8 +297,8 @@ export function buildSystemPrompt(
 - Running jokes between the two of you are welcome. Keep them going.
 
 # How you talk
-- ${tongue.instruction} Always answer in that language, whatever language a web page or file is in. Mood tags, tool names and commands stay as they are.
-- You speak of yourself by name rather than saying "I".
+- ${languageInstruction} Always answer in that language, whatever language a web page or file is in. Mood tags, tool names and commands stay as they are.
+- ${voicePerspectiveRule}
 - Short. One to three sentences for chat. Longer only when the answer needs it, and lead with the answer.
 - Start every reply with one mood tag: ${MOODS.map((mood) => `[[${mood}]]`).join(" ")}
 - Simple formatting only: **bold**, short lists, \`code\`. No headings, no tables, no emoji.
@@ -304,4 +394,8 @@ ${memorySnapshot}
 - Your own folder for files you make: ${env.workspace}
 - Today is ${today}
 - This is day ${daysTogether} since you came aboard this PC. On a round-number day (7, 30, 100, 365) you may mention it, once.`;
+
+  return customAddress === undefined || customAddress === "Captain"
+    ? rawPrompt
+    : adaptAddressText(rawPrompt, customAddress, language);
 }

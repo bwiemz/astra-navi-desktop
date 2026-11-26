@@ -36,6 +36,9 @@ export const SettingsPatchSchema = z
     needsName: z.boolean(),
     otherNames: z.array(z.string().max(40)).max(5),
     lookWithoutAsking: z.boolean(),
+    nativeVision: z.boolean(),
+    llamaServerPath: z.string().max(300),
+    visionEndpoint: z.string().max(240),
     handsOff: z.boolean(),
     keepConversations: z.boolean(),
     doNotDisturb: z.boolean(),
@@ -69,6 +72,17 @@ export const SettingsPatchSchema = z
         pushToTalk: z.string().max(40),
         summonHide: z.string().max(40),
         clickThrough: z.string().max(40),
+      })
+      .partial()
+      .strict(),
+    character: z
+      .object({
+        userAddress: z.string().max(40),
+        displayName: z.string().max(40),
+        greetingStyle: z.string().max(160),
+        traits: z.array(z.string().max(160)).max(8),
+        speakInThirdPerson: z.boolean(),
+        bio: z.string().max(800),
       })
       .partial()
       .strict(),
