@@ -129,7 +129,7 @@ export function recommendHardwareTier(
   let selectedModel: BrainModel = BRAIN_MODELS.small;
 
   for (const candidate of targetList) {
-    // On high-VRAM workstation GPUs under auto selection, evaluate dense 72B vs 120B MoE.
+    // On high-VRAM workstation GPUs under auto selection, prefer the Qwen3.5 122B-A10B MoE preset.
     const modelForTier =
       candidate === "xl" &&
       preferred === "auto" &&

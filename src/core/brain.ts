@@ -49,6 +49,8 @@ import type { NoticeWatch } from "./notices.ts";
 import { createPhoneTools } from "./phoneTools.ts";
 import { createKnowledgeTools } from "./knowledgeTools.ts";
 import { createShipTools, type ShipServices } from "./shipTools.ts";
+import type { McpHub } from "./mcpClient.ts";
+import { createMcpTools } from "./mcpTools.ts";
 
 /** How many past messages are kept on disk for the next launch. */
 const SAVED_HISTORY_ITEMS = 60;
@@ -83,6 +85,8 @@ export interface BrainDeps {
   phone?: boolean;
   /** The user's other machines, reached over SSH. */
   fleet?: Fleet;
+  /** External local/LAN Model Context Protocol (MCP) server hub. */
+  mcp?: McpHub;
   /** Tells her which program the user is in, while she keeps watch. */
   screen?: { next(): string; reset(): void };
   /** The desktop's notifications, while the user lets her read them; null while not. */
@@ -535,6 +539,15 @@ export class Brain {
   private abilities(): Abilities {
     const { deps } = this;
     const settings = deps.config.value;
+    const mcpServers = deps.mcp
+      ? [
+          ...new Set(
+            deps.mcp
+              .listPrefixedTools()
+              .map(({ serverId }) => deps.mcp?.getClient(serverId)?.config.name?.trim() || serverId),
+          ),
+        ].sort((a, b) => a.localeCompare(b))
+      : [];
     return {
       operate: deps.hands !== undefined && settings.hands.inPrograms,
       watch: deps.screen !== undefined && settings.sight.watch,
@@ -544,6 +557,7 @@ export class Brain {
       machineNames: deps.fleet?.machines().map((machine) => machine.name) ?? [],
       phone: deps.phone === true,
       station: settings.devices.station,
+      ...(mcpServers.length > 0 ? { mcpServers } : {}),
     };
   }
 
@@ -711,6 +725,7 @@ export class Brain {
                 ? createFleetTools(host, deps.fleet)
                 : {}),
               ...(deps.ship ? createShipTools(host, deps.ship) : {}),
+              ...(deps.mcp ? createMcpTools(host, deps.mcp) : {}),
             };
       const everyTool = deps.lab?.tools ? deps.lab.tools(usual, host) : usual;
       const loopGuard = new ToolLoopGuard();
@@ -1148,6 +1163,7 @@ export class Brain {
    */
   standingPolicy(): PolicyContext {
     const { deps } = this;
+    const mcp = deps.mcp;
     return {
       workspace: deps.environment.workspace,
       home: deps.environment.home,
@@ -1159,11 +1175,22 @@ export class Brain {
       privateDirs: deps.privateDirs,
       findMachine: deps.fleet ? (name) => deps.fleet?.find(name) as Machine : undefined,
       machines: deps.fleet ? () => deps.fleet?.machines() ?? [] : undefined,
+      ...(mcp
+        ? {
+            mcpPolicy: (toolName: string) =>
+              mcp.verdictForTool(toolName, {
+                workspace: deps.environment.workspace,
+                readOutsideText: true,
+                handsOff: deps.config.value.handsOff,
+              }),
+          }
+        : {}),
     };
   }
 
   private toolHost(): ToolHost {
     const { deps } = this;
+    const mcp = deps.mcp;
     return {
       policy: () => ({
         workspace: deps.environment.workspace,
@@ -1198,6 +1225,16 @@ export class Brain {
             }
           : {}),
         machines: deps.fleet ? () => deps.fleet?.machines() ?? [] : undefined,
+        ...(mcp
+          ? {
+              mcpPolicy: (toolName: string) =>
+                mcp.verdictForTool(toolName, {
+                  workspace: deps.environment.workspace,
+                  readOutsideText: this.readOutsideText,
+                  handsOff: deps.config.value.handsOff,
+                }),
+            }
+          : {}),
       }),
       memory: deps.memory,
       recall: deps.recall,
@@ -1215,7 +1252,12 @@ export class Brain {
       },
       signal: () => this.abort?.signal,
       ran: (toolName) => {
-        if (ACTION_TOOLS.has(toolName)) this.actionsRun += 1;
+        if (
+          ACTION_TOOLS.has(toolName) ||
+          (toolName.startsWith("mcp:") && !deps.mcp?.isReadOnlyTool(toolName))
+        ) {
+          this.actionsRun += 1;
+        }
       },
       searchesPerReply: MAX_SEARCHES_PER_REPLY,
       audit: (entry) =>
@@ -1242,7 +1284,12 @@ export class Brain {
         // An action that did not work is no action: a reminder whose time could not be
         // understood set nothing, and "timer set!" after it is as empty as with no call.
         if (record.ok) this.toolsDone += 1;
-        if (!record.ok && record.started && ACTION_TOOLS.has(record.tool)) {
+        if (
+          !record.ok &&
+          record.started &&
+          (ACTION_TOOLS.has(record.tool) ||
+            (record.tool.startsWith("mcp:") && !deps.mcp?.isReadOnlyTool(record.tool)))
+        ) {
           this.actionsRun = Math.max(0, this.actionsRun - 1);
         }
         if (NOT_JOURNALLED.has(record.tool)) return;

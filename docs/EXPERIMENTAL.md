@@ -179,6 +179,7 @@ All pre-release Android 15, Windows Authenticode signing pipeline, packaging, ex
 | `1ef6225` | `fix(security): scope release OIDC signing to main/tags and block incognito DOM reads` (`.github/workflows/release.yml`, `browser-bridge/background.js`, `STORE_LISTING.md`, `releaseScripts.test.ts`) |
 | `9b350af` | `fix(windows): wire native Windows adapter, VRAM CPU fallback, ShellHost filter, wide settings layout, and bootstrap setups` (`windows.ts`, `reach.ts`, `selfCheck.ts`, `documents.ts`, `engine.ts`, `cardWatch.ts`, `bootstrap.ts`, `ocr.ts`, `install-host.mjs`, `settings.css`, `loginStart.ts`, `windowsRcFixes.test.ts`) |
 | `9cad960` | `fix(bootstrap): pass --clear to venv, align qwen-tts pins, verify packages installed, and fix wizard button widths` (`bootstrap.ts`, `fullVoice.ts`, `voice-server/requirements.txt`, `scripts/setup-voice.sh`, `scripts/setup-ocr.sh`, `settings.css`, `windowsRcFixes.test.ts`) |
+| `9ecebcf` | `feat(mcp,catalog): wire live MCP runtime & Settings UI, replace dead models, hide inactive toggles, and fix UA` (`mcpTools.ts`, `mcpIpc.ts`, `settings/mcp.ts`, `mcpClient.ts`, `config.ts`, `brain.ts`, `models.ts`, `web.ts`, `settings.html`, `README.md`, `mcpIntegration.test.ts`) |
 
 
 

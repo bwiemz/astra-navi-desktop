@@ -1,17 +1,15 @@
 import "./settings.css";
-import {
-  TIER10_KEYS,
-  type SettingsPage,
-  type SettingsPatch,
-  type SettingsView,
-  type Tier10Key,
-  type Tier10Settings,
+import type {
+  SettingsPage,
+  SettingsPatch,
+  SettingsView,
 } from "../../shared/settings.ts";
 import { bridge, choose, element, fill, setAdvancedMode, stamp } from "./settings/dom.ts";
 import { showOnboarding, wireOnboarding } from "./settings/onboarding.ts";
 import { showPosture, wireSearchAndPresets } from "./settings/searchAndPresets.ts";
 import { showStation, wireDevices } from "./settings/devices.ts";
 import { showMachines, wireFleet } from "./settings/fleet.ts";
+import { showMcpServers, wireMcpSettings } from "./settings/mcp.ts";
 import { wireTraces } from "./settings/traces.ts";
 import { showSystem, wireSystem } from "./settings/system.ts";
 
@@ -60,7 +58,6 @@ function show(view: SettingsView): void {
   const sessionNotice = element("desktop-session-notice");
   sessionNotice.hidden = !view.desktopSessionNotice;
   sessionNotice.textContent = view.desktopSessionNotice ?? "";
-  showTier10(view.tier10);
 
   fill(
     element<HTMLSelectElement>("voice"),
@@ -123,6 +120,7 @@ function show(view: SettingsView): void {
           "You are asked before she works in each program, and again for anything that reads like deleting, sending or confirming.",
         ].join(" ");
   showStation(view, show);
+  showMcpServers(view, show);
   showMachines(view, show);
   showCalendars(view);
 
@@ -250,142 +248,6 @@ for (const name of toggles) {
   onChange<HTMLInputElement>(name, (control) => ({ [name]: control.checked }));
 }
 
-const EXPERIMENTAL_OPTIONS: Record<Tier10Key, { title: string; description: string }> = {
-  workerMesh: {
-    title: "Share AI work across your home PCs",
-    description:
-      "Lets Astra borrow extra graphics memory from other computers you trust on your home Wi-Fi so heavy replies finish faster.",
-  },
-  modelCascade: {
-    title: "Quick-answer first, upgrade if tricky",
-    description:
-      "Starts answering with a fast small brain and automatically hands harder questions off to a larger brain when needed.",
-  },
-  loraSubAgents: {
-    title: "Specialized mini-brains for specific tasks",
-    description:
-      "Loads lightweight add-on skill adapters you trained locally (for example, coding or writing helpers) without replacing Astra's main brain.",
-  },
-  predictivePrewarm: {
-    title: "Get ready before you ask",
-    description:
-      "Quietly prepares likely context ahead of time when you switch apps or start talking so her first reply feels snappier.",
-  },
-  semanticBridges: {
-    title: "Deeper awareness of open apps and browser tabs",
-    description:
-      "Reads structured details directly from supported desktop windows, audio controls, code editors, and the browser extension instead of relying only on screenshots.",
-  },
-  pushEvents: {
-    title: "React instantly to system events",
-    description:
-      "Lets local system signals—like finished downloads, changed files, or smart-home messages—notify Astra right away instead of waiting for a periodic check.",
-  },
-  hardwareTelemetry: {
-    title: "Monitor PC temperatures and hardware health",
-    description:
-      "Tracks local CPU, graphics card, fan, and disk health readings so Astra can warn you if your PC runs hot or low on resources.",
-  },
-  sessionContinuity: {
-    title: "Pick up chats smoothly across devices",
-    description:
-      "Keeps your active conversation in sync when you switch between your desktop and your paired phone on home Wi-Fi.",
-  },
-  causalDryRun: {
-    title: "Preview file changes before making them",
-    description:
-      "Tests risky file or command changes in a temporary copy first and shows you what would happen before touching your real files.",
-  },
-  skillCompiler: {
-    title: "Save repeatable multi-step routines",
-    description:
-      "Turns tasks you ask Astra to repeat often into saved local shortcuts she can run reliably with your permission.",
-  },
-  microSandbox: {
-    title: "Run helper scripts in a locked-down box",
-    description:
-      "Isolates small helper scripts in a temporary restricted workspace so they cannot see your private folders or change system files.",
-  },
-  episodicCalibration: {
-    title: "Learn when to speak up or stay quiet",
-    description:
-      "Notices whether you usually accept or dismiss her suggestions and gently adjusts how often she interrupts you.",
-  },
-  attentionArbiter: {
-    title: "Choose the right device for alerts",
-    description:
-      "Sends reminders and check-ins to whichever device you are actively using (PC or phone) so you are not pinged twice.",
-  },
-  nightlyHygiene: {
-    title: "Automatic overnight memory cleanup",
-    description:
-      "Tidies up duplicate notes, old temporary files, and storage caches overnight while your PC is idle.",
-  },
-  fullDuplexVoice: {
-    title: "Interrupt naturally while she speaks",
-    description:
-      "Filters Astra's own voice out of your microphone so you can talk over her mid-sentence without waiting for her to finish.",
-  },
-  phonemeVisemes: {
-    title: "Detailed speech-matched lip-sync",
-    description:
-      "Matches her 3D mouth shapes to individual spoken sounds for smoother, more natural talking animations.",
-  },
-  selfDistillation: {
-    title: "Overnight local skill improvement",
-    description:
-      "Uses your larger local brain while your PC is idle to teach your smaller, faster brain how to answer better—everything stays on your machine.",
-  },
-  signedPlugins: {
-    title: "Verified third-party plugins",
-    description:
-      "Allows installing optional add-on packs (like Coding Companion or OBS Co-Host) whose files are cryptographically verified and require your explicit approval.",
-  },
-  nativeMultimodal: {
-    title: "Live voice-to-voice and continuous screen coaching",
-    description:
-      "Enables faster two-way voice conversation and live visual feedback while you play games or use complex apps.",
-  },
-  householdIsolation: {
-    title: "Separate profiles for family members",
-    description:
-      "Keeps memories, files, and permissions strictly separated when multiple people share the same computer.",
-  },
-  stationFederation: {
-    title: "Link multiple Astra PCs on your home network",
-    description:
-      "Securely connects separate Astra installs across your home network over encrypted local connections.",
-  },
-};
-
-const tier10Container = element<HTMLDivElement>("tier10-toggles");
-const tier10Boxes = new Map<Tier10Key, HTMLInputElement>();
-for (const key of TIER10_KEYS) {
-  const option = EXPERIMENTAL_OPTIONS[key];
-  const row = document.createElement("label");
-  row.className = "row switch";
-  const box = document.createElement("input");
-  box.id = `tier10-${key}`;
-  box.type = "checkbox";
-  box.addEventListener("change", () => void save({ tier10: { [key]: box.checked } }));
-  const what = document.createElement("span");
-  what.className = "what";
-  what.textContent = option.title;
-  const why = document.createElement("span");
-  why.className = "why";
-  why.textContent = option.description;
-  row.append(box, what, why);
-  tier10Container.append(row);
-  tier10Boxes.set(key, box);
-}
-
-function showTier10(tier10: Tier10Settings): void {
-  for (const key of TIER10_KEYS) {
-    const box = tier10Boxes.get(key);
-    if (box) box.checked = tier10[key];
-  }
-}
-
 onChange<HTMLSelectElement>("brain", (control) => ({ brain: control.value }));
 onChange<HTMLSelectElement>("language", (control) => ({
   language: control.value as SettingsView["language"],
@@ -460,6 +322,7 @@ onChange<HTMLInputElement>("advancedSettings", (control) => {
 wireSearchAndPresets(save);
 wireOnboarding(show, save);
 wireDevices(show);
+wireMcpSettings(show);
 wireFleet(show);
 wireTraces();
 wireSystem(show, save);

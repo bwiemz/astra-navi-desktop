@@ -9,7 +9,7 @@ import { z } from "zod";
  * licensed, download from Hugging Face without an account, and run entirely on this
  * computer.
  */
-export type ModelQuantization = "IQ4_XS" | "Q4_K_M" | "Q5_K_M" | "Q6_K" | "Q8_0";
+export type ModelQuantization = "IQ3_S" | "IQ4_XS" | "Q4_K_M" | "Q5_K_M" | "Q6_K" | "Q8_0";
 
 export type KvCachePrecision = "f16" | "f8_e4m3" | "q8_0" | "q4_0" | "tq4" | "tq3";
 
@@ -118,33 +118,46 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
   },
   xl: {
     id: "xl",
-    label: "Extra Large (Qwen3.5 72B Workstation)",
-    fileName: "Qwen3.5-72B-Q4_K_M.gguf",
-    url: "https://huggingface.co/unsloth/Qwen3.5-72B-GGUF/resolve/main/Qwen3.5-72B-Q4_K_M.gguf",
-    sizeBytes: 44_000_000_000,
+    label: "Extra Large (Qwen3.5 122B-A10B MoE)",
+    fileName: "Qwen3.5-122B-A10B-UD-IQ3_S.gguf",
+    url: "https://huggingface.co/unsloth/Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen3.5-122B-A10B-UD-IQ3_S.gguf",
+    sizeBytes: 46_556_959_936,
     vramGb: 48,
-    architecture: "dense",
-    quantization: "Q4_K_M",
-    kvBytesPerToken: 327_680,
-    totalParamsB: 72,
-    activeParamsB: 72,
+    architecture: "moe",
+    quantization: "IQ3_S",
+    kvBytesPerToken: 163_840,
+    totalParamsB: 122,
+    activeParamsB: 10,
   },
 };
 
-/** Optional workstation MoE catalog (120B+ total params with fast active-parameter inference). */
-export const MOE_WORKSTATION_MODELS: Record<"xlMoe", BrainModel> = {
+/** Optional Mixture-of-Experts catalog entries (fast active-parameter inference on 24–48 GB GPUs). */
+export const MOE_WORKSTATION_MODELS: Record<"largeMoe" | "xlMoe", BrainModel> = {
+  largeMoe: {
+    id: "large",
+    label: "Large MoE (Qwen3.5 35B-A3B)",
+    fileName: "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+    url: "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/resolve/main/Qwen3.5-35B-A3B-Q4_K_M.gguf",
+    sizeBytes: 22_016_023_168,
+    vramGb: 24,
+    architecture: "moe",
+    quantization: "Q4_K_M",
+    kvBytesPerToken: 98_304,
+    totalParamsB: 35,
+    activeParamsB: 3,
+  },
   xlMoe: {
     id: "xl",
-    label: "Extra Large MoE (120B Workstation)",
-    fileName: "Qwen3.5-120B-A16B-IQ4_XS.gguf",
-    url: "https://huggingface.co/unsloth/Qwen3.5-120B-GGUF/resolve/main/Qwen3.5-120B-A16B-IQ4_XS.gguf",
-    sizeBytes: 63_000_000_000,
-    vramGb: 66,
+    label: "Extra Large MoE (Qwen3.5 122B-A10B)",
+    fileName: "Qwen3.5-122B-A10B-UD-IQ3_S.gguf",
+    url: "https://huggingface.co/unsloth/Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen3.5-122B-A10B-UD-IQ3_S.gguf",
+    sizeBytes: 46_556_959_936,
+    vramGb: 48,
     architecture: "moe",
-    quantization: "IQ4_XS",
+    quantization: "IQ3_S",
     kvBytesPerToken: 163_840,
-    totalParamsB: 120,
-    activeParamsB: 16,
+    totalParamsB: 122,
+    activeParamsB: 10,
   },
 };
 
@@ -154,6 +167,7 @@ const QUANT_MULTIPLIER: Record<ModelQuantization, number> = {
   Q5_K_M: 1.21,
   Q4_K_M: 1.0,
   IQ4_XS: 0.86,
+  IQ3_S: 0.72,
 };
 
 const QUANT_PRECISION_ORDER: readonly ModelQuantization[] = [
@@ -162,6 +176,7 @@ const QUANT_PRECISION_ORDER: readonly ModelQuantization[] = [
   "Q5_K_M",
   "Q4_K_M",
   "IQ4_XS",
+  "IQ3_S",
 ];
 
 /** Estimates working KV-cache memory in bytes for a model, context length, and precision/lean setting. */
@@ -304,16 +319,24 @@ export interface ResolvedModel {
   download: BrainModel | null;
 }
 
-/** Works out which model file to use from the setting: "auto", a size, or a path to any GGUF file. */
+/** Works out which model file to use from the setting: "auto", a tier, a catalog preset id, or a path to any GGUF file. */
 export function resolveBrain(
   choice: BrainChoice,
   modelsDir: string,
   totalVramBytes: number | null,
 ): ResolvedModel {
   if (choice !== "auto" && !(choice in BRAIN_MODELS)) {
+    const catalogHit = findCatalogEntry(choice);
+    if (catalogHit) {
+      return {
+        label: catalogHit.model.label,
+        path: join(modelsDir, catalogHit.model.fileName),
+        download: catalogHit.model,
+      };
+    }
     if (!isAbsolute(choice) || !choice.toLowerCase().endsWith(".gguf")) {
       throw new Error(
-        `The "brain" setting "${choice}" is not one of auto, small, standard, large, xl, or a full path to a .gguf file.`,
+        `The "brain" setting "${choice}" is not one of auto, small, standard, large, xl, a catalog preset, or a full path to a .gguf file.`,
       );
     }
     return { label: choice.split("/").pop() ?? choice, path: choice, download: null };
@@ -500,24 +523,24 @@ export const ROLLING_MODEL_CATALOG: readonly RollingModelEntry[] = [
     notes: "3B-active Mixture-of-Experts preset: ultra-fast 213 tok/s generation & 100% Reasoning/Nothing Leaked, but 73.9% agentic score trails dense 27B (90.6%).",
   },
   {
-    presetId: "qwen3.5-72b",
-    tier: "xl",
-    family: "Qwen3.5",
+    presetId: "qwen3.5-35b-a3b-moe",
+    tier: "large",
+    family: "Qwen3.5-MoE",
     releaseTag: "2026.11",
     recommended: false,
     benchmarkStatus: "pending_gpu",
-    model: BRAIN_MODELS.xl,
-    notes: "Dense 72B workstation / 96+ GB Apple Silicon Max/Ultra preset; awaiting full 163-case GPU run.",
+    model: MOE_WORKSTATION_MODELS.largeMoe,
+    notes: "3B-active Qwen3.5 MoE preset for 24 GB GPUs & 36+ GB Apple Silicon; fast token generation, awaiting full 163-case GPU run.",
   },
   {
-    presetId: "qwen3.5-120b-a16b-moe",
+    presetId: "qwen3.5-122b-a10b-moe",
     tier: "xl",
     family: "Qwen3.5-MoE",
     releaseTag: "2026.11",
     recommended: false,
     benchmarkStatus: "pending_gpu",
     model: MOE_WORKSTATION_MODELS.xlMoe,
-    notes: "16B-active workstation MoE preset for 66+ GB VRAM / 128 GB unified memory; awaiting full 163-case GPU run.",
+    notes: "10B-active 122B workstation MoE preset (single-file UD-IQ3_S) for 48+ GB VRAM / 64+ GB unified memory; awaiting full 163-case GPU run.",
   },
 ];
 

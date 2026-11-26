@@ -1055,3 +1055,83 @@ body[data-searching="true"][data-advanced="false"] details.advanced-only {
   overflow-x: auto;
   user-select: all;
 }
+
+textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--ink);
+  background: var(--paper);
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: 7px 10px;
+  resize: vertical;
+}
+
+textarea:focus-visible {
+  outline: 3px solid var(--blush);
+  outline-offset: 2px;
+}
+
+.mcp-group[hidden] {
+  display: none;
+}
+
+.mcp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mcp-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border: 1.5px solid var(--ink);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mcp-badge-ok {
+  background: #d8f8e1;
+  color: #125629;
+}
+
+.mcp-badge-off {
+  background: #eceef7;
+  color: var(--ink-soft);
+}
+
+.mcp-badge-err {
+  background: #ffe0e8;
+  color: #a11a3b;
+}
+
+.mcp-target {
+  display: block;
+  margin-top: 2px;
+  font-family: ui-monospace, "JetBrains Mono", "Noto Sans Mono", monospace;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.mcp-tools-drawer {
+  margin-top: 6px;
+}
+
+.mcp-tools-drawer > summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.mcp-tool-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}

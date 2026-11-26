@@ -325,6 +325,19 @@ export function describeRequest(toolName: string, input: unknown): RequestSummar
         return { title: "Let her work on another machine?", detail: "", note: null };
       }
     default:
+      if (toolName.startsWith("mcp:")) {
+        const shortName = toolName.slice("mcp:".length);
+        const hasArgs =
+          typeof input === "object" &&
+          input !== null &&
+          !Array.isArray(input) &&
+          Object.keys(input as Record<string, unknown>).length > 0;
+        return {
+          title: `Run external MCP tool "${shortName}"?`,
+          detail: hasArgs ? (JSON.stringify(input, null, 2) ?? "").slice(0, 600) : "(no arguments)",
+          note: "External MCP server tool. Anything it returns is treated as outside text.",
+        };
+      }
       return {
         title: `Use ${toolName}?`,
         detail: JSON.stringify(input, null, 2).slice(0, 600),

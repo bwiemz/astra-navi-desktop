@@ -28,6 +28,7 @@ import {
 import type { TurnHookPipeline } from "./turnHooks.ts";
 import {
   BRAIN_MODELS,
+  findCatalogEntry,
   isDownloaded,
   resolveBrain,
   type BrainChoice,
@@ -1266,10 +1267,15 @@ export class LocalEngine {
     if (options.hardwareProfile) {
       const hw = await options.hardwareProfile().catch(() => null);
       if (hw) {
+        const catalogEntry = findCatalogEntry(options.choice);
         const tierPref: "auto" | BrainModel["id"] =
-          options.choice === "auto" || options.choice in BRAIN_MODELS
-            ? (options.choice as "auto" | BrainModel["id"])
-            : "auto";
+          options.choice === "auto"
+            ? "auto"
+            : options.choice in BRAIN_MODELS
+              ? (options.choice as BrainModel["id"])
+              : catalogEntry
+                ? catalogEntry.tier
+                : "auto";
         const rec = recommendHardwareTier(hw, tierPref);
         effectiveContextSize = Math.min(effectiveContextSize, rec.contextSize);
         effectiveLean = effectiveLean || rec.leanMemory;

@@ -117,6 +117,8 @@ import { BrowserDeck } from "./browser.ts";
 import { scheduleDebugAids } from "./debugAids.ts";
 import { registerDesktopIpc } from "./desktopIpc.ts";
 import { registerFleetIpc } from "./fleetIpc.ts";
+import { McpHub } from "../core/mcpClient.ts";
+import { registerMcpIpc } from "./mcpIpc.ts";
 import {
   detectLinuxDesktopEnvironment,
   installKwinHelper,
@@ -205,6 +207,7 @@ let research: ResearchDesk | null = null;
 let reach: Reach | null = null;
 let platformAdapter: PlatformAdapter | null = null;
 let fleet: Fleet | null = null;
+let mcpHub: McpHub | null = null;
 
 function gameOnCard(): Promise<string | null> {
   return platformAdapter ? platformAdapter.gameDetector.activeFullscreenGame() : cardGameOnCard();
@@ -696,6 +699,7 @@ const settings = createSettingsController({
   noticeWatch: () => noticeWatch,
   initiative: () => initiative,
   reach: () => reach,
+  mcpHub: () => mcpHub,
   board: () => board,
   searchBudget: () => searchBudget,
   designedVoices: () => voice.designedVoices(),
@@ -1339,6 +1343,8 @@ async function shutDown(): Promise<void> {
     // First, so the window manager's script, the virtual devices and the open port go
     // even if something further down hangs.
     await reach?.dispose();
+    await mcpHub?.closeAll();
+    mcpHub = null;
     platformAdapter?.dispose?.();
     platformAdapter = null;
     await searchBudget?.flush();
@@ -1548,6 +1554,7 @@ async function main(): Promise<void> {
   const hasPhoneLink = environment.commands.has("kdeconnect-cli");
   settings.setPhoneLink(hasPhoneLink);
   fleet = new Fleet({ dir: fleetDir(), machines: () => config.value.fleet.machines });
+  mcpHub = new McpHub();
   settings.setCanAskPassword(environment.commands.has("kdialog") || environment.commands.has("zenity"));
   void settings.detectFirewall();
   research = new ResearchDesk({
@@ -1605,6 +1612,7 @@ async function main(): Promise<void> {
     hands: reach.handsServices,
     phone: hasPhoneLink,
     fleet,
+    mcp: mcpHub,
     screen: reach.screen,
     notices: () => (config.value.notices.read ? noticeWatch : null),
     environment,
@@ -1712,6 +1720,12 @@ async function main(): Promise<void> {
     fromSettingsWindow: settings.fromSettingsWindow,
     settingsView: settings.settingsView,
   });
+  registerMcpIpc({
+    config,
+    mcpHub: () => mcpHub,
+    fromSettingsWindow: settings.fromSettingsWindow,
+    settingsView: settings.settingsView,
+  });
   if (linuxDesktopEnv?.isKdeWayland) {
     removeKwinHelper = await installKwinHelper({
       appId: app.getName(),
@@ -1771,6 +1785,12 @@ async function main(): Promise<void> {
         settings.setHandsAbilities(abilities);
       })
       .catch(() => undefined);
+    if (mcpHub && config.value.mcp.servers.some((s) => s.enabled !== false)) {
+      void mcpHub.syncServers(config.value.mcp.servers).catch((error: unknown) => {
+        recordRecentError("mcp", error);
+        console.warn("[mcp] startup sync failed:", error);
+      });
+    }
   } else {
     rebuildTrayMenu();
     sendPresence();
