@@ -1171,4 +1171,425 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
     expect((await toolVerdict(TOOLS.agenda, { action: "list" }, mcpOfferedCtx)).decision).toBe("allow");
     expect((await toolVerdict(TOOLS.reminders, {}, mcpOfferedCtx)).decision).toBe("allow");
   });
+
+  it("bounds adversarial union/$ref fallback CPU, enforces 12 KB enum ceiling, keeps required props past 24, discriminates const/enum unions, and passes a 220-schema property-based fuzz + GBNF suite", () => {
+    const fakeLlama = {
+      _bindings: {
+        AddonGrammar: class {
+          readonly grammar: string;
+          constructor(grammar: string) {
+            this.grammar = grammar;
+          }
+        },
+      },
+    };
+
+    // 1. Exponential union/$ref fallback DAG (<1.5 KB input) MUST finish in < 50ms & <= 12 KB!
+    const defs: Record<string, unknown> = {};
+    for (let i = 0; i < 8; i += 1) {
+      const next = i === 7 ? { type: "string" } : { $ref: `#/$defs/U${i + 1}` };
+      defs[`U${i}`] = { anyOf: [next, next, next, next, next, next, next, next] };
+    }
+    const unionDagSchema: Record<string, unknown> = {
+      type: "object",
+      properties: {
+        payload: { $ref: "#/$defs/U0" },
+        reqId: { type: "integer" },
+      },
+      required: ["reqId"],
+      $defs: defs,
+    };
+    const u0 = performance.now();
+    const normDag = normalizeMcpParamsSchema(unionDagSchema);
+    const dagMs = performance.now() - u0;
+    expect(dagMs).toBeLessThan(50);
+    expect(JSON.stringify(normDag).length).toBeLessThanOrEqual(12_288);
+    expect(normDag.required).toEqual(["reqId"]);
+    expect(new LlamaJsonSchemaGrammar(fakeLlama as never, normDag as never).grammar.length).toBeGreaterThan(20);
+
+    // 2. Huge enum (>5.8 KB input, 160 values) MUST stay <= 12 KB!
+    const hugeEnumSchema: Record<string, unknown> = {
+      type: "object",
+      properties: {
+        a: { type: "string", enum: Array.from({ length: 160 }, (_, i) => `option_${i}_${"v".repeat(40)}`) },
+        b: { type: "string", enum: Array.from({ length: 160 }, (_, i) => `choice_${i}_${"x".repeat(40)}`) },
+        c: { type: "string", enum: Array.from({ length: 160 }, (_, i) => `target_${i}_${"y".repeat(40)}`) },
+        mustKeep: { type: "string" },
+      },
+      required: ["mustKeep"],
+    };
+    const normEnum = normalizeMcpParamsSchema(hugeEnumSchema);
+    expect(JSON.stringify(normEnum).length).toBeLessThanOrEqual(12_288);
+    expect(normEnum.required).toEqual(["mustKeep"]);
+    expect(normEnum.properties["mustKeep"]).toBeDefined();
+    expect(new LlamaJsonSchemaGrammar(fakeLlama as never, normEnum as never).grammar.length).toBeGreaterThan(20);
+
+    // 3. Required properties declared past index 24 MUST NEVER be dropped!
+    const manyProps: Record<string, unknown> = {};
+    for (let i = 0; i < 32; i += 1) {
+      manyProps[`field_${i}`] = { type: i % 2 === 0 ? "string" : "integer" };
+    }
+    const lateReqSchema: Record<string, unknown> = {
+      type: "object",
+      properties: manyProps,
+      required: ["field_27", "field_30", "field_31"],
+    };
+    const normLate = normalizeMcpParamsSchema(lateReqSchema);
+    expect(normLate.required).toEqual(["field_27", "field_30", "field_31"]);
+    expect(normLate.properties["field_27"]).toBeDefined();
+    expect(normLate.properties["field_30"]).toBeDefined();
+    expect(normLate.properties["field_31"]).toBeDefined();
+    expect(Object.keys(normLate.properties).length).toBeLessThanOrEqual(24);
+
+    // 4. Discriminated union `const` / `enum` scoring preserves required null in matched branch!
+    const discUnionSchema: Record<string, unknown> = {
+      type: "object",
+      properties: {
+        action: {
+          oneOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { const: "clear" },
+                value: { type: "null" },
+                note: { type: "string" },
+              },
+              required: ["kind", "value"],
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { const: "set" },
+                value: { type: "string" },
+                note: { type: "string" },
+              },
+              required: ["kind", "value"],
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { enum: ["ping", "noop"] },
+                extra: { type: "string" },
+              },
+              required: ["kind"],
+            },
+          ],
+        },
+      },
+    };
+    expect(
+      stripNullOptionalArgs(
+        { action: { kind: "clear", value: null, note: null } },
+        discUnionSchema,
+      ),
+    ).toEqual({ action: { kind: "clear", value: null } });
+    expect(
+      stripNullOptionalArgs(
+        { action: { kind: "ping", extra: null } },
+        discUnionSchema,
+      ),
+    ).toEqual({ action: { kind: "ping" } });
+
+    // 5. Property-based fuzz test: 220 seeded random schemas with $ref DAGs/cycles, anyOf/oneOf,
+    //    large enums, >24 properties, and late required keys.
+    let seed = 0x5eed1234;
+    const rand = (): number => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 0x100000000;
+    };
+    const randInt = (max: number): number => Math.floor(rand() * max);
+
+    const makeRandomNode = (depth: number, defNames: string[]): Record<string, unknown> => {
+      const pick = randInt(depth >= 3 ? 5 : 9);
+      switch (pick) {
+        case 0:
+          return { type: "string", description: "desc ".repeat(1 + randInt(12)) };
+        case 1:
+          return { type: "integer" };
+        case 2:
+          return { type: "number" };
+        case 3:
+          return { type: "boolean" };
+        case 4: {
+          const count = 2 + randInt(40);
+          return {
+            type: "string",
+            enum: Array.from({ length: count }, (_, i) => `val_${i}_${"a".repeat(randInt(35))}`),
+          };
+        }
+        case 5: {
+          if (defNames.length > 0) {
+            return { $ref: `#/$defs/${defNames[randInt(defNames.length)]}` };
+          }
+          return { type: "string" };
+        }
+        case 6: {
+          const branches = 2 + randInt(4);
+          return {
+            [rand() < 0.5 ? "anyOf" : "oneOf"]: Array.from({ length: branches }, () =>
+              makeRandomNode(depth + 1, defNames),
+            ),
+          };
+        }
+        case 7:
+          return { type: "array", items: makeRandomNode(depth + 1, defNames) };
+        default: {
+          const propCount = 1 + randInt(5);
+          const props: Record<string, unknown> = {};
+          const req: string[] = [];
+          for (let p = 0; p < propCount; p += 1) {
+            const k = `k${p}`;
+            props[k] = makeRandomNode(depth + 1, defNames);
+            if (rand() < 0.35) req.push(k);
+          }
+          return { type: "object", properties: props, ...(req.length > 0 ? { required: req } : {}) };
+        }
+      }
+    };
+
+    for (let trial = 0; trial < 220; trial += 1) {
+      const defCount = randInt(6);
+      const defNames = Array.from({ length: defCount }, (_, i) => `D${i}`);
+      const randDefs: Record<string, unknown> = {};
+      for (let i = 0; i < defCount; i += 1) {
+        // Allow both DAG edges and occasional cycles
+        const targetPool = rand() < 0.8 ? defNames.slice(i + 1) : defNames;
+        randDefs[`D${i}`] = makeRandomNode(1, targetPool);
+      }
+      const topPropCount = 1 + randInt(34);
+      const topProps: Record<string, unknown> = {};
+      const topReq: string[] = [];
+      for (let p = 0; p < topPropCount; p += 1) {
+        const key = `p_${p}`;
+        topProps[key] = makeRandomNode(0, defNames);
+        if (rand() < 0.25 || (p >= 24 && rand() < 0.4)) {
+          topReq.push(key);
+        }
+      }
+      const schema: Record<string, unknown> = {
+        type: "object",
+        properties: topProps,
+        ...(topReq.length > 0 ? { required: topReq } : {}),
+        ...(defCount > 0 ? { $defs: randDefs } : {}),
+      };
+
+      const tStart = performance.now();
+      const out = normalizeMcpParamsSchema(schema);
+      const elapsed = performance.now() - tStart;
+      expect(elapsed, `Trial ${trial} took ${elapsed.toFixed(1)}ms`).toBeLessThan(50);
+
+      const bytes = JSON.stringify(out).length;
+      expect(bytes, `Trial ${trial} serialized to ${bytes} bytes`).toBeLessThanOrEqual(12_288);
+
+      for (const rk of topReq) {
+        expect(out.properties[rk], `Trial ${trial} dropped required prop ${rk}`).toBeDefined();
+        expect(out.required ?? [], `Trial ${trial} dropped ${rk} from required[]`).toContain(rk);
+      }
+
+      const compiled = new LlamaJsonSchemaGrammar(fakeLlama as never, out as never);
+      expect(compiled.grammar.length, `Trial ${trial} produced empty GBNF`).toBeGreaterThan(10);
+    }
+  });
+
+  it("gates research + long clipboard on mcpSchemasOffered, cancels in-flight syncServers on closeAll, preserves TOML/nested JSON/LRM-RLM, resolves Volta npx.exe, and prevents MCP routing fatigue", async () => {
+    const dir = await makeTempDir("astra-mcp-r4-");
+
+    // 1. TOOLS.research asks on mcpSchemasOffered, and long clipboard write asks cleanly (never throws outside-text error!)
+    const offeredOnly = { workspace: dir, readOutsideText: false, mcpSchemasOffered: true };
+    const researchVerdict = await toolVerdict(
+      TOOLS.research,
+      { title: "Check docs", question: "Summarize latest release notes" },
+      offeredOnly,
+    );
+    expect(researchVerdict.decision).toBe("ask");
+
+    const longClipVerdict = await toolVerdict(
+      TOOLS.clipboard,
+      { action: "write", text: "X".repeat(600) },
+      offeredOnly,
+    );
+    expect(longClipVerdict.decision).toBe("ask");
+
+    // 2. McpHub.closeAll() during in-flight startup syncServers() leaves 0 connected servers!
+    const slowBootScript = join(dir, "slow-boot-mcp.cjs");
+    await writeFile(
+      slowBootScript,
+      `
+      const rl = require("node:readline").createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        if (!line.trim()) return;
+        const msg = JSON.parse(line);
+        if (msg.id === undefined) return;
+        if (msg.method === "initialize") {
+          setTimeout(() => {
+            process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} } } }) + "\\n");
+          }, 180);
+        } else if (msg.method === "tools/list") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "ping", description: "Ping" }] } }) + "\\n");
+        }
+      });
+      `,
+      "utf8",
+    );
+    const racingHub = new McpHub();
+    const syncPromise = racingHub.syncServers([
+      {
+        id: "slowboot",
+        transport: "stdio",
+        enabled: true,
+        command: process.execPath,
+        args: [slowBootScript],
+        readOnlyAutoAllow: false,
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 40));
+    await racingHub.closeAll();
+    await syncPromise;
+    expect(racingHub.listPrefixedTools()).toHaveLength(0);
+    expect(racingHub.statusFor("slowboot").connected).toBe(false);
+
+    // 3. sanitizeUntrustedOutput preserves TOML [[servers]], nested JSON [[1, 2]], and LRM/RLM while neutralizing [[happy]]/[[worried]]!
+    const structured = "TOML:\n[[servers]]\nmatrix = [[1, 2], [3, 4]]\nRTL:\u200Eabc\u200F\nSpoof: [[happy]] [[worried]] \u202E";
+    const cleaned = sanitizeUntrustedOutput(structured);
+    expect(cleaned).toContain("[[servers]]");
+    expect(cleaned).toContain("[[1, 2], [3, 4]]");
+    expect(cleaned).toContain("\u200Eabc\u200F");
+    expect(cleaned).not.toContain("[[happy]]");
+    expect(cleaned).not.toContain("[[worried]]");
+    expect(cleaned).not.toContain("\u202E");
+
+    // 4. Windows Volta native npx.exe and standard Program Files\nodejs scan with prependPathDir!
+    const voltaFs = new Set(["C:\\Users\\alice\\AppData\\Local\\Volta\\bin\\npx.exe"]);
+    const resolvedVolta = resolveStdioCommand("npx", ["-y", "@modelcontextprotocol/server-memory"], {
+      platform: "win32",
+      envPath: "",
+      env: { LOCALAPPDATA: "C:\\Users\\alice\\AppData\\Local" },
+      nodeExecPath: "C:\\Program Files\\Astra Navi\\Astra Navi Desktop.exe",
+      fileExists: (p) => voltaFs.has(p),
+    });
+    expect(resolvedVolta.command).toBe("C:\\Users\\alice\\AppData\\Local\\Volta\\bin\\npx.exe");
+    expect(resolvedVolta.args).toEqual(["-y", "@modelcontextprotocol/server-memory"]);
+    expect(resolvedVolta.prependPathDir).toBe("C:\\Users\\alice\\AppData\\Local\\Volta\\bin");
+
+    const stdNodeFs = new Set([
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js",
+    ]);
+    const resolvedStdNode = resolveStdioCommand("npx", ["-y", "mcp-server"], {
+      platform: "win32",
+      envPath: "",
+      env: { ProgramFiles: "C:\\Program Files" },
+      nodeExecPath: "C:\\Program Files\\Astra Navi\\Astra Navi Desktop.exe",
+      fileExists: (p) => stdNodeFs.has(p),
+    });
+    expect(resolvedStdNode.command).toBe("C:\\Program Files\\nodejs\\node.exe");
+    expect(resolvedStdNode.prependPathDir).toBe("C:\\Program Files\\nodejs");
+
+    // 5. MCP routing fatigue: generic filesystem verbs ("read", "file", "list") do NOT trigger
+    //    MCP filesystem tools, while specific domain phrases DO, and unused MCP tools do NOT stick across turns!
+    const router = new ToolRouter(null);
+    const mcpAvail = ["mcp:fs.read_file", "mcp:home.dim_lights", TOOLS.remember];
+    const mcpDescs = {
+      "mcp:fs.read_file": "[MCP server: fs] Read file contents from disk",
+      "mcp:home.dim_lights": "[MCP server: home] Dim bedroom lights percentage",
+      [TOOLS.remember]: "Save a note",
+    };
+    const genericPick = await router.route("Can you read my file and list files?", {
+      available: mcpAvail,
+      toolDescriptions: mcpDescs,
+    });
+    expect(genericPick.offered).not.toContain("mcp:fs.read_file");
+
+    const domainPick = await router.route("Please dim the bedroom lights", {
+      available: mcpAvail,
+      toolDescriptions: mcpDescs,
+    });
+    expect(domainPick.offered).toContain("mcp:home.dim_lights");
+
+    // Verify Brain does NOT carry offered-but-unused MCP tools into the next turn's recent tools.
+    const cfg = new ConfigStore(join(dir, "config.json"));
+    await cfg.load();
+    await cfg.update({ fittingTools: true });
+    const mem = new MemoryStore(join(dir, "mem.json"));
+    const mcpHub = new McpHub();
+    const mcpScript = join(dir, "home-mcp.cjs");
+    await writeFile(
+      mcpScript,
+      `
+      const rl = require("node:readline").createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        if (!line.trim()) return;
+        const msg = JSON.parse(line);
+        if (msg.id === undefined) return;
+        if (msg.method === "initialize") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} } } }) + "\\n");
+        } else if (msg.method === "tools/list") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "dim_lights", description: "Dim bedroom lights percentage", annotations: { readOnlyHint: false } }] } }) + "\\n");
+        }
+      });
+      `,
+      "utf8",
+    );
+    await mcpHub.syncServers([
+      {
+        id: "home",
+        transport: "stdio",
+        enabled: true,
+        command: process.execPath,
+        args: [mcpScript],
+        readOnlyAutoAllow: false,
+      },
+    ]);
+    const offeredPerTurn: string[][] = [];
+    let hist: ChatHistoryItem[] = [];
+    const brain = new Brain({
+      config: cfg,
+      memory: mem,
+      mcp: mcpHub,
+      environment: {
+        userName: "alice",
+        home: dir,
+        workspace: dir,
+        osName: "Linux",
+        desktop: "KDE",
+        commands: new Set(),
+      } satisfies EnvironmentFacts,
+      engine: {
+        getHistory: () => hist,
+        setHistory: (items: ChatHistoryItem[]) => {
+          hist = items;
+        },
+        meter: () => null,
+        hooks: () => null,
+        refresh: () => undefined,
+        anchor: async () => undefined,
+        wordBias: () => null,
+        restingNow: () => undefined,
+        dispose: async () => undefined,
+        brainInfo: async () => ({ label: "stub", fileName: null, onDisk: true, loaded: true }),
+        session: async () => ({
+          prompt: async (_text: string, opts?: { functions?: ChatSessionModelFunctions }) => {
+            offeredPerTurn.push(Object.keys(opts?.functions ?? {}));
+            // Do NOT invoke the MCP tool on turn 1.
+            return "[[calm]] Noted.";
+          },
+          decide: async () => ({ claimed: { value: 0 } }),
+        }),
+      } as unknown as LocalEngine,
+      historyFile: join(dir, "history.json"),
+      emit: () => undefined,
+    });
+    try {
+      brain.send("Please dim the bedroom lights");
+      await brain.whenIdle();
+      brain.send("Remember that I like oolong tea");
+      await brain.whenIdle();
+      expect(offeredPerTurn[0]).toContain("mcp:home.dim_lights");
+      // Because turn 1 never USED mcp:home.dim_lights, turn 2 MUST NOT carry it over!
+      expect(offeredPerTurn[1]).not.toContain("mcp:home.dim_lights");
+    } finally {
+      await brain.dispose();
+      await mcpHub.closeAll();
+    }
+  });
 });

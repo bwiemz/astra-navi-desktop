@@ -582,9 +582,13 @@ export class Brain {
     const toolDescriptions = Object.fromEntries(
       Object.entries(all).map(([name, fn]) => [name, fn.description ?? ""]),
     );
+    // Carry built-in tools across the last few turns, but only carry an actually-used `mcp:*`
+    // tool forward for 1 follow-up turn so MCP schemas don't linger across unrelated turns.
+    const recentBuiltins = this.toolsOfLate.flat().filter((name) => !name.startsWith("mcp:"));
+    const recentMcp = (this.toolsOfLate.at(-1) ?? []).filter((name) => name.startsWith("mcp:"));
     const route = await this.router.route(message.text, {
       available: allNames,
-      recent: this.toolsOfLate.flat(),
+      recent: [...new Set([...recentBuiltins, ...recentMcp])],
       machines: deps.fleet?.machines().map((machine) => machine.name) ?? [],
       toolDescriptions,
       ...(this.saidBefore === undefined ? {} : { before: this.saidBefore }),
@@ -881,7 +885,8 @@ export class Brain {
       // picked out for it: "and the other one?" names nothing.
       if (!signal.aborted && !message.event) {
         const used = this.turnTools.map((record) => record.tool);
-        this.toolsOfLate.push([...new Set([...used, ...this.pickedOut])]);
+        const pickedNonMcp = this.pickedOut.filter((name) => !name.startsWith("mcp:"));
+        this.toolsOfLate.push([...new Set([...used, ...pickedNonMcp])]);
         while (this.toolsOfLate.length > TURNS_A_TOOL_STAYS_ON_OFFER) this.toolsOfLate.shift();
         this.saidBefore = message.text.slice(0, 400);
       } else if (!signal.aborted && message.correction) {

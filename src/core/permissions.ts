@@ -533,12 +533,13 @@ export async function toolVerdict(
     // Research only looks things up, but its question goes out in searches. Once she has
     // read outside text, that text could have put something of the user's into the question.
     case TOOLS.research:
-      if (!context.readOutsideText) return { decision: "allow" };
+      if (!context.readOutsideText && !context.mcpSchemasOffered) return { decision: "allow" };
       return {
         decision: "ask",
         sensitive: false,
-        reason:
-          "She has read a web page, a file or a program's output in this conversation. The question below will be sent out in searches, so check it holds nothing private.",
+        reason: context.readOutsideText
+          ? "She has read a web page, a file or a program's output in this conversation. The question below will be sent out in searches, so check it holds nothing private."
+          : "External MCP tool descriptions are loaded on this turn. The question below will be sent out in searches, so check it holds nothing private.",
       };
     case TOOLS.operate:
       return operateVerdict(input, context);
@@ -619,7 +620,7 @@ export async function toolVerdict(
       }
       // What she puts there the user will paste somewhere, so it is checked once outside text or MCP schemas are present.
       if (!context.readOutsideText && !context.mcpSchemasOffered) return { decision: "allow" };
-      if ((stringField(input, "text") ?? "").length > MAX_CLIPBOARD_CHARS) {
+      if (context.readOutsideText && (stringField(input, "text") ?? "").length > MAX_CLIPBOARD_CHARS) {
         throw new Error(
           `That is too long to copy now (${MAX_CLIPBOARD_CHARS} characters at most once you have read outside text). Save it to a file with write_file instead.`,
         );
