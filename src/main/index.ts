@@ -1778,6 +1778,22 @@ async function main(): Promise<void> {
     openSettings: () => settings.openSettings(),
     importModel,
     importModelFile,
+    aiReportContext: () => {
+      const loc = describeInferenceLocality(config.value.inference);
+      return {
+        appVersion: app.getVersion(),
+        reportsDir: join(dataDir(), "ai-reports"),
+        brainLabel:
+          config.value.inference.provider === "openai-compatible"
+            ? loc.label
+            : config.value.brain,
+        inferenceScope: loc.scope,
+        extraSecrets: [
+          config.value.search.braveApiKey ?? "",
+          config.value.inference.apiKey,
+        ].filter(Boolean),
+      };
+    },
   });
   settings.registerSettingsIpc();
   workbench.registerIpc();

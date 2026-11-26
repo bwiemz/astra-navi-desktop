@@ -2,6 +2,13 @@ import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import { clipboard, dialog, ipcMain, shell } from "electron";
+import {
+  AI_REPORT_CATEGORIES,
+  buildAiOutputReport,
+  buildGithubReportIssueUrl,
+  saveAiOutputReport,
+  type AiReportCategory,
+} from "../core/aiReport.ts";
 import { type Agenda, MAX_CALENDARS, readCalendar, whyNotThisCalendar } from "../core/agenda.ts";
 import type { ConversationArchive } from "../core/archive.ts";
 import type { Brain } from "../core/brain.ts";
@@ -9,6 +16,7 @@ import type { ConfigStore } from "../core/config.ts";
 import { classifyDroppedPath, deriveCalendarNameFromPath } from "../core/dropRouter.ts";
 import { canonical, isPrivatePath } from "../core/riskRules.ts";
 import type {
+  AiReportResult,
   AppState,
   DropFilesResult,
   PastExchange,
@@ -47,6 +55,13 @@ export interface DesktopIpcDeps {
   importModelFile?(
     filePath: string,
   ): Promise<{ ok: true; files: number; name: string } | { ok: false; error: string }>;
+  aiReportContext?(): {
+    appVersion: string;
+    reportsDir: string;
+    brainLabel: string;
+    inferenceScope: string;
+    extraSecrets?: readonly string[];
+  };
 }
 
 export function registerDesktopIpc(deps: DesktopIpcDeps): void {
@@ -210,6 +225,47 @@ export function registerDesktopIpc(deps: DesktopIpcDeps): void {
       );
     },
   );
+  ipcMain.handle("ai:report-output", async (event, raw: unknown): Promise<AiReportResult> => {
+    if (!fromMainWindow(event)) throw new Error("Not allowed from here.");
+    const ctx = deps.aiReportContext?.();
+    if (!ctx) return { ok: false, error: "AI report context is not configured." };
+    const rec = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+    const rawCat = typeof rec["category"] === "string" ? rec["category"] : "other";
+    const category: AiReportCategory = (AI_REPORT_CATEGORIES as readonly string[]).includes(rawCat)
+      ? (rawCat as AiReportCategory)
+      : "other";
+    const note = typeof rec["note"] === "string" ? rec["note"] : "";
+    const includeExcerpt = rec["includeExcerpt"] === true;
+    const replyExcerpt = typeof rec["replyExcerpt"] === "string" ? rec["replyExcerpt"] : undefined;
+    const userPromptExcerpt =
+      typeof rec["userPromptExcerpt"] === "string" ? rec["userPromptExcerpt"] : undefined;
+    try {
+      const report = buildAiOutputReport({
+        category,
+        note,
+        includeExcerpt,
+        replyExcerpt,
+        userPromptExcerpt,
+        appVersion: ctx.appVersion,
+        brainLabel: ctx.brainLabel,
+        inferenceScope: ctx.inferenceScope,
+        extraSecrets: ctx.extraSecrets,
+      });
+      const filePath = await saveAiOutputReport(ctx.reportsDir, report);
+      const issueUrl = buildGithubReportIssueUrl(report);
+      try {
+        shell.showItemInFolder(filePath);
+      } catch {
+        // Headless or sandboxed environments may lack a file manager portal.
+      }
+      return { ok: true, filePath, issueUrl };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
   ipcMain.handle("files:drop", async (event, rawPaths: unknown): Promise<DropFilesResult> => {
     if (!fromMainWindow(event)) throw new Error("Not allowed from here.");
     const result: DropFilesResult = {

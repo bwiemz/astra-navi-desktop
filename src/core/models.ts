@@ -255,13 +255,15 @@ export interface LlamaCpp10LaunchConfig {
   modelPath: string;
   contextSize: number;
   draftModelPath?: string | null;
+  /** Optional Qwen3.5 Multi-Token Prediction (`--spec-type draft-mtp --spec-draft-n-max N`). */
+  mtpDraftTokens?: number;
   kvCachePrecision?: "f16" | "f8_e4m3" | "q8_0" | "q4_0";
   moeCacheSizeMb?: number;
   moeCacheCpuShare?: number;
   flashAttention?: boolean;
 }
 
-/** Builds llama.cpp 1.0.0 CLI/server flags (`-md`, `-ctk`/`-ctv`, `--moe-cache-*`). */
+/** Builds llama.cpp 1.0.0 CLI/server flags (`-md`, `--spec-type draft-mtp`, `-ctk`/`-ctv`, `--moe-cache-*`). */
 export function buildLlamaCpp10Args(cfg: LlamaCpp10LaunchConfig): string[] {
   const args: string[] = [
     "-m",
@@ -272,7 +274,10 @@ export function buildLlamaCpp10Args(cfg: LlamaCpp10LaunchConfig): string[] {
   if (cfg.flashAttention !== false) {
     args.push("-fa", "on");
   }
-  if (cfg.draftModelPath) {
+  if (typeof cfg.mtpDraftTokens === "number" && cfg.mtpDraftTokens >= 1) {
+    const nMax = Math.min(8, Math.max(1, Math.trunc(cfg.mtpDraftTokens)));
+    args.push("--spec-type", "draft-mtp", "--spec-draft-n-max", String(nMax), "-np", "1");
+  } else if (cfg.draftModelPath) {
     args.push("-md", cfg.draftModelPath);
   }
   const kvType = cfg.kvCachePrecision ?? "f16";

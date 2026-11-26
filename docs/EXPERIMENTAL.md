@@ -212,6 +212,16 @@ All pre-release Android 15, Windows Authenticode signing pipeline, packaging, ex
   - `src/core/openaiBackend.ts`, `src/core/config.ts`, `src/core/engine.ts`: Generalized SSE streaming + multi-step OpenAI `tool_calls` execution (`OpenAiCompatibleSession`, `probeOpenAiModels`, `openAiSideQuestion`) integrated seamlessly behind `LocalEngine` (keeping built-in local GGUF as default) with `classifyInferenceEndpoint()` blocking embedded credentials & cloud metadata hosts and distinguishing `local-gguf`, `local-loopback`, `private-lan`, and `remote-internet`.
   - `src/renderer/src/settings/inference.ts`, `src/renderer/settings.html`, `src/renderer/index.html`, `src/renderer/src/main.ts`, `src/main/settingsIpc.ts`: Added **Settings → Mind → Inference backend** (presets for Ollama, LM Studio, `llama-server`, custom; **Test & List Models** discovery; write-only API key redacted from views & support bundles) plus a visible `#remote-inference-badge` in the companion window whenever inference leaves this computer (`tests/openaiBackend.test.ts`: `5/5`).
 
+---
+
+## 13. Roadmap Items 8, 9, 10 & Qwen3.5 MTP Runtime Check (`2026-11-26`)
+
+- **Item 8 — Windows Clean-Room Verification Hardening (`scripts/verify-clean-windows.ps1`):** Added `-RequireSigned` enforcing Valid Authenticode + RFC 3161 `TimeStamperCertificate`, explicit failure branch when `win-hands.exe` is missing, live JSON probes for `volume-get`, `gpu-vram`, and `windows`, and `fastapi`/`uvicorn` import verification when the optional Python voice venv exists.
+- **Item 10 — Microsoft Store Policy 11.16 In-App AI Output Reporting (`src/core/aiReport.ts`, `src/main/desktopIpc.ts`, `src/renderer/index.html`, `src/renderer/src/main.ts`):** Added **Report AI Output** beside **Forget Last Turn** with a local-first incident dialog that scrubs secrets (`withoutSecrets`), saves `0o600` JSON reports under `<dataDir>/ai-reports/`, keeps reply excerpts opt-in, and offers a user-initiated GitHub Issue link with zero background telemetry.
+- **Item 10 — Data-Only Community / Steam Workshop Pack Gate (`src/core/workshopPack.ts`):** Enforces `dataOnly: true` for `avatar`, `voice`, `persona`, and `emote-pack` packs, strictly allowlisting passive media/metadata assets while blocking symlinks, path traversal, HTML/SVG, and all script/binary code extensions (`.js`, `.py`, `.ps1`, `.exe`, `.dll`, `.wasm`, etc.).
+- **Items 8–10 & Qwen3.5 MTP Check (`docs/DISTRIBUTION_PLAYBOOK.md`, `src/core/models.ts`):** Documented Steam base + Supporter DLC & AI disclosure copy, Microsoft Store MSIX vs Authenticode signing, Flathub sandbox limits, focus/scope discipline, and the verified Qwen3.5 MTP check (`node-llama-cpp 3.22.3` / `llama.cpp v0.9.0` lacks JS `draft-mtp` bindings; added `mtpDraftTokens` to `buildLlamaCpp10Args()` for upstream `llama-server --spec-type draft-mtp --spec-draft-n-max <N> -np 1`, pairing cleanly with Item 7's OpenAI-compatible backend while Item 3 runs `--mmproj` separately; `tests/distributionAndCompliance.test.ts`: `6/6`).
+
+
 
 
 

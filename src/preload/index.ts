@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
+  AiReportResult,
+  AiReportSubmission,
   AichanBridge,
   AppState,
   AvatarReactionEvent,
@@ -35,6 +37,8 @@ const bridge: AichanBridge = {
       userText: string | null;
       forgottenMemories: number;
     }>,
+  reportAiOutput: (input: AiReportSubmission) =>
+    ipcRenderer.invoke("ai:report-output", input) as Promise<AiReportResult>,
   pathForFile: (file) => {
     try {
       return webUtils.getPathForFile(file);

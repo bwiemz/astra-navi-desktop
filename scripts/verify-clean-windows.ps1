@@ -6,6 +6,7 @@
 param(
   [string]$InstallDir = "",
   [switch]$RequireBootstrap,
+  [switch]$RequireSigned,
   [switch]$LaunchSmoke
 )
 
@@ -53,9 +54,19 @@ if (Test-Path $appExe) {
   Report-Pass "Main Executable" $appExe
   $sig = Get-AuthenticodeSignature -FilePath $appExe
   if ($sig.Status -eq "Valid") {
-    Report-Pass "Main Executable Signature" "$($sig.SignerCertificate.Subject)"
+    if ($null -ne $sig.TimeStamperCertificate) {
+      Report-Pass "Main Executable Signature" "$($sig.SignerCertificate.Subject) (RFC 3161 timestamped)"
+    } elseif ($RequireSigned) {
+      Report-Fail "Main Executable Signature" "Valid signature but missing RFC 3161 timestamp"
+    } else {
+      Report-Warn "Main Executable Signature" "Valid signature but missing RFC 3161 timestamp"
+    }
   } elseif ($sig.Status -eq "NotSigned") {
-    Report-Warn "Main Executable Signature" "Unsigned build (SmartScreen warning expected until Release signing is wired)"
+    if ($RequireSigned) {
+      Report-Fail "Main Executable Signature" "Unsigned build (-RequireSigned set)"
+    } else {
+      Report-Warn "Main Executable Signature" "Unsigned build (SmartScreen warning expected until Release signing is wired)"
+    }
   } else {
     Report-Fail "Main Executable Signature" "Invalid signature status: $($sig.Status) ($($sig.StatusMessage))"
   }
@@ -126,6 +137,22 @@ if ($winHandsExe) {
   } catch {
     Report-Fail "WinHands version" $_.Exception.Message
   }
+
+  foreach ($cmd in @("volume-get", "gpu-vram", "windows")) {
+    try {
+      $cmdOut = & $winHandsExe $cmd 2>&1
+      if ($LASTEXITCODE -ne 0) {
+        Report-Fail "WinHands $cmd" "Exited $LASTEXITCODE : $cmdOut"
+      } else {
+        $null = $cmdOut | ConvertFrom-Json
+        Report-Pass "WinHands $cmd" "valid JSON response"
+      }
+    } catch {
+      Report-Fail "WinHands $cmd" $_.Exception.Message
+    }
+  }
+} else {
+  Report-Fail "Resource win-hands.exe" "Missing native Windows helper under $resourcesDir\hands"
 }
 
 # Post-bootstrap / clean-room runtime checks
@@ -183,7 +210,16 @@ $ocrDir = Join-Path $modelsDir "ocr"
 $startMenuLnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Astra Navi Desktop.lnk"
 
 if (Test-Path $voicePy) {
-  Report-Pass "Bootstrap Voice Env" $voicePy
+  try {
+    $pyCheck = & $voicePy -c "import fastapi, uvicorn; print('ok')" 2>&1
+    if ($LASTEXITCODE -eq 0 -and "$pyCheck" -match "ok") {
+      Report-Pass "Bootstrap Voice Env" "$voicePy (fastapi & uvicorn importable)"
+    } else {
+      Report-Fail "Bootstrap Voice Env" "Venv exists at $voicePy but packages failed to import: $pyCheck"
+    }
+  } catch {
+    Report-Fail "Bootstrap Voice Env" $_.Exception.Message
+  }
 } elseif ($RequireBootstrap) {
   Report-Fail "Bootstrap Voice Env" "Missing $voicePy"
 } else {

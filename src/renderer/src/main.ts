@@ -1,5 +1,6 @@
 import "./style.css";
 import { formatAttachedPrompt } from "../../core/dropRouter.ts";
+import type { AiReportCategory } from "../../core/aiReport.ts";
 import {
   BUILT_IN_EMOTE_PACKS,
   type IdleLoopPreset,
@@ -1704,6 +1705,66 @@ function wireEmotePopover(): void {
   }
 }
 
+function wireAiReportDialog(): void {
+  const openBtn = document.getElementById("live-report-output");
+  const dialogEl = document.getElementById("ai-report-dialog");
+  const categoryEl = document.getElementById("ai-report-category") as HTMLSelectElement | null;
+  const detailsEl = document.getElementById("ai-report-details") as HTMLTextAreaElement | null;
+  const includeBox = document.getElementById("ai-report-include-excerpt") as HTMLInputElement | null;
+  const saveBtn = document.getElementById("ai-report-save") as HTMLButtonElement | null;
+  const githubBtn = document.getElementById("ai-report-github") as HTMLButtonElement | null;
+  const closeBtn = document.getElementById("ai-report-close");
+  const statusEl = document.getElementById("ai-report-status");
+  if (!openBtn || !dialogEl || !categoryEl || !detailsEl || !includeBox || !saveBtn) return;
+
+  let lastIssueUrl = "";
+  openBtn.addEventListener("click", () => {
+    dialogEl.hidden = !dialogEl.hidden;
+    if (!dialogEl.hidden) {
+      if (statusEl) statusEl.textContent = "";
+      if (githubBtn) githubBtn.hidden = true;
+      lastIssueUrl = "";
+      detailsEl.focus();
+    }
+  });
+  closeBtn?.addEventListener("click", () => {
+    dialogEl.hidden = true;
+  });
+  githubBtn?.addEventListener("click", () => {
+    if (lastIssueUrl) bridge.openLink(lastIssueUrl);
+  });
+  saveBtn.addEventListener("click", () => {
+    saveBtn.disabled = true;
+    if (statusEl) statusEl.textContent = "Saving scrubbed report locally…";
+    const replyText = document.getElementById("reply")?.textContent ?? "";
+    const heardText = document.getElementById("heard")?.textContent ?? "";
+    void bridge
+      .reportAiOutput({
+        category: categoryEl.value as AiReportCategory,
+        note: detailsEl.value.trim(),
+        includeExcerpt: includeBox.checked,
+        replyExcerpt: replyText,
+        userPromptExcerpt: heardText,
+      })
+      .then((res) => {
+        if (res.ok) {
+          lastIssueUrl = res.issueUrl;
+          if (githubBtn) githubBtn.hidden = false;
+          if (statusEl) statusEl.textContent = `Saved locally: ${res.filePath}`;
+          detailsEl.value = "";
+        } else if (statusEl) {
+          statusEl.textContent = res.error;
+        }
+      })
+      .catch((error: unknown) => {
+        if (statusEl) statusEl.textContent = error instanceof Error ? error.message : String(error);
+      })
+      .finally(() => {
+        saveBtn.disabled = false;
+      });
+  });
+}
+
 async function start(): Promise<void> {
   setVoiceState("off");
   logToggle.title = "The conversation so far (Ctrl+L)";
@@ -1723,6 +1784,7 @@ async function start(): Promise<void> {
     stage?.triggerEventReaction(event);
   });
   wireEmotePopover();
+  wireAiReportDialog();
   new ResizeObserver(updateLayout).observe(balloon);
   new ResizeObserver(updateLayout).observe(askForm);
 

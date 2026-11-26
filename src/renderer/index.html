@@ -49,7 +49,37 @@
           <p id="caution" class="caution" role="alert" hidden></p>
           <ol id="trail" class="trail" hidden aria-label="What she did"></ol>
           <div id="live-footer" class="live-footer" hidden>
+            <button id="live-report-output" type="button" class="copy">Report AI Output</button>
             <button id="live-forget-last" type="button" class="copy">Forget Last Turn</button>
+          </div>
+          <div id="ai-report-dialog" class="ai-report-dialog" hidden role="dialog" aria-label="Report AI Output">
+            <p class="ai-report-title">Report AI Output</p>
+            <p class="ai-report-note">
+              Saved strictly locally with secrets scrubbed. Nothing is sent anywhere unless you click Open GitHub Issue.
+            </p>
+            <select id="ai-report-category" aria-label="Report category">
+              <option value="inaccurate">Inaccurate or hallucinated</option>
+              <option value="harmful-or-unsafe">Harmful, offensive, or unsafe output</option>
+              <option value="out-of-character">Persona drift / out of character</option>
+              <option value="prompt-injection">Suspicious tool call / prompt injection</option>
+              <option value="other">Other AI output issue</option>
+            </select>
+            <textarea
+              id="ai-report-details"
+              rows="2"
+              maxlength="1000"
+              placeholder="Optional note describing what went wrong…"
+            ></textarea>
+            <label class="emote-loop-toggle">
+              <input id="ai-report-include-excerpt" type="checkbox" />
+              <span>Include scrubbed excerpt of the last reply</span>
+            </label>
+            <div class="emote-motion-row">
+              <button id="ai-report-save" type="button" class="copy">Save Local Report</button>
+              <button id="ai-report-github" type="button" class="copy" hidden>Open GitHub Issue</button>
+              <button id="ai-report-close" type="button" class="copy">Close</button>
+            </div>
+            <p id="ai-report-status" class="emote-status" role="status" aria-live="polite"></p>
           </div>
         </div>
 

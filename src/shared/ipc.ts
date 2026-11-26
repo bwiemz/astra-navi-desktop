@@ -1,3 +1,4 @@
+import type { AiReportCategory } from "../core/aiReport.ts";
 import type { AvatarEventKind } from "./avatarMotion.ts";
 import type { PermissionRiskLevel } from "../core/riskRules.ts";
 import type { DroppedAttachment } from "../core/dropRouter.ts";
@@ -109,6 +110,18 @@ export type PickedMotionClip =
       bytesBase64: string;
     }
   | { ok: false; canceled: boolean; error?: string };
+
+export interface AiReportSubmission {
+  category: AiReportCategory;
+  note: string;
+  includeExcerpt: boolean;
+  replyExcerpt?: string;
+  userPromptExcerpt?: string;
+}
+
+export type AiReportResult =
+  | { ok: true; filePath: string; issueUrl: string }
+  | { ok: false; error: string };
 
 export interface DropFilesResult {
   avatarsLoaded: string[];
@@ -317,6 +330,8 @@ export interface AichanBridge {
   handleDroppedFiles(paths: string[]): Promise<DropFilesResult>;
   /** Removes the last user turn and its reply/memories cleanly. */
   forgetLastTurn(): Promise<{ removed: boolean; userText: string | null; forgottenMemories: number }>;
+  /** Saves a local redacted AI output report (Microsoft Store 11.16 compliance) and returns an optional issue URL. */
+  reportAiOutput(input: AiReportSubmission): Promise<AiReportResult>;
   /** The full path of a file dropped onto the window, or "" when it has none. */
   pathForFile(file: File): string;
   openLink(url: string): void;
