@@ -671,6 +671,24 @@ describe("the record kept of each reply", () => {
     expect(correctedPairs(traces)).toEqual([]);
     await brain.dispose();
   });
+
+  it("traces check-failed when decide() fails and still catches flat claims via deterministic fallback", async () => {
+    const { brain, prompts, script, decide, traces } = await rig(dir);
+    try {
+      decide.mockRejectedValue(new Error("remote 502"));
+      script.reply = (prompt, turn) => {
+        if (turn === 1) prompt.say("[[happy]] Done, Captain! I've saved that in my notes.");
+        else prompt.say("[[worried]] AI-chan has not saved anything yet, Captain.");
+      };
+      brain.send("Just chatting about my workspace.");
+      await brain.whenIdle();
+      expect(prompts).toHaveLength(2);
+      expect(traces[0]?.checks).toContainEqual({ found: "check-failed", did: "skipped" });
+      expect(traces[0]?.checks).toContainEqual({ found: "claimed", did: "again" });
+    } finally {
+      await brain.dispose();
+    }
+  });
 });
 
 describe("which tools count as having done something", () => {

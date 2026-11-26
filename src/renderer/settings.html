@@ -565,6 +565,15 @@
               Off by default. Even when on, tools still ask once any outside text enters the chat.
             </span>
           </label>
+          <label class="row switch">
+            <input id="mcp-always-offer" type="checkbox" />
+            <span class="what">Always offer this server's tools</span>
+            <span class="why">
+              Off by default. Useful for filesystem or database servers so natural requests ("read
+              the file", "query the database") don't have to name the server; persistence tools ask
+              while active.
+            </span>
+          </label>
           <div class="row">
             <span class="what"></span>
             <button id="mcp-add-btn" type="submit">Add &amp; connect</button>

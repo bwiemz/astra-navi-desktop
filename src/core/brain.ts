@@ -49,7 +49,7 @@ import { createPhoneTools } from "./phoneTools.ts";
 import { createKnowledgeTools } from "./knowledgeTools.ts";
 import { createShipTools, type ShipServices } from "./shipTools.ts";
 import type { McpHub } from "./mcpClient.ts";
-import { createMcpTools } from "./mcpTools.ts";
+import { createMcpTools, MAX_EXPOSED_MCP_TOOLS } from "./mcpTools.ts";
 
 /** How many past messages are kept on disk for the next launch. */
 const SAVED_HISTORY_ITEMS = 60;
@@ -292,8 +292,12 @@ export class Brain {
   private turnTools: ToolRecord[] = [];
   /** Chooses which tools to offer for a message, when that is switched on; made when first needed. */
   private router: ToolRouter | null = null;
-  /** The tools used or picked out in each of the last few replies, oldest first: a follow-up needs them still. */
+  /** The built-in tools used or picked out in each of the last few replies, oldest first: a follow-up needs them still. */
   private readonly toolsOfLate: string[][] = [];
+  /** Actively USED `mcp:*` tools across the last few turns (carried for 3 turns during multi-turn MCP workflows). */
+  private readonly usedMcpOfLate: string[][] = [];
+  /** Routed-but-unused `mcp:*` tools from the immediately preceding turn only (1 turn for clarifying Q&A). */
+  private pickedMcpLastTurn: string[] = [];
   /** What the user said last, for a message that only makes sense after it. */
   private saidBefore: string | undefined;
   /** True when the reply being written was offered fewer than all of her tools. */
@@ -489,6 +493,8 @@ export class Brain {
     this.knownAddresses.clear();
     this.notesGiven.clear();
     this.toolsOfLate.length = 0;
+    this.usedMcpOfLate.length = 0;
+    this.pickedMcpLastTurn = [];
     this.saidBefore = undefined;
     this.lastTurnRecord = null;
     this.clock.reset();
@@ -582,38 +588,56 @@ export class Brain {
     const toolDescriptions = Object.fromEntries(
       Object.entries(all).map(([name, fn]) => [name, fn.description ?? ""]),
     );
-    // Carry built-in tools across the last few turns, but only carry an actually-used `mcp:*`
-    // tool forward for 1 follow-up turn so MCP schemas don't linger across unrelated turns.
+    // Carry built-in tools and actively USED `mcp:*` tools for 3 turns, and routed-but-unused
+    // `mcp:*` tools for 1 clarifying turn only so MCP schemas don't linger across unrelated turns.
     const recentBuiltins = this.toolsOfLate.flat().filter((name) => !name.startsWith("mcp:"));
-    const recentMcp = (this.toolsOfLate.at(-1) ?? []).filter((name) => name.startsWith("mcp:"));
+    const recentMcp = [...this.usedMcpOfLate.flat(), ...this.pickedMcpLastTurn].filter((name) =>
+      name.startsWith("mcp:"),
+    );
+    const alwaysOfferMcpTools = deps.mcp
+      ? deps.mcp
+          .listPrefixedTools()
+          .filter(({ serverId }) => deps.mcp?.getClient(serverId)?.config.alwaysOffer === true)
+          .map(({ fullName }) => fullName)
+          .filter((name) => Object.hasOwn(all, name))
+      : [];
     const route = await this.router.route(message.text, {
       available: allNames,
       recent: [...new Set([...recentBuiltins, ...recentMcp])],
       machines: deps.fleet?.machines().map((machine) => machine.name) ?? [],
       toolDescriptions,
+      ...(alwaysOfferMcpTools.length > 0 ? { alwaysOfferMcpTools } : {}),
       ...(this.saidBefore === undefined ? {} : { before: this.saidBefore }),
     });
+    // Cap exposed `mcp:*` tools to MAX_EXPOSED_MCP_TOOLS (48) AFTER routing so tools late in
+    // alphabetical order (e.g. tool #60 on a large server) remain reachable when routed.
+    const routedMcp = route.offered
+      .filter((name) => name.startsWith("mcp:"))
+      .slice(0, MAX_EXPOSED_MCP_TOOLS);
     // Even when `fittingTools` is off, route external `mcp:*` tools selectively so untrusted
     // server schemas are only exposed on turns that actually involve them.
     const offered = wanted
-      ? new Set(route.offered)
-      : new Set([
-          ...allNames.filter((name) => !name.startsWith("mcp:")),
-          ...route.offered.filter((name) => name.startsWith("mcp:")),
-        ]);
+      ? new Set([...route.offered.filter((name) => !name.startsWith("mcp:")), ...routedMcp])
+      : new Set([...allNames.filter((name) => !name.startsWith("mcp:")), ...routedMcp]);
     // Only what this message itself called for is carried forward. A tool that is here
     // because it was on offer a moment ago, or because it goes with another, would
     // otherwise keep itself on offer for ever.
     this.pickedOut = Object.entries(route.why)
-      .filter(([tool, reason]) =>
-        wanted
-          ? /^(?:words|meaning|names a machine|mcp)/.test(reason)
-          : tool.startsWith("mcp:") && /^mcp/.test(reason),
+      .filter(
+        ([tool, reason]) =>
+          offered.has(tool) &&
+          (wanted
+            ? /^(?:words|meaning|names a machine|mcp)/.test(reason)
+            : tool.startsWith("mcp:") && /^mcp/.test(reason)),
       )
       .map(([tool]) => tool);
     this.pickedFor = wanted
-      ? route.why
-      : Object.fromEntries(Object.entries(route.why).filter(([tool]) => tool.startsWith("mcp:")));
+      ? Object.fromEntries(Object.entries(route.why).filter(([tool]) => offered.has(tool)))
+      : Object.fromEntries(
+          Object.entries(route.why).filter(
+            ([tool]) => tool.startsWith("mcp:") && offered.has(tool),
+          ),
+        );
     this.offeredFewer = offered.size < allNames.length;
     if (wanted) {
       deps.lab?.onOffered?.(route.offered, route.why);
@@ -853,9 +877,11 @@ export class Brain {
             deps.lab?.onClaimCheck?.(answer.claimed.value, this.replyText);
             return answer.claimed.value;
           } catch (error) {
-            // The check failing says nothing about the reply; let the reply stand.
-            if (!signal.aborted)
+            // The check failing is logged and traced visibly; followThrough falls back to local heuristics.
+            if (!signal.aborted) {
               console.warn("[brain] the follow-through check could not run:", error);
+              this.tracedChecks.push({ found: "check-failed", did: "skipped" });
+            }
             return null;
           }
         },
@@ -885,19 +911,29 @@ export class Brain {
       // picked out for it: "and the other one?" names nothing.
       if (!signal.aborted && !message.event) {
         const used = this.turnTools.map((record) => record.tool);
-        // Carry routed tools (including MCP tools when answering a clarifying question) into
-        // `toolsOfLate`; `pickTools()` restricts `mcp:*` carryover to 1 follow-up turn only
-        // (`toolsOfLate.at(-1)`), and `pickedOut` excludes `"used just now"`, so unused MCP
-        // tools automatically expire after that single follow-up turn.
-        this.toolsOfLate.push([...new Set([...used, ...this.pickedOut])]);
+        const usedBuiltins = used.filter((tool) => !tool.startsWith("mcp:"));
+        const pickedBuiltins = this.pickedOut.filter((tool) => !tool.startsWith("mcp:"));
+        this.toolsOfLate.push([...new Set([...usedBuiltins, ...pickedBuiltins])]);
         while (this.toolsOfLate.length > TURNS_A_TOOL_STAYS_ON_OFFER) this.toolsOfLate.shift();
+        const usedMcp = used.filter((tool) => tool.startsWith("mcp:"));
+        this.usedMcpOfLate.push([...new Set(usedMcp)]);
+        while (this.usedMcpOfLate.length > TURNS_A_TOOL_STAYS_ON_OFFER) this.usedMcpOfLate.shift();
+        // Routed-but-unused MCP tools stay for 1 clarifying turn only (never self-renewing).
+        this.pickedMcpLastTurn = this.pickedOut.filter(
+          (tool) => tool.startsWith("mcp:") && !usedMcp.includes(tool),
+        );
         this.saidBefore = message.text.slice(0, 400);
       } else if (!signal.aborted && message.correction) {
         // What her second go used belongs to the reply it put right: it may be the
         // very tool that was not thought of the first time.
         const last = this.toolsOfLate.at(-1);
+        const lastMcp = this.usedMcpOfLate.at(-1);
         for (const record of this.turnTools) {
-          if (last && !last.includes(record.tool)) last.push(record.tool);
+          if (record.tool.startsWith("mcp:")) {
+            if (lastMcp && !lastMcp.includes(record.tool)) lastMcp.push(record.tool);
+          } else if (last && !last.includes(record.tool)) {
+            last.push(record.tool);
+          }
         }
       }
       // A tool used in her second attempt counts as much as one used in her first.
@@ -1125,12 +1161,17 @@ export class Brain {
     }
     if (!learner || (message.event && !message.correction)) return;
     if (message.correction && this.turnTools.length === 0) return;
-    const turnHadMcp = this.offeredNow.some((name) => name.startsWith("mcp:"));
+    const turnHadMcp =
+      this.offeredNow.some((name) => name.startsWith("mcp:")) ||
+      this.turnTools.some((record) => record.tool.startsWith("mcp:"));
+    // Never pass MCP turns to the background Learner at all so untrusted MCP metadata or
+    // results cannot silently seed long-term memories.
+    if (turnHadMcp) return;
     learner.record({
       at: new Date().toISOString(),
       said: message.correction ? "(the same request, now carried out)" : message.text,
-      // Withhold replies from Learner on outside-text turns, MCP-schema turns, or false claims.
-      reply: this.readOutsideText || turnHadMcp || falseClaim ? null : this.replyText,
+      // Withhold replies from Learner on outside-text turns or false claims.
+      reply: this.readOutsideText || falseClaim ? null : this.replyText,
       did: this.turnTools,
     });
   }

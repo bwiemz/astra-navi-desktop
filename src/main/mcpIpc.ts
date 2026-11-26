@@ -54,6 +54,7 @@ export function buildMcpServerViews(
       headerKeys: Object.keys(server.headers ?? {}),
       envKeys: Object.keys(server.env ?? {}),
       readOnlyAutoAllow: server.readOnlyAutoAllow === true,
+      alwaysOffer: server.alwaysOffer === true,
       connected: status?.connected === true,
       toolCount: tools.length,
       tools,
@@ -101,6 +102,7 @@ export function registerMcpIpc(deps: McpIpcDeps): void {
       const rawName = typeof raw["name"] === "string" ? raw["name"].trim() : "";
       const transport = raw["transport"] === "http" ? "http" : "stdio";
       const readOnlyAutoAllow = raw["readOnlyAutoAllow"] === true;
+      const alwaysOffer = raw["alwaysOffer"] === true;
 
       const candidate =
         transport === "stdio"
@@ -118,6 +120,7 @@ export function registerMcpIpc(deps: McpIpcDeps): void {
                 : {}),
               env: parseCleanRecord(raw["env"]),
               readOnlyAutoAllow,
+              alwaysOffer,
             }
           : {
               id: rawId,
@@ -127,6 +130,7 @@ export function registerMcpIpc(deps: McpIpcDeps): void {
               url: typeof raw["url"] === "string" ? raw["url"].trim() : "",
               headers: parseCleanRecord(raw["headers"]),
               readOnlyAutoAllow,
+              alwaysOffer,
             };
 
       const parsed = McpServerConfigSchema.safeParse(candidate);
@@ -210,6 +214,24 @@ export function registerMcpIpc(deps: McpIpcDeps): void {
       const nextAuto = on === true;
       const nextServers = deps.config.value.mcp.servers.map((server) =>
         server.id === wanted ? { ...server, readOnlyAutoAllow: nextAuto } : server,
+      );
+      await deps.config.update({ mcp: { servers: nextServers } });
+      const hub = deps.mcpHub();
+      if (hub) {
+        await hub.syncServers(nextServers);
+      }
+      return deps.settingsView();
+    },
+  );
+
+  ipcMain.handle(
+    "mcp:set-always-offer",
+    async (event, id: unknown, on: unknown): Promise<SettingsView> => {
+      fromSettings(event);
+      const wanted = typeof id === "string" ? id.trim() : "";
+      const nextAlways = on === true;
+      const nextServers = deps.config.value.mcp.servers.map((server) =>
+        server.id === wanted ? { ...server, alwaysOffer: nextAlways } : server,
       );
       await deps.config.update({ mcp: { servers: nextServers } });
       const hub = deps.mcpHub();

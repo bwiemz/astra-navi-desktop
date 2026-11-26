@@ -30,9 +30,11 @@ export interface SupportBundleInput {
     stationOpen: boolean;
     enabledTier10Flags: readonly string[];
   };
-  /** Strict secrets (API keys, hostnames, usernames, machine names): redacted whole-token even if short or numeric. */
+  /** Strict credentials (API keys, tokens, passwords, PINs): redacted at any length (>= 2), never exempted by dictionary words. */
+  credentialLiterals?: readonly string[];
+  /** Identifiers (hostnames, usernames, machine names, MCP HOST*): whole-token case-insensitive, skipping common dictionary words left to structural scrubbers. */
   extraSecretLiterals?: readonly string[];
-  /** MCP server env/header values: skips benign config literals (`true`, `info`, `debug`, etc.) while still redacting secrets. */
+  /** Legacy MCP env/header values (treated as credentials excluding obvious boolean/log-level values). */
   mcpEnvLiterals?: readonly string[];
 }
 
@@ -118,112 +120,130 @@ const COMMON_NON_SECRET_LITERALS = new Set([
   "system",
 ]);
 
-const NON_SECRET_MCP_ENV_KEYS = new Set([
-  "PORT",
-  "HOST",
-  "HOSTNAME",
-  "TZ",
-  "LANG",
-  "LC_ALL",
-  "NODE_ENV",
-  "LOG_LEVEL",
-  "DEBUG",
-  "VERBOSE",
-  "TIMEOUT",
-  "RETRIES",
-  "MAX_RETRIES",
-  "WORKERS",
+/**
+ * Common English dictionary words that may appear as machine nicknames or first names
+ * ("Home", "Will", "May", "Work", "Main") — left to the structural path/email/IP/URL
+ * pass in Pass 1 so prose ("I will check", "at home") and paths aren't mangled.
+ * Never includes short host/user identifiers like `admin`, `nas`, `pve`, or `kenji`.
+ */
+const COMMON_IDENTIFIER_DICTIONARY_WORDS = new Set([
+  ...COMMON_NON_SECRET_LITERALS,
+  "home",
+  "will",
+  "may",
+  "mark",
+  "grace",
+  "hope",
+  "bill",
+  "grant",
+  "chase",
+  "work",
+  "office",
+  "desk",
+  "main",
+  "play",
+  "game",
+  "media",
+  "host",
+  "user",
+  "test",
+  "dev",
+  "prod",
 ]);
 
-/** Collects MCP server header and env values worth redacting, skipping benign non-secret env keys like `PORT` or `LOG_LEVEL`. */
+/** Non-secret MCP config env key patterns (ports, timeouts, limits, retries, locale/logging) — NEVER skips HOST/HOSTNAME! */
+const NON_SECRET_MCP_ENV_KEY_RE =
+  /^(?:PORT|.*_PORT|.*TIMEOUT.*|.*_MS|.*_SEC|.*_SECONDS|MAX_.*|MIN_.*|.*_LIMIT|.*LIMIT|RETRIES|.*_RETRIES|WORKERS|.*_WORKERS|CONCURRENCY|TZ|LANG|LC_ALL|NODE_ENV|LOG_LEVEL|DEBUG|VERBOSE|COLOR|NO_COLOR|TERM|CI)$/i;
+
+/** MCP env keys that hold host/user/endpoint identifiers (including HOST and HOSTNAME). */
+const IDENTIFIER_MCP_ENV_KEY_RE =
+  /(?:^|_)(?:HOST|HOSTNAME|SERVER|DOMAIN|USER|USERNAME|EMAIL|URL|URI|ENDPOINT)$/i;
+
+/**
+ * Separates MCP server headers and environment variables into `credentials` (headers, tokens,
+ * passwords, PINs) and `identifiers` (HOST, HOSTNAME, *_HOST, *_USER, *_URL), while skipping
+ * benign numeric/config env keys by key pattern (`*_PORT`, `*TIMEOUT*`, `*_MS`, `MAX_*`, `*LIMIT*`).
+ */
+export function collectMcpRedactionLists(
+  servers: readonly { headers?: Record<string, string>; env?: Record<string, string> }[],
+): { credentials: string[]; identifiers: string[] } {
+  const credentials: string[] = [];
+  const identifiers: string[] = [];
+  for (const server of servers) {
+    for (const val of Object.values(server.headers ?? {})) {
+      if (typeof val === "string" && val.trim().length > 0) credentials.push(val);
+    }
+    for (const [rawKey, val] of Object.entries(server.env ?? {})) {
+      if (typeof val !== "string" || val.trim().length === 0) continue;
+      const key = rawKey.trim();
+      if (NON_SECRET_MCP_ENV_KEY_RE.test(key)) continue;
+      if (IDENTIFIER_MCP_ENV_KEY_RE.test(key)) {
+        identifiers.push(val);
+      } else {
+        credentials.push(val);
+      }
+    }
+  }
+  return { credentials, identifiers };
+}
+
+/** Backwards-compatible wrapper returning all MCP secrets (credentials + host/user identifiers) except non-secret config keys. */
 export function collectMcpEnvSecrets(
   servers: readonly { headers?: Record<string, string>; env?: Record<string, string> }[],
 ): string[] {
-  const out: string[] = [];
-  for (const server of servers) {
-    for (const val of Object.values(server.headers ?? {})) {
-      if (typeof val === "string" && val.trim().length > 0) out.push(val);
-    }
-    for (const [key, val] of Object.entries(server.env ?? {})) {
-      if (NON_SECRET_MCP_ENV_KEYS.has(key.trim().toUpperCase())) continue;
-      if (typeof val === "string" && val.trim().length > 0) out.push(val);
-    }
-  }
-  return out;
+  const { credentials, identifiers } = collectMcpRedactionLists(servers);
+  return [...credentials, ...identifiers];
 }
 
 function escapeRegexLiteral(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function shouldRedactMcpEnvLiteral(secret: string): boolean {
+function shouldRedactCredentialLiteral(secret: string): boolean {
   if (secret.length < 2) return false;
   if (COMMON_NON_SECRET_LITERALS.has(secret.toLowerCase())) return false;
   return true;
 }
 
+function shouldRedactIdentifierLiteral(secret: string): boolean {
+  if (secret.length < 2) return false;
+  if (COMMON_IDENTIFIER_DICTIONARY_WORDS.has(secret.toLowerCase())) return false;
+  return true;
+}
+
 /**
- * Scrubs API keys, tokens, URLs with embedded credentials/queries, private keys,
- * SSH public/host fingerprints, email addresses, IP addresses, OS user paths,
- * strict secrets (hostnames, usernames, machine names — even short or numeric),
- * and MCP env/header values (excluding common benign config words like `true`/`info`).
- *
- * All candidate literals are sorted longest-first and matched case-insensitively so
- * short names (`nas`, `pve`) NEVER partially rewrite longer hostnames (`nas.tail1234.ts.net`,
- * `pve.home.arpa`) and uppercase variants (`NAS`) cannot leak through.
+ * Redacts text in three strictly separated passes by type:
+ * 1. **Structural scrubbers FIRST:** API token shapes, private/SSH keys, OS user paths
+ *    (`/home/<user>`, `/Users/<user>`, `C:\Users\<user>`), emails, URLs with credentials/queries,
+ *    IPv4, and IPv6 addresses — so literal names like `"Home"` or `"kenji"` can NEVER break path
+ *    or email scrubbers.
+ * 2. **Credentials ALWAYS (any length >= 2, longest-first, case-insensitive):** API keys, tokens,
+ *    passwords, PINs (including 4-digit MCP PINs).
+ * 3. **Identifiers (longest-first, case-insensitive, whole-token for `< 16`-char alphanumerics):**
+ *    hostnames (`nas.tail1234.ts.net`, `homeassistant.tail9f3k.ts.net`, `pve.home.arpa`),
+ *    usernames (`admin`, `kenji`), machine names (`nas`, `pve`, `kenjis-nas`), skipping common
+ *    English dictionary words (`home`, `will`, `may`) that are already covered structurally.
  */
 export function redactSupportText(
   text: string,
-  extraSecrets: readonly string[] = [],
-  mcpEnvSecrets: readonly string[] = [],
+  identifierSecrets: readonly string[] = [],
+  credentialSecrets: readonly string[] = [],
 ): { text: string; count: number } {
   let out = withoutSecrets(text);
   let count = out === text ? 0 : 1;
 
-  const replaceCount = (pattern: RegExp, replacement: string): void => {
-    const next = out.replace(pattern, replacement);
+  const replaceCount = (pattern: RegExp, replacement: string | ((m: string, ...args: string[]) => string)): void => {
+    const next =
+      typeof replacement === "string"
+        ? out.replace(pattern, replacement)
+        : out.replace(pattern, replacement);
     if (next !== out) {
       count += 1;
       out = next;
     }
   };
 
-  // Deduplicate case-insensitively and sort LONGEST FIRST so `nas.tail1234.ts.net` is always
-  // scrubbed before `nas`, preventing `[redacted].tail1234.ts.net` leaks.
-  const seenLower = new Set<string>();
-  const orderedLiterals: string[] = [];
-  for (const rawSecret of extraSecrets) {
-    const secret = rawSecret.trim();
-    if (secret.length < 2) continue;
-    const lower = secret.toLowerCase();
-    if (seenLower.has(lower)) continue;
-    seenLower.add(lower);
-    orderedLiterals.push(secret);
-  }
-  for (const rawEnv of mcpEnvSecrets) {
-    const secret = rawEnv.trim();
-    if (!shouldRedactMcpEnvLiteral(secret)) continue;
-    const lower = secret.toLowerCase();
-    if (seenLower.has(lower)) continue;
-    seenLower.add(lower);
-    orderedLiterals.push(secret);
-  }
-  orderedLiterals.sort((a, b) => b.length - a.length);
-
-  for (const secret of orderedLiterals) {
-    // Alphanumeric tokens < 16 chars use whole-token boundaries so short hostnames/usernames
-    // ("pve", "nas", "admin", "kenji", "84726193") are ALWAYS scrubbed case-insensitively
-    // without mangling unrelated English words ("gymnasium", "administrator", "information").
-    if (secret.length < 16 && /^[A-Za-z0-9_]+$/.test(secret)) {
-      replaceCount(
-        new RegExp(`(?<![A-Za-z0-9_])${escapeRegexLiteral(secret)}(?![A-Za-z0-9_])`, "gi"),
-        "[redacted]",
-      );
-    } else {
-      replaceCount(new RegExp(escapeRegexLiteral(secret), "gi"), "[redacted]");
-    }
-  }
-
+  // --- Pass 1: Structural scrubbers FIRST (paths, keys, emails, URLs, IPv4, IPv6) ---
   const currentHome = homedir();
   if (currentHome && currentHome.length > 1 && out.includes(currentHome)) {
     out = out.split(currentHome).join("~");
@@ -238,20 +258,21 @@ export function redactSupportText(
   replaceCount(/ssh-(?:ed25519|rsa|ecdsa)\s+[A-Za-z0-9+/=]{16,}(?:\s+\S+)?/g, "[redacted-ssh-key]");
   replaceCount(/SHA256:[A-Za-z0-9+/=]{16,}/g, "SHA256:[redacted]");
 
-  // Windows and POSIX user profile paths
+  // Windows and POSIX user profile paths (MUST run before literal pass so machine "Home" never breaks `/home/alice`)
   replaceCount(/[A-Za-z]:\\Users\\[^\\\s"':]+/gi, "C:\\Users\\[user]");
   replaceCount(/[A-Za-z]:\/Users\/[^/\s"':]+/gi, "C:/Users/[user]");
   replaceCount(/\/home\/[^/\s"':]+/g, "/home/[user]");
   replaceCount(/\/Users\/[^/\s"':]+/g, "/Users/[user]");
 
-  // user@host / emails
+  // user@host / emails (MUST run before literal pass so "kenji" never leaves `[redacted]@Example.com`)
   replaceCount(/\b[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b/g, "[redacted-email]");
   replaceCount(
     /\b[A-Za-z0-9._-]+@(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g,
     "[redacted-ssh-target]",
   );
 
-  // Query parameters on HTTP(S) URLs
+  // Embedded credentials and query parameters on HTTP(S) URLs
+  replaceCount(/(https?:\/\/)[^/\s@"'#?]+@/gi, "$1[redacted]@");
   replaceCount(/(https?:\/\/[^\s"'?#]+)\?[^\s"'#]+/gi, "$1?[redacted-query]");
 
   // IPv4 addresses (avoid matching leading-v version strings like v1.2.3.4)
@@ -260,13 +281,60 @@ export function redactSupportText(
     "[redacted-ip]",
   );
 
+  // IPv6 addresses (full 8-group or `::`-compressed, preserving bare `::` and loopback `::1`, never matching `10:30:00`)
+  replaceCount(
+    /(?<![0-9a-fA-F:])(?:(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})*)?|:(?::[0-9a-fA-F]{1,4}){1,7}|::ffff:(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))(?:%[A-Za-z0-9_.-]+)?(?![0-9a-fA-F:])/g,
+    (match) => {
+      const lower = match.toLowerCase();
+      if (lower === "::" || lower === "::1") return match;
+      return "[redacted-ip]";
+    },
+  );
+
+  // --- Helper for longest-first case-insensitive literal redaction ---
+  const scrubLiteralList = (rawList: readonly string[], predicate: (s: string) => boolean): void => {
+    const seenLower = new Set<string>();
+    const ordered: string[] = [];
+    for (const raw of rawList) {
+      const secret = raw.trim();
+      if (!predicate(secret)) continue;
+      const lower = secret.toLowerCase();
+      if (seenLower.has(lower)) continue;
+      seenLower.add(lower);
+      ordered.push(secret);
+    }
+    ordered.sort((a, b) => b.length - a.length);
+
+    for (const secret of ordered) {
+      if (secret.length < 16 && /^[A-Za-z0-9_]+$/.test(secret)) {
+        replaceCount(
+          new RegExp(`(?<![A-Za-z0-9_])${escapeRegexLiteral(secret)}(?![A-Za-z0-9_])`, "gi"),
+          "[redacted]",
+        );
+      } else {
+        replaceCount(new RegExp(escapeRegexLiteral(secret), "gi"), "[redacted]");
+      }
+    }
+  };
+
+  // --- Pass 2: Credentials ALWAYS (longest-first, case-insensitive) ---
+  scrubLiteralList(credentialSecrets, shouldRedactCredentialLiteral);
+
+  // --- Pass 3: Identifiers (longest-first, case-insensitive, skipping dictionary words) ---
+  scrubLiteralList(identifierSecrets, shouldRedactIdentifierLiteral);
+
   return { text: out, count };
 }
 
 export function buildRedactedSupportBundle(input: SupportBundleInput): RedactedSupportBundle {
   let redactionsApplied = 0;
+  const credentials = [
+    ...(input.credentialLiterals ?? []),
+    ...(input.mcpEnvLiterals ?? []),
+  ];
+  const identifiers = input.extraSecretLiterals ?? [];
   const scrub = (value: string): string => {
-    const res = redactSupportText(value, input.extraSecretLiterals, input.mcpEnvLiterals);
+    const res = redactSupportText(value, identifiers, credentials);
     redactionsApplied += res.count;
     return res.text;
   };

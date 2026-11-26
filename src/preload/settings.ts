@@ -80,6 +80,8 @@ const bridge: SettingsBridge = {
     }>,
   setMcpReadOnlyAuto: (id: string, on: boolean) =>
     ipcRenderer.invoke("mcp:set-read-only-auto", id, on) as Promise<SettingsView>,
+  setMcpAlwaysOffer: (id: string, on: boolean) =>
+    ipcRenderer.invoke("mcp:set-always-offer", id, on) as Promise<SettingsView>,
   reconnectMcpServer: (id: string) =>
     ipcRenderer.invoke("mcp:reconnect-server", id) as Promise<{
       ok: boolean;

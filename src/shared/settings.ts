@@ -196,6 +196,7 @@ export interface McpServerView {
   headerKeys: string[];
   envKeys: string[];
   readOnlyAutoAllow: boolean;
+  alwaysOffer: boolean;
   connected: boolean;
   toolCount: number;
   tools: McpToolSummaryView[];
@@ -214,6 +215,7 @@ export interface McpServerAddRequest {
   url?: string;
   headers?: Record<string, string>;
   readOnlyAutoAllow?: boolean;
+  alwaysOffer?: boolean;
 }
 
 /** One kept backup on a remote machine, as the Settings rollback drawer shows it. */
@@ -387,6 +389,8 @@ export interface SettingsBridge {
   ): Promise<{ ok: boolean; view: SettingsView; error?: string }>;
   /** Toggles whether read-only tools on an MCP server may run without confirmation before outside text is read. */
   setMcpReadOnlyAuto(id: string, on: boolean): Promise<SettingsView>;
+  /** Toggles whether this MCP server's tools are always offered without naming the server/tool explicitly. */
+  setMcpAlwaysOffer(id: string, on: boolean): Promise<SettingsView>;
   /** Reconnects an external MCP server and refreshes its tool list. */
   reconnectMcpServer(id: string): Promise<{ ok: boolean; view: SettingsView; error?: string }>;
   /** Probes local GPU/VRAM/RAM and recommends the optimal brain tier & quantization. */

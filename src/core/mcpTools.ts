@@ -9,57 +9,45 @@ export interface McpObjectParamsSchema {
   readonly description?: string;
 }
 
-/** Hard ceiling on total MCP tools exposed to the local LLM in one turn to protect prompt budget. */
+/** Hard ceiling on total MCP tools exposed to the local LLM in one turn AFTER routing. */
 export const MAX_EXPOSED_MCP_TOOLS = 48;
-const MAX_SCHEMA_DEPTH = 5;
+/** High registration ceiling before routing so tools late in the alphabet stay reachable. */
+const MAX_REGISTERED_MCP_TOOLS = 512;
+
+const MAX_FULL_EXPAND_DEPTH = 10;
+const MAX_FULL_EXPAND_NODES = 2_000;
 const MAX_OBJECT_PROPERTIES = 24;
 const MAX_REQUIRED_OBJECT_PROPERTIES = 48;
 const MAX_SCANNED_OBJECT_PROPERTIES = 512;
+const MAX_KEY_CHARS = 80;
+const MAX_KEY_UTF8_BYTES = 96;
 const SMALL_ENUM_MAX_VALUES = 16;
 const SMALL_ENUM_MAX_BYTES = 512;
-const MAX_ENUM_VALUES = 32;
-const MAX_ENUM_STRING_CHARS = 64;
-const MAX_ENUM_TOTAL_BYTES = 512;
+const MAX_FULL_ENUM_VALUES = 256;
+const MAX_ENUM_STRING_CHARS = 128;
 const MAX_CONST_STRING_CHARS = 128;
 const MAX_UNION_BRANCHES = 10;
 const MAX_PICK_UNION_BRANCHES = 16;
 const MAX_DESC_CHARS = 200;
 const MAX_PARAM_DESC_CHARS = 120;
-/** Shared expansion ceiling per tool schema to stop exponential `$ref` DAG blowup without starving normal schemas. */
-const MAX_EXPANDED_SCHEMA_NODES = 128;
-const MAX_EXPANDED_SCHEMA_CHARS = 10_240;
-const MAX_DEGRADE_STEPS_PER_PROP = 48;
-const MAX_DEGRADE_DEPTH = 3;
+const TRIMMED_DESC_CHARS = 48;
 const MAX_SERIALIZED_SCHEMA_BYTES = 12_288;
 const MAX_STRIP_ARG_DEPTH = 12;
 
-interface SchemaExpansionBudget {
-  nodesLeft: number;
-  charsLeft: number;
-}
+type MutableSchema = Record<string, unknown>;
 
-interface DegradeContext {
-  stepsLeft: number;
-  /** Memoized by `(node, depth:allowArrayItem)` so depth-truncated or array-scoped stubs never poison shallower direct `$ref`s. */
-  memo: Map<Record<string, unknown>, Map<string, GbnfJsonSchema>>;
-  dropEnums?: boolean;
-  dropConst?: boolean;
+interface ExpandState {
+  nodesLeft: number;
+  /** Memoizes resolved `$ref` target objects by `(target, depth:insideArray)` so DAGs visit each node once. */
+  refMemo: Map<Record<string, unknown>, Map<string, GbnfJsonSchema>>;
 }
 
 const normalizedSchemaCache = new WeakMap<Record<string, unknown>, McpObjectParamsSchema>();
+const PRIMITIVE_TYPES = new Set(["string", "number", "integer", "boolean", "null"]);
 
 function utf8ByteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
-
-function consumeBudget(budget: SchemaExpansionBudget, chars = 24): boolean {
-  if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) return false;
-  budget.nodesLeft -= 1;
-  budget.charsLeft -= chars;
-  return true;
-}
-
-const PRIMITIVE_TYPES = new Set(["string", "number", "integer", "boolean", "null"]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -94,23 +82,44 @@ function derefNode(
   raw: unknown,
   root: Record<string, unknown>,
   seenRefs: ReadonlySet<string>,
-): { node: Record<string, unknown> | undefined; nextSeen: Set<string> } {
+): {
+  node: Record<string, unknown> | undefined;
+  targetObj: Record<string, unknown> | undefined;
+  nextSeen: Set<string>;
+  hadRef: boolean;
+} {
   const nextSeen = new Set(seenRefs);
   let current: unknown = raw;
+  let targetObj: Record<string, unknown> | undefined;
+  let hadRef = false;
   let hops = 0;
-  while (isPlainObject(current) && typeof current["$ref"] === "string" && hops < MAX_SCHEMA_DEPTH) {
+  let inheritedDesc: string | undefined;
+
+  while (
+    isPlainObject(current) &&
+    typeof current["$ref"] === "string" &&
+    hops < MAX_FULL_EXPAND_DEPTH
+  ) {
+    hadRef = true;
+    if (inheritedDesc === undefined && typeof current["description"] === "string") {
+      inheritedDesc = current["description"];
+    }
     const ref = current["$ref"];
     const target = resolveLocalRef(ref, root, nextSeen);
-    if (!target) return { node: undefined, nextSeen };
+    if (!target) return { node: undefined, targetObj: undefined, nextSeen, hadRef };
     nextSeen.add(ref);
-    // Preserve sibling description on the referencing property if target lacks one.
-    current =
-      typeof current["description"] === "string" && typeof target["description"] !== "string"
-        ? { ...target, description: current["description"] }
-        : target;
+    targetObj = target;
+    current = target;
     hops += 1;
   }
-  return { node: isPlainObject(current) ? current : undefined, nextSeen };
+  if (!isPlainObject(current)) {
+    return { node: undefined, targetObj: undefined, nextSeen, hadRef };
+  }
+  const node =
+    inheritedDesc !== undefined && typeof current["description"] !== "string"
+      ? { ...current, description: inheritedDesc }
+      : current;
+  return { node, targetObj, nextSeen, hadRef };
 }
 
 function schemaAllowsNull(schema: Record<string, unknown>): boolean {
@@ -146,7 +155,11 @@ function rawSchemaExplicitlyAllowsNull(
   if ("const" in node && node["const"] === null) return true;
   for (const key of ["oneOf", "anyOf"] as const) {
     if (Array.isArray(node[key])) {
-      if (node[key].slice(0, MAX_UNION_BRANCHES).some((b) => rawSchemaExplicitlyAllowsNull(b, root, nextSeen, stepsLeft))) {
+      if (
+        node[key]
+          .slice(0, MAX_PICK_UNION_BRANCHES)
+          .some((b) => rawSchemaExplicitlyAllowsNull(b, root, nextSeen, stepsLeft))
+      ) {
         return true;
       }
     }
@@ -175,7 +188,10 @@ function makeNullableSchema(schema: GbnfJsonSchema, includeHint = true): GbnfJso
       ...(optDesc ? { description: optDesc } : {}),
     } as unknown as GbnfJsonSchema;
   }
-  if (Array.isArray(rec["type"]) && rec["type"].every((t) => typeof t === "string" && PRIMITIVE_TYPES.has(t))) {
+  if (
+    Array.isArray(rec["type"]) &&
+    rec["type"].every((t) => typeof t === "string" && PRIMITIVE_TYPES.has(t))
+  ) {
     return {
       type: [...rec["type"], "null"],
       ...(optDesc ? { description: optDesc } : {}),
@@ -220,94 +236,16 @@ function primitiveTypeForEnumValues(values: readonly unknown[]): GbnfJsonSchema 
   } as unknown as GbnfJsonSchema;
 }
 
-/**
- * Validates and bounds an `enum` array against per-value char limits and total UTF-8 byte cap;
- * returns either the bounded enum (with its byte cost) or a compact primitive-type fallback so
- * oversized enums can never blow past the 12 KB ceiling while small enums (<= 16 values and
- * <= 512 UTF-8 bytes) are preserved intact.
- */
-function boundEnumValues(
-  rawEnum: readonly unknown[],
-  maxBytes: number,
-  maxValues = MAX_ENUM_VALUES,
-): { enum?: (string | number | boolean | null)[]; bytes: number; isSmall: boolean; fallback: GbnfJsonSchema } {
-  const valid: (string | number | boolean | null)[] = [];
-  const seen = new Set<string>();
-  let totalBytes = 2;
-  let exceeded = false;
-
-  for (const v of rawEnum) {
-    if (valid.length >= maxValues) {
-      exceeded = true;
-      break;
-    }
-    if (
-      typeof v !== "string" &&
-      typeof v !== "number" &&
-      typeof v !== "boolean" &&
-      v !== null
-    ) {
-      continue;
-    }
-    if (typeof v === "string" && v.length > MAX_ENUM_STRING_CHARS) {
-      exceeded = true;
-      break;
-    }
-    const key = `${typeof v}:${String(v)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const pieceBytes =
-      typeof v === "string" ? Buffer.byteLength(v, "utf8") + 3 : String(v).length + 1;
-    if (totalBytes + pieceBytes > maxBytes) {
-      exceeded = true;
-      break;
-    }
-    totalBytes += pieceBytes;
-    valid.push(v);
-  }
-
-  const fallback = primitiveTypeForEnumValues(rawEnum);
-  if (exceeded || valid.length === 0) {
-    return { bytes: 20, isSmall: false, fallback };
-  }
-  const isSmall = valid.length <= SMALL_ENUM_MAX_VALUES && totalBytes <= SMALL_ENUM_MAX_BYTES;
-  return { enum: valid, bytes: totalBytes, isSmall, fallback };
+function primitiveTypeForConst(val: unknown): GbnfJsonSchema {
+  if (typeof val === "number") return { type: Number.isInteger(val) ? "integer" : "number" };
+  if (typeof val === "boolean") return { type: "boolean" };
+  if (val === null) return { type: "null" };
+  return { type: "string" };
 }
 
-function createDegradeContext(dropEnums = false, dropConst = false): DegradeContext {
-  return {
-    stepsLeft: MAX_DEGRADE_STEPS_PER_PROP,
-    memo: new Map<Record<string, unknown>, Map<string, GbnfJsonSchema>>(),
-    dropEnums,
-    dropConst,
-  };
-}
-
-function readDegradeMemo(
-  ctx: DegradeContext,
-  node: Record<string, unknown>,
-  memoKey: string,
-): GbnfJsonSchema | undefined {
-  return ctx.memo.get(node)?.get(memoKey);
-}
-
-function writeDegradeMemo(
-  ctx: DegradeContext,
-  node: Record<string, unknown>,
-  memoKey: string,
-  schema: GbnfJsonSchema,
-): void {
-  let inner = ctx.memo.get(node);
-  if (!inner) {
-    inner = new Map<string, GbnfJsonSchema>();
-    ctx.memo.set(node, inner);
-  }
-  inner.set(memoKey, schema);
-}
-
-/** O(1) shallow type inference without further recursion (used when depth/step limits hit). */
-function shallowTypeStub(node: Record<string, unknown>, dropConst = false): GbnfJsonSchema {
-  if (!dropConst && "const" in node) {
+/** O(1) shallow type inference without further recursion (used ONLY at depth/cycle/node limits). */
+function shallowStubForRawNode(node: Record<string, unknown>): GbnfJsonSchema {
+  if ("const" in node) {
     const val = node["const"];
     if (
       (typeof val === "string" && val.length <= MAX_CONST_STRING_CHARS) ||
@@ -317,15 +255,16 @@ function shallowTypeStub(node: Record<string, unknown>, dropConst = false): Gbnf
     ) {
       return { const: val } as GbnfJsonSchema;
     }
-    if (typeof val === "string") return { type: "string" };
+    return primitiveTypeForConst(val);
+  }
+  if (Array.isArray(node["enum"]) && node["enum"].length > 0) {
+    return primitiveTypeForEnumValues(node["enum"]);
   }
   const rawType = node["type"];
   if (Array.isArray(rawType)) {
-    const validTypes = rawType.filter((t): t is string => typeof t === "string" && PRIMITIVE_TYPES.has(t));
-    if (validTypes.length > 0 && validTypes.length === rawType.length) {
-      return {
-        type: validTypes.length === 1 ? validTypes[0] : validTypes,
-      } as unknown as GbnfJsonSchema;
+    const valid = rawType.filter((t): t is string => typeof t === "string" && PRIMITIVE_TYPES.has(t));
+    if (valid.length > 0 && valid.length === rawType.length) {
+      return { type: valid.length === 1 ? valid[0] : valid } as unknown as GbnfJsonSchema;
     }
   }
   const primary = Array.isArray(rawType)
@@ -354,133 +293,295 @@ function shallowTypeStub(node: Record<string, unknown>, dropConst = false): Gbnf
   return { type: wantsNull ? ["string", "null"] : "string" } as unknown as GbnfJsonSchema;
 }
 
+function readRefMemo(
+  state: ExpandState,
+  target: Record<string, unknown>,
+  key: string,
+): GbnfJsonSchema | undefined {
+  return state.refMemo.get(target)?.get(key);
+}
+
+function writeRefMemo(
+  state: ExpandState,
+  target: Record<string, unknown>,
+  key: string,
+  val: GbnfJsonSchema,
+): void {
+  let inner = state.refMemo.get(target);
+  if (!inner) {
+    inner = new Map<string, GbnfJsonSchema>();
+    state.refMemo.set(target, inner);
+  }
+  inner.set(key, val);
+}
+
 /**
- * Returns a compact, type-preserving degraded schema stub when a subtree exceeds the
- * expansion depth/node/character budget, so over-budget objects degrade to
- * `{ type: "object", properties: {} }` and primitive fields keep their real JSON types
- * instead of silently flattening to `"string"`.
- *
- * Strictly bounded in CPU and output size via `(node, depth, allowArrayItem)` memoization,
- * depth cap, and per-property step budget so adversarial union/`$ref` DAGs cannot cause
- * exponential work or cross-property type loss.
+ * Collapses pure primitive-type unions into a compact `type: [...]` array when possible,
+ * deduplicates identical branches, and flattens nested `oneOf` arrays.
  */
-function degradedFallbackForNode(
+function finalizeUnionBranches(
+  rawBranches: readonly GbnfJsonSchema[],
+  description: string | undefined,
+): GbnfJsonSchema {
+  const deduped: GbnfJsonSchema[] = [];
+  const seen = new Set<string>();
+  const pushBranch = (branch: GbnfJsonSchema): void => {
+    const key = JSON.stringify(branch);
+    if (seen.has(key)) return;
+    seen.add(key);
+    deduped.push(branch);
+  };
+
+  for (const branch of rawBranches) {
+    const rec = branch as unknown as Record<string, unknown>;
+    if (Array.isArray(rec["oneOf"])) {
+      for (const sub of rec["oneOf"] as GbnfJsonSchema[]) {
+        if (deduped.length < MAX_UNION_BRANCHES) pushBranch(sub);
+      }
+    } else if (deduped.length < MAX_UNION_BRANCHES) {
+      pushBranch(branch);
+    }
+  }
+
+  if (deduped.length === 0) {
+    return { type: "string", ...(description ? { description } : {}) } as GbnfJsonSchema;
+  }
+  if (deduped.length === 1 && deduped[0]) {
+    return description
+      ? ({ ...deduped[0], description } as GbnfJsonSchema)
+      : deduped[0];
+  }
+
+  const purePrimitiveTypes: string[] = [];
+  let allPurePrimitive = true;
+  for (const b of deduped) {
+    const r = b as unknown as Record<string, unknown>;
+    const keys = Object.keys(r).filter((k) => k !== "description");
+    if (keys.length === 1 && keys[0] === "type") {
+      if (typeof r["type"] === "string" && PRIMITIVE_TYPES.has(r["type"])) {
+        if (!purePrimitiveTypes.includes(r["type"])) purePrimitiveTypes.push(r["type"]);
+        continue;
+      }
+      if (
+        Array.isArray(r["type"]) &&
+        r["type"].every((t) => typeof t === "string" && PRIMITIVE_TYPES.has(t))
+      ) {
+        for (const t of r["type"] as string[]) {
+          if (!purePrimitiveTypes.includes(t)) purePrimitiveTypes.push(t);
+        }
+        continue;
+      }
+    }
+    allPurePrimitive = false;
+    break;
+  }
+
+  if (allPurePrimitive && purePrimitiveTypes.length > 0) {
+    return {
+      type: purePrimitiveTypes.length === 1 ? purePrimitiveTypes[0] : purePrimitiveTypes,
+      ...(description ? { description } : {}),
+    } as unknown as GbnfJsonSchema;
+  }
+
+  return {
+    oneOf: deduped,
+    ...(description ? { description } : {}),
+  } as GbnfJsonSchema;
+}
+
+/**
+ * Phase 1: Normalize the entire object's properties WITHOUT premature per-property degradation.
+ * Required keys past index 24 are collected first and always kept (up to 48 required keys).
+ */
+function normalizeFullObjectProperties(
+  node: Record<string, unknown>,
+  root: Record<string, unknown>,
+  depth: number,
+  seenRefs: ReadonlySet<string>,
+  state: ExpandState,
+): { properties: Record<string, GbnfJsonSchema>; required: string[] } {
+  const requiredRaw = Array.isArray(node["required"])
+    ? node["required"].filter((key): key is string => typeof key === "string")
+    : [];
+  const requiredSet = new Set(requiredRaw);
+
+  const allEntries: [string, unknown][] = [];
+  if (isPlainObject(node["properties"])) {
+    for (const [key, propSchema] of Object.entries(node["properties"])) {
+      if (allEntries.length >= MAX_SCANNED_OBJECT_PROPERTIES) break;
+      if (
+        !key ||
+        key.length > MAX_KEY_CHARS ||
+        Buffer.byteLength(key, "utf8") > MAX_KEY_UTF8_BYTES ||
+        key.includes("\0")
+      ) {
+        continue;
+      }
+      allEntries.push([key, propSchema]);
+    }
+  }
+
+  const requiredEntries = allEntries
+    .filter(([key]) => requiredSet.has(key))
+    .slice(0, MAX_REQUIRED_OBJECT_PROPERTIES);
+  const optionalSlots = Math.max(0, MAX_OBJECT_PROPERTIES - requiredEntries.length);
+  const optionalEntries = allEntries
+    .filter(([key]) => !requiredSet.has(key))
+    .slice(0, optionalSlots);
+  const keptKeys = new Set<string>([
+    ...requiredEntries.map(([k]) => k),
+    ...optionalEntries.map(([k]) => k),
+  ]);
+
+  const normalizedByKey = new Map<string, GbnfJsonSchema>();
+  for (const [key, propSchema] of [...requiredEntries, ...optionalEntries]) {
+    const isReq = requiredSet.has(key);
+    const propNode = normalizeFullNode(propSchema, root, depth + 1, seenRefs, state, false);
+    normalizedByKey.set(key, isReq ? propNode : makeNullableSchema(propNode));
+  }
+
+  const properties: Record<string, GbnfJsonSchema> = {};
+  for (const [key] of allEntries) {
+    if (!keptKeys.has(key)) continue;
+    const val = normalizedByKey.get(key);
+    if (val !== undefined) properties[key] = val;
+  }
+  const required = requiredRaw.filter((key) => Object.hasOwn(properties, key));
+  return { properties, required };
+}
+
+/**
+ * Phase 1: Full, lossless, cycle-safe, memoized schema normalization up to a generous
+ * `MAX_FULL_EXPAND_NODES` (2,000) ceiling. Never drops fields, enums, consts, or types
+ * on ordinary schemas; Phase 2 shrinks by strict priority ONLY if output exceeds 12 KB UTF-8.
+ */
+function normalizeFullNode(
   raw: unknown,
   root: Record<string, unknown>,
+  depth: number,
   seenRefs: ReadonlySet<string>,
-  ctx: DegradeContext = createDegradeContext(),
-  depth = 0,
-  allowArrayItem = true,
+  state: ExpandState,
+  insideArray: boolean,
 ): GbnfJsonSchema {
-  const { node, nextSeen } = derefNode(raw, root, seenRefs);
-  if (!node) return { type: "string" };
-
-  const memoKey = `${depth}:${allowArrayItem ? 1 : 0}`;
-  const cached = readDegradeMemo(ctx, node, memoKey);
-  if (cached) return cached;
-
-  if (depth > MAX_DEGRADE_DEPTH || ctx.stepsLeft <= 0) {
-    return shallowTypeStub(node, ctx.dropConst);
+  const { node, targetObj, nextSeen, hadRef } = derefNode(raw, root, seenRefs);
+  if (!node) {
+    return { type: "string" };
   }
-  ctx.stepsLeft -= 1;
 
-  // Store a provisional stub BEFORE recursing into union branches / array items so
-  // diamond or cyclic `$ref` graphs visit every `(node, depth, arrayCtx)` at most once.
-  writeDegradeMemo(ctx, node, memoKey, shallowTypeStub(node, ctx.dropConst));
+  const memoKey = `${depth}:${insideArray ? 1 : 0}`;
+  if (hadRef && targetObj) {
+    const cached = readRefMemo(state, targetObj, memoKey);
+    if (cached) {
+      // Re-attach referencing property description if the target itself lacked one.
+      const ownDesc = cleanDescription(node["description"], MAX_PARAM_DESC_CHARS);
+      if (ownDesc && typeof (cached as unknown as Record<string, unknown>)["description"] !== "string") {
+        return { ...cached, description: ownDesc } as GbnfJsonSchema;
+      }
+      return cached;
+    }
+  }
 
+  if (depth > MAX_FULL_EXPAND_DEPTH || state.nodesLeft <= 0) {
+    return shallowStubForRawNode(node);
+  }
+  state.nodesLeft -= 1;
+
+  if (hadRef && targetObj) {
+    // Store provisional stub BEFORE recursing so cyclic / diamond `$ref` DAGs visit each node once.
+    writeRefMemo(state, targetObj, memoKey, shallowStubForRawNode(targetObj));
+  }
+
+  const description = cleanDescription(node["description"], MAX_PARAM_DESC_CHARS);
   let out: GbnfJsonSchema | null = null;
 
-  if ("const" in node) {
+  // Unions (`oneOf` / `anyOf`): normalize every branch up to MAX_UNION_BRANCHES, collapsing
+  // duplicates so diamond union chains like B0..B11 run in O(V) without injecting false "string".
+  const unionRaw = Array.isArray(node["oneOf"])
+    ? node["oneOf"]
+    : Array.isArray(node["anyOf"])
+      ? node["anyOf"]
+      : null;
+  if (unionRaw && unionRaw.length > 0) {
+    const branches: GbnfJsonSchema[] = [];
+    for (const rawBranch of unionRaw.slice(0, MAX_UNION_BRANCHES)) {
+      if (isPlainObject(rawBranch) && rawBranch["type"] === "null") {
+        branches.push({ type: "null" } as GbnfJsonSchema);
+        continue;
+      }
+      // If a union branch is a broken/cyclic `$ref` and other valid branches exist, skip adding a false "string".
+      if (isPlainObject(rawBranch) && typeof rawBranch["$ref"] === "string") {
+        const peek = derefNode(rawBranch, root, nextSeen);
+        if (!peek.node) continue;
+      }
+      branches.push(normalizeFullNode(rawBranch, root, depth + 1, nextSeen, state, insideArray));
+    }
+    if (branches.length > 0) {
+      out = finalizeUnionBranches(branches, description);
+    }
+  }
+
+  if (!out && "const" in node) {
     const val = node["const"];
-    if (ctx.dropConst) {
-      if (typeof val === "string") out = { type: "string" };
-      else if (typeof val === "number") out = { type: Number.isInteger(val) ? "integer" : "number" };
-      else if (typeof val === "boolean") out = { type: "boolean" };
-      else if (val === null) out = { type: "null" };
-    } else if (
-      (typeof val === "string" && val.length <= MAX_CONST_STRING_CHARS) ||
+    if (
+      typeof val === "string" ||
       typeof val === "number" ||
       typeof val === "boolean" ||
       val === null
     ) {
-      out = { const: val } as GbnfJsonSchema;
-    } else if (typeof val === "string") {
-      out = { type: "string" };
+      if (typeof val === "string" && val.length > MAX_CONST_STRING_CHARS) {
+        out = { type: "string", ...(description ? { description } : {}) } as GbnfJsonSchema;
+      } else {
+        out = { const: val, ...(description ? { description } : {}) } as GbnfJsonSchema;
+      }
     }
   }
 
   if (!out && Array.isArray(node["enum"]) && node["enum"].length > 0) {
-    if (ctx.dropEnums) {
-      out = primitiveTypeForEnumValues(node["enum"]);
+    const valid: (string | number | boolean | null)[] = [];
+    const seen = new Set<string>();
+    let exceeded = false;
+    for (const v of node["enum"]) {
+      if (valid.length >= MAX_FULL_ENUM_VALUES) {
+        exceeded = true;
+        break;
+      }
+      if (
+        typeof v !== "string" &&
+        typeof v !== "number" &&
+        typeof v !== "boolean" &&
+        v !== null
+      ) {
+        continue;
+      }
+      if (typeof v === "string" && v.length > MAX_ENUM_STRING_CHARS) {
+        exceeded = true;
+        break;
+      }
+      const key = `${typeof v}:${String(v)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      valid.push(v);
+    }
+    if (!exceeded && valid.length > 0) {
+      out = { enum: valid, ...(description ? { description } : {}) } as GbnfJsonSchema;
     } else {
-      const bounded = boundEnumValues(node["enum"], SMALL_ENUM_MAX_BYTES, SMALL_ENUM_MAX_VALUES);
-      out = bounded.enum ? ({ enum: bounded.enum } as GbnfJsonSchema) : bounded.fallback;
-    }
-  }
-
-  const unionRaw = !out
-    ? Array.isArray(node["oneOf"])
-      ? node["oneOf"]
-      : Array.isArray(node["anyOf"])
-        ? node["anyOf"]
-        : null
-    : null;
-  if (!out && unionRaw && unionRaw.length > 0) {
-    const primTypes: string[] = [];
-    let allPrim = true;
-    let sawNull = false;
-    let firstNonNull: GbnfJsonSchema | null = null;
-    for (const branch of unionRaw.slice(0, MAX_UNION_BRANCHES)) {
-      // Detect null branches even if step budget is tight so `anyOf: [integer, null]` never loses `null`.
-      if (isPlainObject(branch) && branch["type"] === "null") {
-        sawNull = true;
-        if (!primTypes.includes("null")) primTypes.push("null");
-        continue;
-      }
-      if (ctx.stepsLeft <= 0) {
-        const stub = isPlainObject(branch) ? shallowTypeStub(branch, ctx.dropConst) : { type: "string" as const };
-        const st = (stub as unknown as Record<string, unknown>)["type"];
-        if (typeof st === "string" && PRIMITIVE_TYPES.has(st)) {
-          if (!primTypes.includes(st)) primTypes.push(st);
-          if (!firstNonNull && st !== "null") firstNonNull = stub;
-        }
-        continue;
-      }
-      const degraded = degradedFallbackForNode(branch, root, nextSeen, ctx, depth + 1, false);
-      const rec = degraded as unknown as Record<string, unknown>;
-      const t = rec["type"];
-      if (t === "null") {
-        sawNull = true;
-        if (!primTypes.includes("null")) primTypes.push("null");
-        continue;
-      }
-      if (!firstNonNull) firstNonNull = degraded;
-      if (typeof t === "string" && PRIMITIVE_TYPES.has(t)) {
-        if (!primTypes.includes(t)) primTypes.push(t);
-      } else if (Array.isArray(t) && t.every((item) => typeof item === "string" && PRIMITIVE_TYPES.has(item))) {
-        for (const item of t as string[]) {
-          if (!primTypes.includes(item)) primTypes.push(item);
-        }
-      } else {
-        allPrim = false;
-      }
-    }
-    if (allPrim && primTypes.length > 0) {
       out = {
-        type: primTypes.length === 1 ? primTypes[0] : primTypes,
-      } as unknown as GbnfJsonSchema;
-    } else if (firstNonNull) {
-      out = sawNull ? makeNullableSchema(firstNonNull, false) : firstNonNull;
+        ...primitiveTypeForEnumValues(node["enum"]),
+        ...(description ? { description } : {}),
+      } as GbnfJsonSchema;
     }
   }
 
   if (!out) {
     const rawType = node["type"];
     if (Array.isArray(rawType)) {
-      const validTypes = rawType.filter((t): t is string => typeof t === "string" && PRIMITIVE_TYPES.has(t));
+      const validTypes = rawType.filter(
+        (t): t is string => typeof t === "string" && PRIMITIVE_TYPES.has(t),
+      );
       if (validTypes.length > 0 && validTypes.length === rawType.length) {
         out = {
           type: validTypes.length === 1 ? validTypes[0] : validTypes,
+          ...(description ? { description } : {}),
         } as unknown as GbnfJsonSchema;
       }
     }
@@ -505,403 +606,482 @@ function degradedFallbackForNode(
         case "null":
           out = {
             type: wantsNull && primaryType !== "null" ? [primaryType, "null"] : primaryType,
+            ...(description ? { description } : {}),
           } as unknown as GbnfJsonSchema;
           break;
+
         case "array": {
-          const arr: GbnfJsonSchema = {
+          let arr: GbnfJsonSchema = {
             type: "array",
-            items: allowArrayItem
-              ? degradedFallbackForNode(node["items"], root, nextSeen, ctx, depth + 1, false)
-              : { type: "string" },
+            items:
+              node["items"] !== undefined
+                ? normalizeFullNode(node["items"], root, depth + 1, nextSeen, state, true)
+                : { type: "string" },
+            ...(description ? { description } : {}),
           } as GbnfJsonSchema;
-          out = wantsNull ? makeNullableSchema(arr, false) : arr;
+          if (wantsNull) arr = makeNullableSchema(arr);
+          out = arr;
           break;
         }
+
         case "object": {
-          const obj: GbnfJsonSchema = { type: "object", properties: {} } as GbnfJsonSchema;
-          out = wantsNull ? makeNullableSchema(obj, false) : obj;
+          const { properties, required } = normalizeFullObjectProperties(
+            node,
+            root,
+            depth,
+            nextSeen,
+            state,
+          );
+          let obj: GbnfJsonSchema = {
+            type: "object",
+            properties,
+            ...(required.length > 0 ? { required } : {}),
+            ...(description ? { description } : {}),
+          } as GbnfJsonSchema;
+          if (wantsNull) obj = makeNullableSchema(obj);
+          out = obj;
           break;
         }
+
         default:
-          out = { type: wantsNull ? ["string", "null"] : "string" } as unknown as GbnfJsonSchema;
+          out = {
+            type: wantsNull ? ["string", "null"] : "string",
+            ...(description ? { description } : {}),
+          } as unknown as GbnfJsonSchema;
           break;
       }
     }
   }
 
-  writeDegradeMemo(ctx, node, memoKey, out);
+  if (hadRef && targetObj) {
+    // Cache target's own clean form (without referencing property's injected description).
+    const cachedVal =
+      typeof targetObj["description"] !== "string" &&
+      typeof (out as unknown as Record<string, unknown>)["description"] === "string"
+        ? (withoutKey(out as unknown as Record<string, unknown>, "description") as unknown as GbnfJsonSchema)
+        : out;
+    writeRefMemo(state, targetObj, memoKey, cachedVal);
+  }
   return out;
 }
 
-/**
- * Recursively strips `description` fields from a normalized schema without altering any
- * structural constraints (`enum`, `const`, `type`, `oneOf`, `required`, nested `properties`).
- */
-function stripSchemaDescriptions(schema: unknown): unknown {
-  if (Array.isArray(schema)) {
-    return schema.map(stripSchemaDescriptions);
-  }
-  if (!isPlainObject(schema)) return schema;
+function withoutKey(obj: Record<string, unknown>, dropKey: string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(schema)) {
-    if (key === "description") continue;
-    if (key === "properties" && isPlainObject(value)) {
-      const propsOut: Record<string, unknown> = {};
-      for (const [pk, pv] of Object.entries(value)) {
-        propsOut[pk] = stripSchemaDescriptions(pv);
-      }
-      out[key] = propsOut;
-    } else if (key === "items" || key === "oneOf" || key === "anyOf") {
-      out[key] = stripSchemaDescriptions(value);
+  for (const [k, v] of Object.entries(obj)) {
+    if (k !== dropKey) out[k] = v;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Priority-ordered shrinking ONLY when utf8ByteLength(result) > 12 KB
+// ---------------------------------------------------------------------------
+
+function cloneMutable<T>(val: T): T {
+  return JSON.parse(JSON.stringify(val)) as T;
+}
+
+function trimDescriptionsInPlace(node: unknown, maxChars: number): void {
+  if (Array.isArray(node)) {
+    for (const item of node) trimDescriptionsInPlace(item, maxChars);
+    return;
+  }
+  if (!isPlainObject(node)) return;
+  if (typeof node["description"] === "string" && node["description"].length > maxChars) {
+    node["description"] = `${node["description"].slice(0, maxChars).trim()}…`;
+  }
+  if (isPlainObject(node["properties"])) {
+    for (const prop of Object.values(node["properties"])) trimDescriptionsInPlace(prop, maxChars);
+  }
+  if (node["items"] !== undefined) trimDescriptionsInPlace(node["items"], maxChars);
+  if (Array.isArray(node["oneOf"])) trimDescriptionsInPlace(node["oneOf"], maxChars);
+}
+
+function dropDescriptionsInPlace(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(dropDescriptionsInPlace);
+  if (!isPlainObject(node)) return node;
+  const out: MutableSchema = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "description") continue;
+    if (k === "properties" && isPlainObject(v)) {
+      const props: MutableSchema = {};
+      for (const [pk, pv] of Object.entries(v)) props[pk] = dropDescriptionsInPlace(pv);
+      out[k] = props;
+    } else if (k === "items" || k === "oneOf" || k === "anyOf") {
+      out[k] = dropDescriptionsInPlace(v);
     } else {
-      out[key] = value;
+      out[k] = v;
     }
   }
   return out;
 }
 
-/**
- * Normalizes an object's `properties`:
- * - Collects ALL valid properties BEFORE applying the property limit so required keys past the
- *   24th declaration slot are NEVER dropped.
- * - Normalizes `required` keys first and lets properties borrow unused shared budget (while
- *   capping any single property to at most 60% of remaining budget so one giant `$ref` cannot
- *   starve siblings).
- * - Gives every property its own fresh `DegradeContext` so one complex field never exhausts
- *   the degrade step budget of later siblings.
- */
-function normalizeObjectProperties(
-  node: Record<string, unknown>,
-  root: Record<string, unknown>,
-  depth: number,
-  nextSeen: ReadonlySet<string>,
-  budget: SchemaExpansionBudget,
-  preserveAllSiblings: boolean,
-): { properties: Record<string, GbnfJsonSchema>; required: string[] } {
-  const requiredRaw = Array.isArray(node["required"])
-    ? node["required"].filter((key): key is string => typeof key === "string")
-    : [];
-  const requiredSet = new Set(requiredRaw);
-
-  // Collect all valid entries FIRST (up to sanity bound), then prioritize required keys BEFORE slicing!
-  const allEntries: [string, unknown][] = [];
-  if (isPlainObject(node["properties"])) {
-    for (const [key, propSchema] of Object.entries(node["properties"])) {
-      if (allEntries.length >= MAX_SCANNED_OBJECT_PROPERTIES) break;
-      if (!key || key.length > 80 || Buffer.byteLength(key, "utf8") > 120 || key.includes("\0")) {
-        continue;
-      }
-      allEntries.push([key, propSchema]);
-    }
-  }
-
-  const requiredEntries = allEntries
-    .filter(([key]) => requiredSet.has(key))
-    .slice(0, MAX_REQUIRED_OBJECT_PROPERTIES);
-  const optionalSlots = Math.max(0, MAX_OBJECT_PROPERTIES - requiredEntries.length);
-  const optionalEntries = allEntries
-    .filter(([key]) => !requiredSet.has(key))
-    .slice(0, optionalSlots);
-  const keptKeys = new Set<string>([
-    ...requiredEntries.map(([k]) => k),
-    ...optionalEntries.map(([k]) => k),
-  ]);
-
-  // Process required properties first so they always receive expansion priority over optional trees.
-  const ordered: [string, unknown][] = [...requiredEntries, ...optionalEntries];
-
-  const normalizedByKey = new Map<string, GbnfJsonSchema>();
-  for (let i = 0; i < ordered.length; i += 1) {
-    const entry = ordered[i];
-    if (!entry) continue;
-    const [key, propSchema] = entry;
-    const isReq = requiredSet.has(key);
-    const remaining = ordered.length - i;
-    // Fresh degrade context per property prevents cross-sibling step starvation and stale memo sharing.
-    const propDegradeCtx = createDegradeContext(false, false);
-
-    if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) {
-      if (preserveAllSiblings || isReq) {
-        const degraded = degradedFallbackForNode(propSchema, root, nextSeen, propDegradeCtx);
-        normalizedByKey.set(key, isReq ? degraded : makeNullableSchema(degraded, false));
-      }
-      continue;
-    }
-
-    const keyOverhead = Buffer.byteLength(key, "utf8") + (isReq ? 16 : 48);
-    budget.charsLeft = Math.max(0, budget.charsLeft - keyOverhead);
-
-    // Let properties borrow unused shared budget while capping any single property at 60% of the
-    // remaining pool so a single giant `$ref` cannot starve siblings, yet ordinary multi-enum
-    // schemas never suffer artificial per-slot starvation.
-    const allocNodes =
-      remaining > 1
-        ? Math.min(budget.nodesLeft, Math.max(12, Math.floor(budget.nodesLeft * 0.5)))
-        : budget.nodesLeft;
-    const allocChars =
-      remaining > 1
-        ? Math.min(budget.charsLeft, Math.max(1_024, Math.floor(budget.charsLeft * 0.6)))
-        : budget.charsLeft;
-    const subBudget: SchemaExpansionBudget = {
-      nodesLeft: allocNodes,
-      charsLeft: allocChars,
-    };
-
-    const propNode = normalizeSchemaNode(
-      propSchema,
-      root,
-      depth + 1,
-      nextSeen,
-      subBudget,
-      propDegradeCtx,
-    );
-    const spentNodes = Math.max(0, allocNodes - subBudget.nodesLeft);
-    const spentChars = Math.max(0, allocChars - subBudget.charsLeft);
-    budget.nodesLeft = Math.max(0, budget.nodesLeft - spentNodes);
-    budget.charsLeft = Math.max(0, budget.charsLeft - spentChars);
-
-    normalizedByKey.set(key, isReq ? propNode : makeNullableSchema(propNode));
-  }
-
-  // Re-emit kept properties in their original declaration order.
-  const properties: Record<string, GbnfJsonSchema> = {};
-  for (const [key] of allEntries) {
-    if (!keptKeys.has(key)) continue;
-    const val = normalizedByKey.get(key);
-    if (val !== undefined) properties[key] = val;
-  }
-  const required = requiredRaw.filter((key) => Object.hasOwn(properties, key));
-  return { properties, required };
-}
-
-function normalizeSchemaNode(
-  raw: unknown,
-  root: Record<string, unknown>,
-  depth: number,
-  seenRefs: ReadonlySet<string>,
-  budget: SchemaExpansionBudget,
-  degradeCtx: DegradeContext,
-): GbnfJsonSchema {
-  if (depth > MAX_SCHEMA_DEPTH || !consumeBudget(budget, 24)) {
-    return degradedFallbackForNode(raw, root, seenRefs, degradeCtx);
-  }
-  const { node, nextSeen } = derefNode(raw, root, seenRefs);
-  if (!node) {
-    return { type: "string" };
-  }
-  const description = cleanDescription(node["description"], MAX_PARAM_DESC_CHARS);
-
-  // Union types (`anyOf` / `oneOf`) preserved as `oneOf` (or primitive type array) instead of flattening to string.
-  const unionRaw = Array.isArray(node["oneOf"])
-    ? node["oneOf"]
-    : Array.isArray(node["anyOf"])
-      ? node["anyOf"]
-      : null;
-  if (unionRaw && unionRaw.length > 0) {
-    if (description) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
-    const branches: GbnfJsonSchema[] = [];
-    for (const branch of unionRaw.slice(0, MAX_UNION_BRANCHES)) {
-      if (isPlainObject(branch) && branch["type"] === "null") {
-        branches.push({ type: "null" } as GbnfJsonSchema);
-        continue;
-      }
-      if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) {
-        const deg = degradedFallbackForNode(branch, root, nextSeen, degradeCtx, 0, false);
-        branches.push(deg);
-        continue;
-      }
-      const normalized = normalizeSchemaNode(branch, root, depth + 1, nextSeen, budget, degradeCtx);
-      const branchRec = normalized as unknown as Record<string, unknown>;
-      if (Array.isArray(branchRec["oneOf"])) {
-        for (const sub of branchRec["oneOf"] as GbnfJsonSchema[]) {
-          if (branches.length < MAX_UNION_BRANCHES) branches.push(sub);
+function collapseNodeToStub(node: MutableSchema): MutableSchema {
+  if ("const" in node) return { const: node["const"] };
+  if (Array.isArray(node["enum"])) return { enum: node["enum"] };
+  if (Array.isArray(node["oneOf"])) {
+    const branches = node["oneOf"].filter(isPlainObject);
+    const sawNull = branches.some((b) => b["type"] === "null");
+    const nonNull = branches.filter((b) => b["type"] !== "null");
+    const prims: string[] = [];
+    let allPrim = nonNull.length > 0;
+    for (const b of nonNull) {
+      const t = b["type"];
+      if (typeof t === "string" && PRIMITIVE_TYPES.has(t)) {
+        if (!prims.includes(t)) prims.push(t);
+      } else if (Array.isArray(t) && t.every((x) => typeof x === "string" && PRIMITIVE_TYPES.has(x))) {
+        for (const x of t as string[]) {
+          if (!prims.includes(x)) prims.push(x);
         }
       } else {
-        branches.push(normalized);
+        allPrim = false;
       }
     }
-    if (branches.length === 1 && branches[0]) {
-      return description
-        ? ({ ...branches[0], description } as GbnfJsonSchema)
-        : branches[0];
+    if (allPrim) {
+      if (sawNull && !prims.includes("null")) prims.push("null");
+      return { type: prims.length === 1 ? prims[0] : prims };
     }
-    // Collapse pure primitive-type unions into a compact `type: [...]` array when possible.
-    const purePrimitiveTypes: string[] = [];
-    let allPurePrimitive = branches.length > 0;
-    for (const b of branches) {
-      const r = b as unknown as Record<string, unknown>;
-      const keys = Object.keys(r).filter((k) => k !== "description");
-      if (keys.length === 1 && keys[0] === "type") {
-        if (typeof r["type"] === "string" && PRIMITIVE_TYPES.has(r["type"])) {
-          if (!purePrimitiveTypes.includes(r["type"])) purePrimitiveTypes.push(r["type"]);
-          continue;
-        }
-        if (Array.isArray(r["type"]) && r["type"].every((t) => typeof t === "string" && PRIMITIVE_TYPES.has(t))) {
-          for (const t of r["type"] as string[]) {
-            if (!purePrimitiveTypes.includes(t)) purePrimitiveTypes.push(t);
-          }
-          continue;
-        }
+    const first = nonNull[0];
+    if (first) {
+      const collapsedFirst = collapseNodeToStub(first);
+      return sawNull ? { oneOf: [collapsedFirst, { type: "null" }] } : collapsedFirst;
+    }
+    return { type: sawNull ? "null" : "string" };
+  }
+  if (node["type"] === "object" || isPlainObject(node["properties"])) {
+    return { type: "object", properties: {} };
+  }
+  if (node["type"] === "array" || node["items"] !== undefined) {
+    const item = isPlainObject(node["items"]) ? collapseNodeToStub(node["items"]) : { type: "string" };
+    return { type: "array", items: item };
+  }
+  return node;
+}
+
+function isCollapsibleSubtree(node: MutableSchema): boolean {
+  if (isPlainObject(node["properties"]) && Object.keys(node["properties"]).length > 0) return true;
+  if (
+    node["type"] === "array" &&
+    isPlainObject(node["items"]) &&
+    isCollapsibleSubtree(node["items"])
+  ) {
+    return true;
+  }
+  if (
+    Array.isArray(node["oneOf"]) &&
+    node["oneOf"].some((b) => isPlainObject(b) && isCollapsibleSubtree(b))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+interface SubtreeRef {
+  depth: number;
+  inOptional: boolean;
+  bytes: number;
+  applyCollapse: () => void;
+}
+
+function collectCollapsibleSubtrees(
+  node: MutableSchema,
+  depth: number,
+  inOptional: boolean,
+  out: SubtreeRef[],
+): void {
+  if (isPlainObject(node["properties"])) {
+    const props = node["properties"];
+    const reqSet = new Set(
+      Array.isArray(node["required"])
+        ? node["required"].filter((k): k is string => typeof k === "string")
+        : [],
+    );
+    for (const [key, rawChild] of Object.entries(props)) {
+      if (!isPlainObject(rawChild)) continue;
+      const childOptional = inOptional || !reqSet.has(key);
+      collectCollapsibleSubtrees(rawChild, depth + 1, childOptional, out);
+      if (isCollapsibleSubtree(rawChild)) {
+        out.push({
+          depth: depth + 1,
+          inOptional: childOptional,
+          bytes: utf8ByteLength(rawChild),
+          applyCollapse: () => {
+            props[key] = collapseNodeToStub(rawChild);
+          },
+        });
       }
-      allPurePrimitive = false;
-      break;
-    }
-    if (allPurePrimitive && purePrimitiveTypes.length > 0) {
-      return {
-        type: purePrimitiveTypes.length === 1 ? purePrimitiveTypes[0] : purePrimitiveTypes,
-        ...(description ? { description } : {}),
-      } as unknown as GbnfJsonSchema;
-    }
-    if (branches.length > 0) {
-      return {
-        oneOf: branches,
-        ...(description ? { description } : {}),
-      } as GbnfJsonSchema;
     }
   }
-
-  if ("const" in node) {
-    const val = node["const"];
-    if (
-      typeof val === "string" ||
-      typeof val === "number" ||
-      typeof val === "boolean" ||
-      val === null
-    ) {
-      if (typeof val === "string" && val.length > MAX_CONST_STRING_CHARS) {
-        if (description) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
-        return {
-          type: "string",
-          ...(description ? { description } : {}),
-        } as GbnfJsonSchema;
+  if (isPlainObject(node["items"])) {
+    const item = node["items"];
+    collectCollapsibleSubtrees(item, depth + 1, inOptional, out);
+    if (isCollapsibleSubtree(item)) {
+      out.push({
+        depth: depth + 1,
+        inOptional,
+        bytes: utf8ByteLength(item),
+        applyCollapse: () => {
+          node["items"] = collapseNodeToStub(item);
+        },
+      });
+    }
+  }
+  if (Array.isArray(node["oneOf"])) {
+    const branches = node["oneOf"];
+    for (let i = 0; i < branches.length; i += 1) {
+      const b = branches[i];
+      if (!isPlainObject(b)) continue;
+      collectCollapsibleSubtrees(b, depth + 1, inOptional, out);
+      if (isCollapsibleSubtree(b)) {
+        out.push({
+          depth: depth + 1,
+          inOptional,
+          bytes: utf8ByteLength(b),
+          applyCollapse: () => {
+            branches[i] = collapseNodeToStub(b);
+          },
+        });
       }
-      budget.charsLeft -= typeof val === "string" ? Buffer.byteLength(val, "utf8") + 14 : 14;
-      if (description) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
-      return {
-        const: val,
-        ...(description ? { description } : {}),
-      } as GbnfJsonSchema;
+    }
+  }
+}
+
+interface ConstraintRef {
+  kind: "enum" | "const";
+  oversized: boolean;
+  inOptional: boolean;
+  bytes: number;
+  widen: () => void;
+}
+
+function collectConstraints(
+  node: MutableSchema,
+  inOptional: boolean,
+  out: ConstraintRef[],
+): void {
+  const inspectSlot = (
+    container: Record<string, unknown> | unknown[],
+    slot: string | number,
+    child: unknown,
+    slotOptional: boolean,
+  ): void => {
+    if (!isPlainObject(child)) return;
+    if (Array.isArray(child["enum"])) {
+      const vals = child["enum"];
+      const bytes = utf8ByteLength(vals);
+      const nonNullCount = vals.filter((v) => v !== null).length;
+      const oversized = nonNullCount > SMALL_ENUM_MAX_VALUES || bytes > SMALL_ENUM_MAX_BYTES;
+      out.push({
+        kind: "enum",
+        oversized,
+        inOptional: slotOptional,
+        bytes,
+        widen: () => {
+          const replacement = primitiveTypeForEnumValues(vals);
+          if (Array.isArray(container)) container[slot as number] = replacement;
+          else container[slot as string] = replacement;
+        },
+      });
+      return;
+    }
+    if ("const" in child) {
+      const val = child["const"];
+      const bytes = utf8ByteLength(child);
+      out.push({
+        kind: "const",
+        oversized: bytes > SMALL_ENUM_MAX_BYTES,
+        inOptional: slotOptional,
+        bytes,
+        widen: () => {
+          const replacement = primitiveTypeForConst(val);
+          if (Array.isArray(container)) container[slot as number] = replacement;
+          else container[slot as string] = replacement;
+        },
+      });
+      return;
+    }
+    collectConstraints(child, slotOptional, out);
+  };
+
+  if (isPlainObject(node["properties"])) {
+    const props = node["properties"];
+    const reqSet = new Set(
+      Array.isArray(node["required"])
+        ? node["required"].filter((k): k is string => typeof k === "string")
+        : [],
+    );
+    for (const [key, child] of Object.entries(props)) {
+      inspectSlot(props, key, child, inOptional || !reqSet.has(key));
+    }
+  }
+  if (isPlainObject(node["items"])) {
+    inspectSlot(node, "items", node["items"], inOptional);
+  }
+  if (Array.isArray(node["oneOf"])) {
+    for (let i = 0; i < node["oneOf"].length; i += 1) {
+      inspectSlot(node["oneOf"], i, node["oneOf"][i], inOptional);
+    }
+  }
+}
+
+function shrinkToCeiling(initial: McpObjectParamsSchema): McpObjectParamsSchema {
+  if (utf8ByteLength(initial) <= MAX_SERIALIZED_SCHEMA_BYTES) return initial;
+
+  let working = cloneMutable(initial) as unknown as MutableSchema;
+
+  // Stage 1a: trim descriptions to 48 chars.
+  trimDescriptionsInPlace(working, TRIMMED_DESC_CHARS);
+  if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+    return working as unknown as McpObjectParamsSchema;
+  }
+
+  // Stage 1b: drop all descriptions completely (still keeping every structural constraint).
+  working = dropDescriptionsInPlace(working) as MutableSchema;
+  if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+    return working as unknown as McpObjectParamsSchema;
+  }
+
+  // Stage 2: collapse optional nested subtrees, deepest first (largest first within same depth).
+  for (let pass = 0; pass < 24 && utf8ByteLength(working) > MAX_SERIALIZED_SCHEMA_BYTES; pass += 1) {
+    const subtrees: SubtreeRef[] = [];
+    collectCollapsibleSubtrees(working, 0, false, subtrees);
+    const optSubtrees = subtrees
+      .filter((s) => s.inOptional)
+      .sort((a, b) => b.depth - a.depth || b.bytes - a.bytes);
+    if (optSubtrees.length === 0) break;
+    const firstOpt = optSubtrees[0];
+    if (!firstOpt) break;
+    const targetDepth = firstOpt.depth;
+    let changed = false;
+    for (const sub of optSubtrees) {
+      if (sub.depth !== targetDepth) break;
+      sub.applyCollapse();
+      changed = true;
+      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+        return working as unknown as McpObjectParamsSchema;
+      }
+    }
+    if (!changed) break;
+  }
+
+  // Stage 3a: widen oversized enums (>16 vals or >512 bytes) — optional first, then required (enum fan-out).
+  {
+    const constraints: ConstraintRef[] = [];
+    collectConstraints(working, false, constraints);
+    const oversizedEnums = constraints
+      .filter((c) => c.kind === "enum" && c.oversized)
+      .sort((a, b) => Number(b.inOptional) - Number(a.inOptional) || b.bytes - a.bytes);
+    for (const c of oversizedEnums) {
+      c.widen();
+      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+        return working as unknown as McpObjectParamsSchema;
+      }
     }
   }
 
-  if (Array.isArray(node["enum"]) && node["enum"].length > 0) {
-    // Evaluate enum BEFORE charging description so parameter prose can NEVER starve a real enum!
-    // Small enums (<= 16 values & <= 512 UTF-8 bytes) are NEVER dropped during normal expansion;
-    // the staged 12 KB ceiling strips descriptions first before ever touching enum constraints.
-    const smallCheck = boundEnumValues(node["enum"], SMALL_ENUM_MAX_BYTES, SMALL_ENUM_MAX_VALUES);
-    if (smallCheck.enum && smallCheck.isSmall) {
-      budget.charsLeft -= smallCheck.bytes;
-      const keepDesc = description && budget.charsLeft > Buffer.byteLength(description, "utf8") + 18;
-      if (keepDesc) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
-      return {
-        enum: smallCheck.enum,
-        ...(keepDesc ? { description } : {}),
-      } as GbnfJsonSchema;
-    }
-    const enumBudget = Math.max(0, Math.min(MAX_ENUM_TOTAL_BYTES, budget.charsLeft));
-    const bounded = boundEnumValues(node["enum"], enumBudget, MAX_ENUM_VALUES);
-    budget.charsLeft -= bounded.bytes;
-    if (description) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
-    if (bounded.enum && bounded.enum.length > 0) {
-      return {
-        enum: bounded.enum,
-        ...(description ? { description } : {}),
-      } as GbnfJsonSchema;
-    }
-    return {
-      ...bounded.fallback,
-      ...(description ? { description } : {}),
-    } as GbnfJsonSchema;
-  }
-
-  if (description) {
-    budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
-  }
-
-  const rawType = node["type"];
-  if (Array.isArray(rawType)) {
-    const validTypes = rawType.filter((t): t is string => typeof t === "string" && PRIMITIVE_TYPES.has(t));
-    if (validTypes.length > 0 && validTypes.length === rawType.length) {
-      return {
-        type: validTypes.length === 1 ? validTypes[0] : validTypes,
-        ...(description ? { description } : {}),
-      } as unknown as GbnfJsonSchema;
+  // Stage 3b: widen remaining enums & consts on OPTIONAL properties only.
+  {
+    const constraints: ConstraintRef[] = [];
+    collectConstraints(working, false, constraints);
+    const optConstraints = constraints
+      .filter((c) => c.inOptional)
+      .sort((a, b) => b.bytes - a.bytes);
+    for (const c of optConstraints) {
+      c.widen();
+      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+        return working as unknown as McpObjectParamsSchema;
+      }
     }
   }
 
-  const primaryType = Array.isArray(rawType)
-    ? rawType.find((t): t is string => typeof t === "string" && t !== "null")
-    : typeof rawType === "string"
-      ? rawType
-      : isPlainObject(node["properties"])
-        ? "object"
-        : node["items"] !== undefined
-          ? "array"
-          : "string";
-  const wantsNull = Array.isArray(rawType) && rawType.includes("null");
-
-  let normalized: GbnfJsonSchema;
-  switch (primaryType) {
-    case "string":
-    case "number":
-    case "integer":
-    case "boolean":
-    case "null":
-      normalized = {
-        type: wantsNull && primaryType !== "null" ? [primaryType, "null"] : primaryType,
-        ...(description ? { description } : {}),
-      } as unknown as GbnfJsonSchema;
-      break;
-
-    case "array":
-      normalized = {
-        type: "array",
-        items: normalizeSchemaNode(node["items"], root, depth + 1, nextSeen, budget, degradeCtx),
-        ...(description ? { description } : {}),
-      } as GbnfJsonSchema;
-      if (wantsNull) normalized = makeNullableSchema(normalized);
-      break;
-
-    case "object": {
-      const { properties, required } = normalizeObjectProperties(
-        node,
-        root,
-        depth,
-        nextSeen,
-        budget,
-        depth <= 1,
-      );
-      normalized = {
-        type: "object",
-        properties,
-        ...(required.length > 0 ? { required } : {}),
-        ...(description ? { description } : {}),
-      } as GbnfJsonSchema;
-      if (wantsNull) normalized = makeNullableSchema(normalized);
-      break;
+  // Stage 3c: drop optional top-level properties from the end (never dropping required properties).
+  if (isPlainObject(working["properties"])) {
+    const reqSet = new Set(
+      Array.isArray(working["required"])
+        ? working["required"].filter((k): k is string => typeof k === "string")
+        : [],
+    );
+    const kept = new Map<string, unknown>(Object.entries(working["properties"]));
+    for (const key of [...kept.keys()].reverse()) {
+      if (reqSet.has(key)) continue;
+      kept.delete(key);
+      working["properties"] = Object.fromEntries(kept);
+      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+        return working as unknown as McpObjectParamsSchema;
+      }
     }
-
-    default:
-      normalized = {
-        type: wantsNull ? ["string", "null"] : "string",
-        ...(description ? { description } : {}),
-      } as unknown as GbnfJsonSchema;
-      break;
   }
-  return normalized;
+
+  // Stage 4 (last resort): required properties alone exceed 12 KB UTF-8.
+  // 4a: collapse deepest nested subtrees inside required properties first.
+  for (let pass = 0; pass < 24 && utf8ByteLength(working) > MAX_SERIALIZED_SCHEMA_BYTES; pass += 1) {
+    const subtrees: SubtreeRef[] = [];
+    collectCollapsibleSubtrees(working, 0, false, subtrees);
+    subtrees.sort((a, b) => b.depth - a.depth || b.bytes - a.bytes);
+    if (subtrees.length === 0) break;
+    const firstSub = subtrees[0];
+    if (!firstSub) break;
+    const targetDepth = firstSub.depth;
+    for (const sub of subtrees) {
+      if (sub.depth !== targetDepth) break;
+      sub.applyCollapse();
+      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+        return working as unknown as McpObjectParamsSchema;
+      }
+    }
+  }
+
+  // 4b: widen enums, then consts on required properties (largest first — handles 48 required long consts).
+  {
+    const constraints: ConstraintRef[] = [];
+    collectConstraints(working, false, constraints);
+    constraints.sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === "enum" ? -1 : 1;
+      return b.bytes - a.bytes;
+    });
+    for (const c of constraints) {
+      c.widen();
+      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+        return working as unknown as McpObjectParamsSchema;
+      }
+    }
+  }
+
+  // 4c: absolute UTF-8 safety net (extreme multi-byte CJK key names): flatten to minimal string
+  // and trim trailing keys ONLY if still > 12,288 UTF-8 bytes.
+  if (isPlainObject(working["properties"]) && utf8ByteLength(working) > MAX_SERIALIZED_SCHEMA_BYTES) {
+    const kept = new Map<string, unknown>();
+    for (const key of Object.keys(working["properties"])) {
+      kept.set(key, { type: "string" });
+    }
+    working["properties"] = Object.fromEntries(kept);
+    if (utf8ByteLength(working) > MAX_SERIALIZED_SCHEMA_BYTES) {
+      const reqList = Array.isArray(working["required"])
+        ? working["required"].filter((k): k is string => typeof k === "string")
+        : [];
+      for (const key of [...kept.keys()].reverse()) {
+        kept.delete(key);
+        working["properties"] = Object.fromEntries(kept);
+        const nextReq = reqList.filter((k) => kept.has(k));
+        if (nextReq.length > 0) working["required"] = nextReq;
+        else working = withoutKey(working, "required");
+        if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) break;
+      }
+    }
+  }
+
+  return working as unknown as McpObjectParamsSchema;
 }
 
 /**
  * Normalizes an arbitrary external MCP `inputSchema` into a `node-llama-cpp`-safe
  * GBNF JSON Schema object:
- * - resolves local `#/$defs/...` and `#/definitions/...` `$ref` pointers,
- * - preserves `anyOf` / `oneOf` unions instead of flattening them to `"string"`,
- * - schemas required & top-level properties first (even past the 24th declaration slot)
- *   and degrades only over-budget subtrees in strictly bounded O(V) time,
- * - models optional (non-required) parameters as nullable so `node-llama-cpp` 3.22.3
- *   does not force the model to invent values for optional keys,
- * - strictly enforces the 12 KB serialized ceiling (including enum values),
- * - sanitizes every external server-supplied parameter description.
+ * - Phase 1 normalizes the full schema without premature degradation (cycle-safe, memoized
+ *   by `$ref` target, generous 2,000-node ceiling), keeping required keys even past slot 24
+ *   and modeling optional parameters as nullable so `node-llama-cpp` 3.22.3 lets the model omit them;
+ * - Phase 2 shrinks by strict priority ONLY when serialized UTF-8 exceeds 12,288 bytes:
+ *   (1) trim then drop descriptions, (2) collapse deepest optional subtrees, (3) widen/drop
+ *   optional constraints, and (4) touch required keys only as a last resort.
  */
 export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObjectParamsSchema {
   if (!isPlainObject(raw)) {
@@ -910,102 +1090,28 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
   const cached = normalizedSchemaCache.get(raw);
   if (cached) return cached;
 
-  const budget: SchemaExpansionBudget = {
-    nodesLeft: MAX_EXPANDED_SCHEMA_NODES,
-    charsLeft: MAX_EXPANDED_SCHEMA_CHARS,
+  const state: ExpandState = {
+    nodesLeft: MAX_FULL_EXPAND_NODES,
+    refMemo: new Map(),
   };
   const { node, nextSeen } = derefNode(raw, raw, new Set());
   const effective = node ?? raw;
-  const { properties, required } = normalizeObjectProperties(
+  const { properties, required } = normalizeFullObjectProperties(
     effective,
     raw,
     0,
     nextSeen,
-    budget,
-    true,
+    state,
   );
-  const requiredSet = new Set(required);
   const description = cleanDescription(effective["description"], MAX_DESC_CHARS);
-  let result: McpObjectParamsSchema = {
+  const full: McpObjectParamsSchema = {
     type: "object",
     properties,
     ...(required.length > 0 ? { required } : {}),
     ...(description ? { description } : {}),
   };
 
-  // Hard 12,288 UTF-8 byte ceiling applied in strict priority order:
-  // 1) Strip descriptions first (never dropping enums, consts, or types just for prose).
-  // 2) Compact nested subtrees while preserving small enums, consts, and primitive types.
-  // 3) Compact remaining enums to primitive types (preserving consts and all keys).
-  // 4) Drop optional keys from the end while preserving every required key.
-  // 5) Compact long const values on required keys to their primitive types (e.g. 48 required consts).
-  // 6) Final required-only minimal primitive fallback so UTF-8 byte length <= 12,288 is guaranteed.
-  if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
-    // Stage 1: strip descriptions only.
-    const noDesc = stripSchemaDescriptions(result) as McpObjectParamsSchema;
-    result = noDesc;
-
-    const rawProps = isPlainObject(effective["properties"]) ? effective["properties"] : {};
-    const rebuildCompact = (dropEnums: boolean, dropConst: boolean): Record<string, GbnfJsonSchema> => {
-      const compactProps: Record<string, GbnfJsonSchema> = {};
-      for (const key of Object.keys(properties)) {
-        // Fresh degrade context per property so siblings never starve each other.
-        const propCtx = createDegradeContext(dropEnums, dropConst);
-        const base = degradedFallbackForNode(rawProps[key], raw, nextSeen, propCtx);
-        compactProps[key] = requiredSet.has(key) ? base : makeNullableSchema(base, false);
-      }
-      return compactProps;
-    };
-
-    // Stage 2: compact deep subtrees while preserving small enums & consts.
-    if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
-      result = {
-        type: "object",
-        properties: rebuildCompact(false, false),
-        ...(required.length > 0 ? { required } : {}),
-      };
-    }
-
-    // Stage 3: compact enums to primitive types (keeping consts).
-    if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
-      const enumFreeProps = rebuildCompact(true, false);
-      result = {
-        type: "object",
-        properties: enumFreeProps,
-        ...(required.length > 0 ? { required } : {}),
-      };
-
-      // Stage 4: drop optional keys from the end while keeping every required key.
-      if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
-        const kept = new Map<string, GbnfJsonSchema>(Object.entries(enumFreeProps));
-        for (const key of [...kept.keys()].reverse()) {
-          if (requiredSet.has(key)) continue;
-          kept.delete(key);
-          result = {
-            type: "object",
-            properties: Object.fromEntries(kept),
-            ...(required.length > 0 ? { required } : {}),
-          };
-          if (utf8ByteLength(result) <= MAX_SERIALIZED_SCHEMA_BYTES) break;
-        }
-
-        // Stage 5: compact required const values to primitive types (handles 48 required long consts).
-        if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
-          const minimalProps = rebuildCompact(true, true);
-          const minimalKept = new Map<string, GbnfJsonSchema>();
-          for (const key of kept.keys()) {
-            const val = minimalProps[key];
-            if (val !== undefined) minimalKept.set(key, val);
-          }
-          result = {
-            type: "object",
-            properties: Object.fromEntries(minimalKept),
-            ...(required.length > 0 ? { required } : {}),
-          };
-        }
-      }
-    }
-  }
+  const result = shrinkToCeiling(full);
   normalizedSchemaCache.set(raw, result);
   return result;
 }
@@ -1178,12 +1284,15 @@ export function stripNullOptionalArgs(
  * Exposes tools discovered from connected external MCP servers under `mcp:<server>.<tool>`,
  * routing every invocation through `guarded()` (`permissions.ts` + approval UI + tracing)
  * and unconditionally marking all external MCP outputs as outside text.
+ *
+ * NOTE: The 48-tool LLM exposure ceiling (`MAX_EXPOSED_MCP_TOOLS`) is enforced AFTER routing
+ * in `Brain.pickTools()`, so tools late in the alphabet remain reachable across large servers.
  */
 export function createMcpTools(host: ToolHost, hub: McpHub): ChatSessionModelFunctions {
   const discovered = hub
     .listPrefixedTools()
     .sort((a, b) => a.fullName.localeCompare(b.fullName))
-    .slice(0, MAX_EXPOSED_MCP_TOOLS);
+    .slice(0, MAX_REGISTERED_MCP_TOOLS);
 
   const entries: [string, ChatSessionModelFunctions[string]][] = [];
   for (const { fullName, serverId, tool } of discovered) {

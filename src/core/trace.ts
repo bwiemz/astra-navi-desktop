@@ -45,9 +45,17 @@ export interface TracedCheck {
    * while offered only some tools ("no-way"), did a sum without the calculator ("sum"),
    * or wrote out a sum that does not come to what she said ("wrong-sum").
    */
-  found: "claimed" | "looked" | "unchecked" | "stopped" | "no-way" | "sum" | "wrong-sum";
-  /** She was sent back to do it ("again"), or a note was put under her reply ("note"). */
-  did: "again" | "note";
+  found:
+    | "claimed"
+    | "looked"
+    | "unchecked"
+    | "stopped"
+    | "no-way"
+    | "sum"
+    | "wrong-sum"
+    | "check-failed";
+  /** She was sent back to do it ("again"), a note was put under her reply ("note"), or a verifier error fell back ("skipped"). */
+  did: "again" | "note" | "skipped";
 }
 
 export interface TurnTrace {
@@ -176,6 +184,31 @@ export function cleanExamples(traces: readonly TurnTrace[]): CleanExample[] {
     }));
 }
 
+/**
+ * User exchanges with zero tool calls, zero checks, and no immediate retry —
+ * supplying persona and tool-restraint anchors for small-brain SFT (`TurnTrace.reply`
+ * is stored after mood tags are stripped).
+ */
+export function cleanNoToolExamples(traces: readonly TurnTrace[]): CleanExample[] {
+  return traces
+    .filter(
+      (trace, index) =>
+        trace.kind === "user" &&
+        !trace.withheld &&
+        trace.checks.length === 0 &&
+        trace.calls.length === 0 &&
+        trace.reply.trim() !== "" &&
+        traces[index + 1]?.kind !== "again",
+    )
+    .map((trace) => ({
+      brain: trace.brain,
+      said: trace.said,
+      offered: trace.offered,
+      calls: trace.calls,
+      reply: trace.reply,
+    }));
+}
+
 /** The last few traces, newest last, for the page that shows them. Nothing is written to disk. */
 export class TraceKeeper {
   private readonly kept: TurnTrace[] = [];
@@ -278,12 +311,15 @@ const FOUND: Record<TracedCheck["found"], string> = {
   "no-way": "She said she had no way, while offered only some of her tools",
   sum: "She did a sum without the calculator",
   "wrong-sum": "A sum she wrote out does not come to what she said",
+  "check-failed": "The follow-through verifier could not run",
 };
 
 /** What one of the app's checks did, as a sentence. */
 export function describeCheck(check: TracedCheck): string {
   const did =
-    check.did === "again"
+    check.did === "skipped"
+      ? "skipped and fell back to local heuristics"
+      : check.did === "again"
       ? check.found === "no-way"
         ? "given every tool and sent back to try once more"
         : check.found === "sum"

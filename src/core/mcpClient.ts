@@ -79,37 +79,51 @@ const SAFE_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MOOD_TAG_RE = new RegExp(`\\[\\[\\s*(${MOODS.join("|")})\\s*\\]\\]`, "gi");
 
 /**
- * Strips non-whitespace control chars, standalone/unanchored invisible Unicode tag chars
- * (`U+E0000–U+E007F`), BiDi overrides (`U+202A–U+202E`, `U+061C`), unbalanced BiDi isolates,
- * and companion mood tags (`[[happy]]`, `[[ happy ]]`, etc.) from MCP tool *outputs* and
- * *resources* while preserving legitimate TOML tables (`[[servers]]`), nested arrays
- * (`[[1, 2]]`), LRM/RLM (`U+200E`/`U+200F`), ZWJ/ZWNJ (`U+200D`/`U+200C`), valid regional
- * flag emoji tag sequences (🏴󠁧󠁢󠁥󠁮󠁧󠁿, 🏴󠁧󠁢󠁳󠁣󠁴󠁿, 🏴󠁧󠁢󠁷󠁬󠁳󠁿), and properly balanced BiDi isolate pairs (`U+2066–U+2068`..`U+2069`).
+ * The ONLY three Unicode RGI Emoji Subdivision Flag tag sequences (UTS #51):
+ * England (`gbeng`), Scotland (`gbsct`), and Wales (`gbwls`).
+ * Restricting Unicode tag characters (`U+E0000–U+E007F`) exclusively to these three exact
+ * sequences after `🏴` (`U+1F3F4`) preserves legitimate regional flag emoji while completely
+ * blocking invisible-text tag smuggling (both uppercase `"IGNORE_ALL"` and lowercase payloads).
+ */
+const ALLOWED_FLAG_TAG_SEQUENCES = new Set(["gbeng", "gbsct", "gbwls"]);
+
+/**
+ * Strips non-whitespace control chars, invisible Unicode tag chars (`U+E0000–U+E007F`) except
+ * the three RGI regional subdivision flag sequences (`🏴󠁧󠁢󠁥󠁮󠁧󠁿`, `🏴󠁧󠁢󠁳󠁣󠁴󠁿`, `🏴󠁧󠁢󠁷󠁬󠁳󠁿`), BiDi overrides
+ * (`U+202A–U+202E`, `U+061C`), unbalanced BiDi isolates, and companion mood tags (`[[happy]]`,
+ * `[[ happy ]]`, etc.) from MCP tool *outputs* and *resources* while preserving legitimate TOML
+ * tables (`[[servers]]`), nested arrays (`[[1, 2]]`), LRM/RLM (`U+200E`/`U+200F`), ZWJ/ZWNJ
+ * (`U+200D`/`U+200C`), and properly balanced BiDi isolate pairs (`U+2066–U+2068`..`U+2069`).
  */
 export function sanitizeUntrustedOutput(raw: string): string {
   const chars = [...raw];
-  // First pass: keep characters, allowing valid black-flag emoji tag sequences (U+1F3F4 + 1..8 tags + U+E007F).
   const kept: string[] = [];
   for (let i = 0; i < chars.length; i += 1) {
     const ch = chars[i] ?? "";
     const cp = ch.codePointAt(0) ?? 0;
 
-    // Preserve valid regional subdivision flag emoji tag sequences (e.g. England/Scotland/Wales).
     if (cp === 0x1f3f4) {
       kept.push(ch);
+      // Only allow exact RGI subdivision flag sequences: 5 lowercase ASCII tag chars (`gbeng`, `gbsct`, `gbwls`) + U+E007F.
       let j = i + 1;
-      const tagSeq: string[] = [];
-      while (j < chars.length && tagSeq.length < 8) {
+      let asciiTag = "";
+      while (j < chars.length && asciiTag.length < 6) {
         const nextCp = chars[j]?.codePointAt(0) ?? 0;
-        if (nextCp >= 0xe0030 && nextCp <= 0xe007a) {
-          tagSeq.push(chars[j] ?? "");
+        if (
+          (nextCp >= 0xe0061 && nextCp <= 0xe007a) ||
+          (nextCp >= 0xe0030 && nextCp <= 0xe0039)
+        ) {
+          asciiTag += String.fromCodePoint(nextCp - 0xe0000);
           j += 1;
         } else {
           break;
         }
       }
-      if (tagSeq.length > 0 && (chars[j]?.codePointAt(0) ?? 0) === 0xe007f) {
-        kept.push(...tagSeq, chars[j] ?? "");
+      if (
+        ALLOWED_FLAG_TAG_SEQUENCES.has(asciiTag) &&
+        (chars[j]?.codePointAt(0) ?? 0) === 0xe007f
+      ) {
+        kept.push(...chars.slice(i + 1, j + 1));
         i = j;
       }
       continue;
@@ -245,6 +259,8 @@ export function resolveStdioCommand(
     envSource["NVM_SYMLINK"] ?? "",
     envSource["VOLTA_HOME"] ? pathLib.join(envSource["VOLTA_HOME"], "bin") : "",
     envSource["LOCALAPPDATA"] ? pathLib.join(envSource["LOCALAPPDATA"], "Volta", "bin") : "",
+    envSource["USERPROFILE"] ? pathLib.join(envSource["USERPROFILE"], "scoop", "apps", "nodejs", "current") : "",
+    envSource["USERPROFILE"] ? pathLib.join(envSource["USERPROFILE"], "scoop", "shims") : "",
   ].filter(Boolean);
   const searchDirs = [...new Set([...pathDirs, ...standardWinDirs])];
   const nodeDirs = [pathLib.dirname(nodeExec), ...searchDirs];
@@ -433,6 +449,8 @@ export const McpServerConfigSchema = z
     headers: z.record(z.string(), z.string()).optional(),
     /** Only when explicitly true may `readOnlyHint: true` tools auto-run before reading outside text. */
     readOnlyAutoAllow: z.boolean().default(false),
+    /** Opt-in: always include this server's tools in every turn without naming the server (e.g. filesystem/database). */
+    alwaysOffer: z.boolean().optional(),
     timeoutMs: z.number().int().min(500).max(120_000).optional(),
   })
   .superRefine((cfg, ctx) => {
@@ -613,7 +631,9 @@ export class StdioMcpTransport implements McpTransport {
     const cleanEnv = assertSafeEnvOverrides(this.cfg.env);
     const spawnEnv: Record<string, string> = {
       ...cleanEnv,
-      ...(resolved.useElectronAsNode ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+      ...(resolved.useElectronAsNode
+        ? { ELECTRON_RUN_AS_NODE: "1", npm_node_execpath: resolved.command }
+        : {}),
     };
     if (resolved.prependPathDir) {
       const existingPath = spawnEnv["PATH"] ?? "";
