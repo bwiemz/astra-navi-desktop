@@ -34,7 +34,11 @@ import type { SearchBudget } from "../core/searchBudget.ts";
 import type { SelfCheckResult } from "../core/selfCheck.ts";
 import { excerpt, type StandingOrder } from "../core/standingOrders.ts";
 import { StationAccount, whyNotThese } from "../core/stationAccount.ts";
-import { buildRedactedSupportBundle, formatSupportBundleJson } from "../core/supportBundle.ts";
+import {
+  buildRedactedSupportBundle,
+  collectMcpEnvSecrets,
+  formatSupportBundleJson,
+} from "../core/supportBundle.ts";
 import { forShow, type ShownTrace, type TraceKeeper } from "../core/trace.ts";
 import { checkGithubReleaseUpdate, type UpdateCheckResult } from "../core/updateCheck.ts";
 import type { ConversationArchive } from "../core/archive.ts";
@@ -665,9 +669,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       stationAccount()?.username,
       ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
     ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-    const mcpEnvSecrets: string[] = config.value.mcp.servers
-      .flatMap((s) => [...Object.values(s.headers ?? {}), ...Object.values(s.env ?? {})])
-      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+    const mcpEnvSecrets = collectMcpEnvSecrets(config.value.mcp.servers);
 
     const enabledTier10Flags = Object.entries(config.value.tier10)
       .filter(([, enabled]) => enabled)

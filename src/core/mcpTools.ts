@@ -15,17 +15,20 @@ const MAX_SCHEMA_DEPTH = 5;
 const MAX_OBJECT_PROPERTIES = 24;
 const MAX_REQUIRED_OBJECT_PROPERTIES = 48;
 const MAX_SCANNED_OBJECT_PROPERTIES = 512;
+const SMALL_ENUM_MAX_VALUES = 16;
+const SMALL_ENUM_MAX_BYTES = 512;
 const MAX_ENUM_VALUES = 32;
 const MAX_ENUM_STRING_CHARS = 64;
-const MAX_ENUM_TOTAL_CHARS = 512;
+const MAX_ENUM_TOTAL_BYTES = 512;
 const MAX_CONST_STRING_CHARS = 128;
-const MAX_UNION_BRANCHES = 8;
+const MAX_UNION_BRANCHES = 10;
+const MAX_PICK_UNION_BRANCHES = 16;
 const MAX_DESC_CHARS = 200;
 const MAX_PARAM_DESC_CHARS = 120;
-/** Shared expansion ceiling per tool schema to stop exponential `$ref` DAG blowup. */
-const MAX_EXPANDED_SCHEMA_NODES = 48;
-const MAX_EXPANDED_SCHEMA_CHARS = 4_096;
-const MAX_DEGRADE_STEPS = 48;
+/** Shared expansion ceiling per tool schema to stop exponential `$ref` DAG blowup without starving normal schemas. */
+const MAX_EXPANDED_SCHEMA_NODES = 128;
+const MAX_EXPANDED_SCHEMA_CHARS = 10_240;
+const MAX_DEGRADE_STEPS_PER_PROP = 48;
 const MAX_DEGRADE_DEPTH = 3;
 const MAX_SERIALIZED_SCHEMA_BYTES = 12_288;
 const MAX_STRIP_ARG_DEPTH = 12;
@@ -37,11 +40,17 @@ interface SchemaExpansionBudget {
 
 interface DegradeContext {
   stepsLeft: number;
-  memo: Map<Record<string, unknown>, GbnfJsonSchema>;
+  /** Memoized by `(node, depth:allowArrayItem)` so depth-truncated or array-scoped stubs never poison shallower direct `$ref`s. */
+  memo: Map<Record<string, unknown>, Map<string, GbnfJsonSchema>>;
   dropEnums?: boolean;
+  dropConst?: boolean;
 }
 
 const normalizedSchemaCache = new WeakMap<Record<string, unknown>, McpObjectParamsSchema>();
+
+function utf8ByteLength(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
 
 function consumeBudget(budget: SchemaExpansionBudget, chars = 24): boolean {
   if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) return false;
@@ -212,21 +221,23 @@ function primitiveTypeForEnumValues(values: readonly unknown[]): GbnfJsonSchema 
 }
 
 /**
- * Validates and bounds an `enum` array against per-value char limits, total char cap,
- * and remaining schema budget; returns either the bounded enum (with its byte cost) or
- * a compact primitive-type fallback so oversized enums can never blow past the 12 KB ceiling.
+ * Validates and bounds an `enum` array against per-value char limits and total UTF-8 byte cap;
+ * returns either the bounded enum (with its byte cost) or a compact primitive-type fallback so
+ * oversized enums can never blow past the 12 KB ceiling while small enums (<= 16 values and
+ * <= 512 UTF-8 bytes) are preserved intact.
  */
 function boundEnumValues(
   rawEnum: readonly unknown[],
-  maxChars: number,
-): { enum?: (string | number | boolean | null)[]; chars: number; fallback: GbnfJsonSchema } {
+  maxBytes: number,
+  maxValues = MAX_ENUM_VALUES,
+): { enum?: (string | number | boolean | null)[]; bytes: number; isSmall: boolean; fallback: GbnfJsonSchema } {
   const valid: (string | number | boolean | null)[] = [];
   const seen = new Set<string>();
-  let totalChars = 2;
+  let totalBytes = 2;
   let exceeded = false;
 
   for (const v of rawEnum) {
-    if (valid.length >= MAX_ENUM_VALUES) {
+    if (valid.length >= maxValues) {
       exceeded = true;
       break;
     }
@@ -245,28 +256,102 @@ function boundEnumValues(
     const key = `${typeof v}:${String(v)}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const pieceLen = typeof v === "string" ? v.length + 3 : String(v).length + 1;
-    if (totalChars + pieceLen > maxChars) {
+    const pieceBytes =
+      typeof v === "string" ? Buffer.byteLength(v, "utf8") + 3 : String(v).length + 1;
+    if (totalBytes + pieceBytes > maxBytes) {
       exceeded = true;
       break;
     }
-    totalChars += pieceLen;
+    totalBytes += pieceBytes;
     valid.push(v);
   }
 
   const fallback = primitiveTypeForEnumValues(rawEnum);
   if (exceeded || valid.length === 0) {
-    return { chars: 20, fallback };
+    return { bytes: 20, isSmall: false, fallback };
   }
-  return { enum: valid, chars: totalChars, fallback };
+  const isSmall = valid.length <= SMALL_ENUM_MAX_VALUES && totalBytes <= SMALL_ENUM_MAX_BYTES;
+  return { enum: valid, bytes: totalBytes, isSmall, fallback };
 }
 
-function createDegradeContext(dropEnums = false): DegradeContext {
+function createDegradeContext(dropEnums = false, dropConst = false): DegradeContext {
   return {
-    stepsLeft: MAX_DEGRADE_STEPS,
-    memo: new Map<Record<string, unknown>, GbnfJsonSchema>(),
+    stepsLeft: MAX_DEGRADE_STEPS_PER_PROP,
+    memo: new Map<Record<string, unknown>, Map<string, GbnfJsonSchema>>(),
     dropEnums,
+    dropConst,
   };
+}
+
+function readDegradeMemo(
+  ctx: DegradeContext,
+  node: Record<string, unknown>,
+  memoKey: string,
+): GbnfJsonSchema | undefined {
+  return ctx.memo.get(node)?.get(memoKey);
+}
+
+function writeDegradeMemo(
+  ctx: DegradeContext,
+  node: Record<string, unknown>,
+  memoKey: string,
+  schema: GbnfJsonSchema,
+): void {
+  let inner = ctx.memo.get(node);
+  if (!inner) {
+    inner = new Map<string, GbnfJsonSchema>();
+    ctx.memo.set(node, inner);
+  }
+  inner.set(memoKey, schema);
+}
+
+/** O(1) shallow type inference without further recursion (used when depth/step limits hit). */
+function shallowTypeStub(node: Record<string, unknown>, dropConst = false): GbnfJsonSchema {
+  if (!dropConst && "const" in node) {
+    const val = node["const"];
+    if (
+      (typeof val === "string" && val.length <= MAX_CONST_STRING_CHARS) ||
+      typeof val === "number" ||
+      typeof val === "boolean" ||
+      val === null
+    ) {
+      return { const: val } as GbnfJsonSchema;
+    }
+    if (typeof val === "string") return { type: "string" };
+  }
+  const rawType = node["type"];
+  if (Array.isArray(rawType)) {
+    const validTypes = rawType.filter((t): t is string => typeof t === "string" && PRIMITIVE_TYPES.has(t));
+    if (validTypes.length > 0 && validTypes.length === rawType.length) {
+      return {
+        type: validTypes.length === 1 ? validTypes[0] : validTypes,
+      } as unknown as GbnfJsonSchema;
+    }
+  }
+  const primary = Array.isArray(rawType)
+    ? rawType.find((t): t is string => typeof t === "string" && t !== "null")
+    : typeof rawType === "string"
+      ? rawType
+      : isPlainObject(node["properties"])
+        ? "object"
+        : node["items"] !== undefined
+          ? "array"
+          : "string";
+  const wantsNull = Array.isArray(rawType) && rawType.includes("null");
+  if (primary === "object") {
+    const obj = { type: "object", properties: {} } as GbnfJsonSchema;
+    return wantsNull ? makeNullableSchema(obj, false) : obj;
+  }
+  if (primary === "array") {
+    const arr = { type: "array", items: { type: "string" } } as GbnfJsonSchema;
+    return wantsNull ? makeNullableSchema(arr, false) : arr;
+  }
+  if (primary && PRIMITIVE_TYPES.has(primary)) {
+    return {
+      type: wantsNull && primary !== "null" ? [primary, "null"] : primary,
+    } as unknown as GbnfJsonSchema;
+  }
+  return { type: wantsNull ? ["string", "null"] : "string" } as unknown as GbnfJsonSchema;
 }
 
 /**
@@ -275,8 +360,9 @@ function createDegradeContext(dropEnums = false): DegradeContext {
  * `{ type: "object", properties: {} }` and primitive fields keep their real JSON types
  * instead of silently flattening to `"string"`.
  *
- * Strictly bounded in CPU and output size via per-node memoization, depth cap, and step budget
- * so adversarial union/`$ref` DAGs cannot cause exponential work.
+ * Strictly bounded in CPU and output size via `(node, depth, allowArrayItem)` memoization,
+ * depth cap, and per-property step budget so adversarial union/`$ref` DAGs cannot cause
+ * exponential work or cross-property type loss.
  */
 function degradedFallbackForNode(
   raw: unknown,
@@ -286,30 +372,32 @@ function degradedFallbackForNode(
   depth = 0,
   allowArrayItem = true,
 ): GbnfJsonSchema {
-  if (depth > MAX_DEGRADE_DEPTH || ctx.stepsLeft <= 0) {
-    return { type: "string" };
-  }
-  ctx.stepsLeft -= 1;
-
   const { node, nextSeen } = derefNode(raw, root, seenRefs);
   if (!node) return { type: "string" };
 
-  const cached = ctx.memo.get(node);
+  const memoKey = `${depth}:${allowArrayItem ? 1 : 0}`;
+  const cached = readDegradeMemo(ctx, node, memoKey);
   if (cached) return cached;
 
+  if (depth > MAX_DEGRADE_DEPTH || ctx.stepsLeft <= 0) {
+    return shallowTypeStub(node, ctx.dropConst);
+  }
+  ctx.stepsLeft -= 1;
+
   // Store a provisional stub BEFORE recursing into union branches / array items so
-  // diamond or cyclic `$ref` graphs visit every target node at most once (O(V)).
-  const provisional: GbnfJsonSchema =
-    node["type"] === "object" || isPlainObject(node["properties"])
-      ? ({ type: "object", properties: {} } as GbnfJsonSchema)
-      : ({ type: "string" } as GbnfJsonSchema);
-  ctx.memo.set(node, provisional);
+  // diamond or cyclic `$ref` graphs visit every `(node, depth, arrayCtx)` at most once.
+  writeDegradeMemo(ctx, node, memoKey, shallowTypeStub(node, ctx.dropConst));
 
   let out: GbnfJsonSchema | null = null;
 
   if ("const" in node) {
     const val = node["const"];
-    if (
+    if (ctx.dropConst) {
+      if (typeof val === "string") out = { type: "string" };
+      else if (typeof val === "number") out = { type: Number.isInteger(val) ? "integer" : "number" };
+      else if (typeof val === "boolean") out = { type: "boolean" };
+      else if (val === null) out = { type: "null" };
+    } else if (
       (typeof val === "string" && val.length <= MAX_CONST_STRING_CHARS) ||
       typeof val === "number" ||
       typeof val === "boolean" ||
@@ -325,7 +413,7 @@ function degradedFallbackForNode(
     if (ctx.dropEnums) {
       out = primitiveTypeForEnumValues(node["enum"]);
     } else {
-      const bounded = boundEnumValues(node["enum"], Math.min(256, MAX_ENUM_TOTAL_CHARS));
+      const bounded = boundEnumValues(node["enum"], SMALL_ENUM_MAX_BYTES, SMALL_ENUM_MAX_VALUES);
       out = bounded.enum ? ({ enum: bounded.enum } as GbnfJsonSchema) : bounded.fallback;
     }
   }
@@ -343,7 +431,21 @@ function degradedFallbackForNode(
     let sawNull = false;
     let firstNonNull: GbnfJsonSchema | null = null;
     for (const branch of unionRaw.slice(0, MAX_UNION_BRANCHES)) {
-      if (ctx.stepsLeft <= 0) break;
+      // Detect null branches even if step budget is tight so `anyOf: [integer, null]` never loses `null`.
+      if (isPlainObject(branch) && branch["type"] === "null") {
+        sawNull = true;
+        if (!primTypes.includes("null")) primTypes.push("null");
+        continue;
+      }
+      if (ctx.stepsLeft <= 0) {
+        const stub = isPlainObject(branch) ? shallowTypeStub(branch, ctx.dropConst) : { type: "string" as const };
+        const st = (stub as unknown as Record<string, unknown>)["type"];
+        if (typeof st === "string" && PRIMITIVE_TYPES.has(st)) {
+          if (!primTypes.includes(st)) primTypes.push(st);
+          if (!firstNonNull && st !== "null") firstNonNull = stub;
+        }
+        continue;
+      }
       const degraded = degradedFallbackForNode(branch, root, nextSeen, ctx, depth + 1, false);
       const rec = degraded as unknown as Record<string, unknown>;
       const t = rec["type"];
@@ -427,7 +529,34 @@ function degradedFallbackForNode(
     }
   }
 
-  ctx.memo.set(node, out);
+  writeDegradeMemo(ctx, node, memoKey, out);
+  return out;
+}
+
+/**
+ * Recursively strips `description` fields from a normalized schema without altering any
+ * structural constraints (`enum`, `const`, `type`, `oneOf`, `required`, nested `properties`).
+ */
+function stripSchemaDescriptions(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map(stripSchemaDescriptions);
+  }
+  if (!isPlainObject(schema)) return schema;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === "description") continue;
+    if (key === "properties" && isPlainObject(value)) {
+      const propsOut: Record<string, unknown> = {};
+      for (const [pk, pv] of Object.entries(value)) {
+        propsOut[pk] = stripSchemaDescriptions(pv);
+      }
+      out[key] = propsOut;
+    } else if (key === "items" || key === "oneOf" || key === "anyOf") {
+      out[key] = stripSchemaDescriptions(value);
+    } else {
+      out[key] = value;
+    }
+  }
   return out;
 }
 
@@ -435,8 +564,11 @@ function degradedFallbackForNode(
  * Normalizes an object's `properties`:
  * - Collects ALL valid properties BEFORE applying the property limit so required keys past the
  *   24th declaration slot are NEVER dropped.
- * - Normalizes `required` keys first and caps each property's subtree budget so one deep `$ref`
- *   degrades only its own over-budget subtree without starving siblings.
+ * - Normalizes `required` keys first and lets properties borrow unused shared budget (while
+ *   capping any single property to at most 60% of remaining budget so one giant `$ref` cannot
+ *   starve siblings).
+ * - Gives every property its own fresh `DegradeContext` so one complex field never exhausts
+ *   the degrade step budget of later siblings.
  */
 function normalizeObjectProperties(
   node: Record<string, unknown>,
@@ -445,7 +577,6 @@ function normalizeObjectProperties(
   nextSeen: ReadonlySet<string>,
   budget: SchemaExpansionBudget,
   preserveAllSiblings: boolean,
-  degradeCtx: DegradeContext,
 ): { properties: Record<string, GbnfJsonSchema>; required: string[] } {
   const requiredRaw = Array.isArray(node["required"])
     ? node["required"].filter((key): key is string => typeof key === "string")
@@ -457,7 +588,9 @@ function normalizeObjectProperties(
   if (isPlainObject(node["properties"])) {
     for (const [key, propSchema] of Object.entries(node["properties"])) {
       if (allEntries.length >= MAX_SCANNED_OBJECT_PROPERTIES) break;
-      if (!key || key.length > 80 || key.includes("\0")) continue;
+      if (!key || key.length > 80 || Buffer.byteLength(key, "utf8") > 120 || key.includes("\0")) {
+        continue;
+      }
       allEntries.push([key, propSchema]);
     }
   }
@@ -484,26 +617,30 @@ function normalizeObjectProperties(
     const [key, propSchema] = entry;
     const isReq = requiredSet.has(key);
     const remaining = ordered.length - i;
+    // Fresh degrade context per property prevents cross-sibling step starvation and stale memo sharing.
+    const propDegradeCtx = createDegradeContext(false, false);
 
     if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) {
       if (preserveAllSiblings || isReq) {
-        const degraded = degradedFallbackForNode(propSchema, root, nextSeen, degradeCtx);
+        const degraded = degradedFallbackForNode(propSchema, root, nextSeen, propDegradeCtx);
         normalizedByKey.set(key, isReq ? degraded : makeNullableSchema(degraded, false));
       }
       continue;
     }
 
-    const keyOverhead = key.length + (isReq ? 16 : 64);
+    const keyOverhead = Buffer.byteLength(key, "utf8") + (isReq ? 16 : 48);
     budget.charsLeft = Math.max(0, budget.charsLeft - keyOverhead);
 
-    // Give each property a bounded slice of the remaining budget so one giant `$ref` cannot starve siblings.
+    // Let properties borrow unused shared budget while capping any single property at 60% of the
+    // remaining pool so a single giant `$ref` cannot starve siblings, yet ordinary multi-enum
+    // schemas never suffer artificial per-slot starvation.
     const allocNodes =
       remaining > 1
-        ? Math.min(budget.nodesLeft, Math.max(2, Math.floor(budget.nodesLeft / remaining)))
+        ? Math.min(budget.nodesLeft, Math.max(12, Math.floor(budget.nodesLeft * 0.5)))
         : budget.nodesLeft;
     const allocChars =
       remaining > 1
-        ? Math.min(budget.charsLeft, Math.max(128, Math.floor(budget.charsLeft / remaining)))
+        ? Math.min(budget.charsLeft, Math.max(1_024, Math.floor(budget.charsLeft * 0.6)))
         : budget.charsLeft;
     const subBudget: SchemaExpansionBudget = {
       nodesLeft: allocNodes,
@@ -516,10 +653,10 @@ function normalizeObjectProperties(
       depth + 1,
       nextSeen,
       subBudget,
-      degradeCtx,
+      propDegradeCtx,
     );
-    const spentNodes = allocNodes - subBudget.nodesLeft;
-    const spentChars = allocChars - subBudget.charsLeft;
+    const spentNodes = Math.max(0, allocNodes - subBudget.nodesLeft);
+    const spentChars = Math.max(0, allocChars - subBudget.charsLeft);
     budget.nodesLeft = Math.max(0, budget.nodesLeft - spentNodes);
     budget.charsLeft = Math.max(0, budget.charsLeft - spentChars);
 
@@ -553,9 +690,6 @@ function normalizeSchemaNode(
     return { type: "string" };
   }
   const description = cleanDescription(node["description"], MAX_PARAM_DESC_CHARS);
-  if (description) {
-    budget.charsLeft -= description.length + 18;
-  }
 
   // Union types (`anyOf` / `oneOf`) preserved as `oneOf` (or primitive type array) instead of flattening to string.
   const unionRaw = Array.isArray(node["oneOf"])
@@ -564,9 +698,18 @@ function normalizeSchemaNode(
       ? node["anyOf"]
       : null;
   if (unionRaw && unionRaw.length > 0) {
+    if (description) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
     const branches: GbnfJsonSchema[] = [];
     for (const branch of unionRaw.slice(0, MAX_UNION_BRANCHES)) {
-      if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) break;
+      if (isPlainObject(branch) && branch["type"] === "null") {
+        branches.push({ type: "null" } as GbnfJsonSchema);
+        continue;
+      }
+      if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) {
+        const deg = degradedFallbackForNode(branch, root, nextSeen, degradeCtx, 0, false);
+        branches.push(deg);
+        continue;
+      }
       const normalized = normalizeSchemaNode(branch, root, depth + 1, nextSeen, budget, degradeCtx);
       const branchRec = normalized as unknown as Record<string, unknown>;
       if (Array.isArray(branchRec["oneOf"])) {
@@ -626,12 +769,14 @@ function normalizeSchemaNode(
       val === null
     ) {
       if (typeof val === "string" && val.length > MAX_CONST_STRING_CHARS) {
+        if (description) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
         return {
           type: "string",
           ...(description ? { description } : {}),
         } as GbnfJsonSchema;
       }
-      budget.charsLeft -= typeof val === "string" ? val.length + 14 : 14;
+      budget.charsLeft -= typeof val === "string" ? Buffer.byteLength(val, "utf8") + 14 : 14;
+      if (description) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
       return {
         const: val,
         ...(description ? { description } : {}),
@@ -640,9 +785,23 @@ function normalizeSchemaNode(
   }
 
   if (Array.isArray(node["enum"]) && node["enum"].length > 0) {
-    const enumBudget = Math.max(0, Math.min(MAX_ENUM_TOTAL_CHARS, budget.charsLeft));
-    const bounded = boundEnumValues(node["enum"], enumBudget);
-    budget.charsLeft -= bounded.chars;
+    // Evaluate enum BEFORE charging description so parameter prose can NEVER starve a real enum!
+    // Small enums (<= 16 values & <= 512 UTF-8 bytes) are NEVER dropped during normal expansion;
+    // the staged 12 KB ceiling strips descriptions first before ever touching enum constraints.
+    const smallCheck = boundEnumValues(node["enum"], SMALL_ENUM_MAX_BYTES, SMALL_ENUM_MAX_VALUES);
+    if (smallCheck.enum && smallCheck.isSmall) {
+      budget.charsLeft -= smallCheck.bytes;
+      const keepDesc = description && budget.charsLeft > Buffer.byteLength(description, "utf8") + 18;
+      if (keepDesc) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
+      return {
+        enum: smallCheck.enum,
+        ...(keepDesc ? { description } : {}),
+      } as GbnfJsonSchema;
+    }
+    const enumBudget = Math.max(0, Math.min(MAX_ENUM_TOTAL_BYTES, budget.charsLeft));
+    const bounded = boundEnumValues(node["enum"], enumBudget, MAX_ENUM_VALUES);
+    budget.charsLeft -= bounded.bytes;
+    if (description) budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
     if (bounded.enum && bounded.enum.length > 0) {
       return {
         enum: bounded.enum,
@@ -653,6 +812,10 @@ function normalizeSchemaNode(
       ...bounded.fallback,
       ...(description ? { description } : {}),
     } as GbnfJsonSchema;
+  }
+
+  if (description) {
+    budget.charsLeft -= Buffer.byteLength(description, "utf8") + 18;
   }
 
   const rawType = node["type"];
@@ -707,7 +870,6 @@ function normalizeSchemaNode(
         nextSeen,
         budget,
         depth <= 1,
-        degradeCtx,
       );
       normalized = {
         type: "object",
@@ -752,7 +914,6 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
     nodesLeft: MAX_EXPANDED_SCHEMA_NODES,
     charsLeft: MAX_EXPANDED_SCHEMA_CHARS,
   };
-  const degradeCtx = createDegradeContext(false);
   const { node, nextSeen } = derefNode(raw, raw, new Set());
   const effective = node ?? raw;
   const { properties, required } = normalizeObjectProperties(
@@ -762,7 +923,6 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
     nextSeen,
     budget,
     true,
-    degradeCtx,
   );
   const requiredSet = new Set(required);
   const description = cleanDescription(effective["description"], MAX_DESC_CHARS);
@@ -772,43 +932,77 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
     ...(required.length > 0 ? { required } : {}),
     ...(description ? { description } : {}),
   };
-  // Final hard ceiling: if deeply nested unions/enums/nullable wrappers still exceed 12 KB serialized,
-  // degrade each top-level property to its compact enum-free type-preserving stub (never turning
-  // integers/booleans into string) and guarantee output <= MAX_SERIALIZED_SCHEMA_BYTES.
-  if (JSON.stringify(result).length > MAX_SERIALIZED_SCHEMA_BYTES) {
+
+  // Hard 12,288 UTF-8 byte ceiling applied in strict priority order:
+  // 1) Strip descriptions first (never dropping enums, consts, or types just for prose).
+  // 2) Compact nested subtrees while preserving small enums, consts, and primitive types.
+  // 3) Compact remaining enums to primitive types (preserving consts and all keys).
+  // 4) Drop optional keys from the end while preserving every required key.
+  // 5) Compact long const values on required keys to their primitive types (e.g. 48 required consts).
+  // 6) Final required-only minimal primitive fallback so UTF-8 byte length <= 12,288 is guaranteed.
+  if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
+    // Stage 1: strip descriptions only.
+    const noDesc = stripSchemaDescriptions(result) as McpObjectParamsSchema;
+    result = noDesc;
+
     const rawProps = isPlainObject(effective["properties"]) ? effective["properties"] : {};
-    const compactCtx = createDegradeContext(true);
-    const compactProps: Record<string, GbnfJsonSchema> = {};
-    for (const key of Object.keys(properties)) {
-      const base = degradedFallbackForNode(rawProps[key], raw, nextSeen, compactCtx);
-      compactProps[key] = requiredSet.has(key) ? base : makeNullableSchema(base, false);
-    }
-    result = {
-      type: "object",
-      properties: compactProps,
-      ...(required.length > 0 ? { required } : {}),
-      ...(description ? { description } : {}),
-    };
-    if (JSON.stringify(result).length > MAX_SERIALIZED_SCHEMA_BYTES) {
-      // Extreme edge case (e.g. 48 long 80-char key names + long root description): drop description
-      // and optional keys one by one while preserving every required key until <= 12 KB.
-      const kept = new Map<string, GbnfJsonSchema>(Object.entries(compactProps));
-      for (const key of [...kept.keys()].reverse()) {
-        if (requiredSet.has(key)) continue;
-        kept.delete(key);
-        result = {
-          type: "object",
-          properties: Object.fromEntries(kept),
-          ...(required.length > 0 ? { required } : {}),
-        };
-        if (JSON.stringify(result).length <= MAX_SERIALIZED_SCHEMA_BYTES) break;
+    const rebuildCompact = (dropEnums: boolean, dropConst: boolean): Record<string, GbnfJsonSchema> => {
+      const compactProps: Record<string, GbnfJsonSchema> = {};
+      for (const key of Object.keys(properties)) {
+        // Fresh degrade context per property so siblings never starve each other.
+        const propCtx = createDegradeContext(dropEnums, dropConst);
+        const base = degradedFallbackForNode(rawProps[key], raw, nextSeen, propCtx);
+        compactProps[key] = requiredSet.has(key) ? base : makeNullableSchema(base, false);
       }
-      if (JSON.stringify(result).length > MAX_SERIALIZED_SCHEMA_BYTES) {
-        result = {
-          type: "object",
-          properties: Object.fromEntries(kept),
-          ...(required.length > 0 ? { required } : {}),
-        };
+      return compactProps;
+    };
+
+    // Stage 2: compact deep subtrees while preserving small enums & consts.
+    if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
+      result = {
+        type: "object",
+        properties: rebuildCompact(false, false),
+        ...(required.length > 0 ? { required } : {}),
+      };
+    }
+
+    // Stage 3: compact enums to primitive types (keeping consts).
+    if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
+      const enumFreeProps = rebuildCompact(true, false);
+      result = {
+        type: "object",
+        properties: enumFreeProps,
+        ...(required.length > 0 ? { required } : {}),
+      };
+
+      // Stage 4: drop optional keys from the end while keeping every required key.
+      if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
+        const kept = new Map<string, GbnfJsonSchema>(Object.entries(enumFreeProps));
+        for (const key of [...kept.keys()].reverse()) {
+          if (requiredSet.has(key)) continue;
+          kept.delete(key);
+          result = {
+            type: "object",
+            properties: Object.fromEntries(kept),
+            ...(required.length > 0 ? { required } : {}),
+          };
+          if (utf8ByteLength(result) <= MAX_SERIALIZED_SCHEMA_BYTES) break;
+        }
+
+        // Stage 5: compact required const values to primitive types (handles 48 required long consts).
+        if (utf8ByteLength(result) > MAX_SERIALIZED_SCHEMA_BYTES) {
+          const minimalProps = rebuildCompact(true, true);
+          const minimalKept = new Map<string, GbnfJsonSchema>();
+          for (const key of kept.keys()) {
+            const val = minimalProps[key];
+            if (val !== undefined) minimalKept.set(key, val);
+          }
+          result = {
+            type: "object",
+            properties: Object.fromEntries(minimalKept),
+            ...(required.length > 0 ? { required } : {}),
+          };
+        }
       }
     }
   }
@@ -823,7 +1017,7 @@ function pickMatchingUnionBranch(
   seenRefs: ReadonlySet<string>,
 ): Record<string, unknown> | undefined {
   if (Array.isArray(value)) {
-    for (const rawBranch of branches.slice(0, MAX_UNION_BRANCHES)) {
+    for (const rawBranch of branches.slice(0, MAX_PICK_UNION_BRANCHES)) {
       const { node } = derefNode(rawBranch, rootSchema, seenRefs);
       if (!node) continue;
       const typ = node["type"];
@@ -843,7 +1037,7 @@ function pickMatchingUnionBranch(
     const valueKeys = new Set(Object.keys(value));
     let best: Record<string, unknown> | undefined;
     let bestScore = -Infinity;
-    for (const rawBranch of branches.slice(0, MAX_UNION_BRANCHES)) {
+    for (const rawBranch of branches.slice(0, MAX_PICK_UNION_BRANCHES)) {
       const { node, nextSeen } = derefNode(rawBranch, rootSchema, seenRefs);
       if (!node) continue;
       const typ = node["type"];

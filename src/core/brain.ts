@@ -885,8 +885,11 @@ export class Brain {
       // picked out for it: "and the other one?" names nothing.
       if (!signal.aborted && !message.event) {
         const used = this.turnTools.map((record) => record.tool);
-        const pickedNonMcp = this.pickedOut.filter((name) => !name.startsWith("mcp:"));
-        this.toolsOfLate.push([...new Set([...used, ...pickedNonMcp])]);
+        // Carry routed tools (including MCP tools when answering a clarifying question) into
+        // `toolsOfLate`; `pickTools()` restricts `mcp:*` carryover to 1 follow-up turn only
+        // (`toolsOfLate.at(-1)`), and `pickedOut` excludes `"used just now"`, so unused MCP
+        // tools automatically expire after that single follow-up turn.
+        this.toolsOfLate.push([...new Set([...used, ...this.pickedOut])]);
         while (this.toolsOfLate.length > TURNS_A_TOOL_STAYS_ON_OFFER) this.toolsOfLate.shift();
         this.saidBefore = message.text.slice(0, 400);
       } else if (!signal.aborted && message.correction) {
@@ -1122,11 +1125,12 @@ export class Brain {
     }
     if (!learner || (message.event && !message.correction)) return;
     if (message.correction && this.turnTools.length === 0) return;
+    const turnHadMcp = this.offeredNow.some((name) => name.startsWith("mcp:"));
     learner.record({
       at: new Date().toISOString(),
       said: message.correction ? "(the same request, now carried out)" : message.text,
-      // A reply that claimed something she did not do is not worth remembering either.
-      reply: this.readOutsideText || falseClaim ? null : this.replyText,
+      // Withhold replies from Learner on outside-text turns, MCP-schema turns, or false claims.
+      reply: this.readOutsideText || turnHadMcp || falseClaim ? null : this.replyText,
       did: this.turnTools,
     });
   }
