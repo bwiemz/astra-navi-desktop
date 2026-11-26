@@ -410,10 +410,75 @@ export interface ResolvedVisionMmproj {
   downloaded: boolean;
 }
 
+export interface DedicatedVisionModel {
+  id: "qwen3.5-0.8b-vl" | "qwen3.5-2b-vl";
+  label: string;
+  modelFileName: string;
+  modelUrl: string;
+  modelSizeBytes: number;
+  mmproj: BrainMmprojAsset;
+  /** Approximate combined VRAM in GB (weights + projector + context) so it runs alongside the brain. */
+  vramGb: number;
+}
+
+/**
+ * Small dedicated vision models for the `llama-server` sidecar (~1.1–1.9 GB on disk) so
+ * mid-chat `look_at_screen` runs quickly on GPU while the main 9B/27B brain stays loaded,
+ * instead of loading a second full copy of the brain.
+ */
+export const VISION_SIDECAR_MODELS: Record<"compact" | "standard", DedicatedVisionModel> = {
+  compact: {
+    id: "qwen3.5-0.8b-vl",
+    label: "Qwen3.5 0.8B Vision",
+    modelFileName: "Qwen3.5-0.8B-Q4_K_M.gguf",
+    modelUrl:
+      "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+    modelSizeBytes: 533_000_000,
+    mmproj: {
+      fileName: "Qwen3.5-0.8B-mmproj-F16.gguf",
+      url: "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-F16.gguf",
+      sizeBytes: 620_000_000,
+    },
+    vramGb: 1.5,
+  },
+  standard: {
+    id: "qwen3.5-2b-vl",
+    label: "Qwen3.5 2B Vision",
+    modelFileName: "Qwen3.5-2B-Q4_K_M.gguf",
+    modelUrl:
+      "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+    modelSizeBytes: 1_280_000_000,
+    mmproj: {
+      fileName: "Qwen3.5-2B-mmproj-F16.gguf",
+      url: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-F16.gguf",
+      sizeBytes: 650_000_000,
+    },
+    vramGb: 2.3,
+  },
+};
+
+export function pickDedicatedVisionModel(totalVramBytes: number | null): DedicatedVisionModel {
+  const vramGb = (totalVramBytes ?? 0) / 1024 ** 3;
+  // On 10+ GB cards, Qwen3.5-2B sits comfortably beside a loaded 9B brain; on 8 GB or unknown, use 0.8B.
+  return vramGb >= 10 ? VISION_SIDECAR_MODELS.standard : VISION_SIDECAR_MODELS.compact;
+}
+
+export interface ResolvedVisionSidecarPair {
+  source: "dedicated" | "brain";
+  modelLabel: string;
+  modelPath: string;
+  modelDownload: { fileName: string; url: string; sizeBytes: number } | null;
+  modelReady: boolean;
+  mmprojPath: string | null;
+  mmprojDownload: BrainMmprojAsset | null;
+  mmprojReady: boolean;
+  ready: boolean;
+}
+
 /**
  * Resolves the matching multimodal projector (`mmproj`) GGUF for the selected brain:
- * checks the model-scoped filename in `modelsDir` first, or any sibling `*mmproj*.gguf`
- * next to a custom local GGUF file.
+ * checks the model-scoped filename in `modelsDir` first, or a matching sibling `*mmproj*.gguf`
+ * next to a custom local GGUF file (never blindly pairing an unrelated projector).
  */
 export function resolveVisionMmproj(
   choice: BrainChoice,
@@ -441,20 +506,29 @@ export function resolveVisionMmproj(
       downloaded: false,
     };
   }
-  // Custom GGUF path: check for a sibling mmproj*.gguf file in the same directory,
-  // preferring one whose filename shares the custom GGUF's stem prefix.
+  // Custom GGUF path: only pair a sibling `*mmproj*.gguf` whose stem matches the custom GGUF's
+  // prefix, OR a lone generic `mmproj*.gguf` inside a dedicated single-model directory.
+  // Never blindly fall back to an unrelated projector (e.g. a text-only model next to Qwen 4B mmproj).
   const folder = dirname(resolved.path);
   try {
     if (existsSync(folder)) {
-      const entries = readdirSync(folder).filter(
-        (name) => /mmproj/i.test(name) && name.toLowerCase().endsWith(".gguf"),
-      );
+      const allGguf = readdirSync(folder).filter((name) => name.toLowerCase().endsWith(".gguf"));
+      const entries = allGguf.filter((name) => /mmproj/i.test(name));
+      const nonMmproj = allGguf.filter((name) => !/mmproj/i.test(name));
       const baseStem = basename(resolved.path, ".gguf").toLowerCase();
       const prefix = baseStem.split(/[-_.]/)[0] ?? "";
-      const sibling =
-        (prefix.length >= 3
+      const prefixMatch =
+        prefix.length >= 3
           ? entries.find((name) => name.toLowerCase().startsWith(prefix))
-          : undefined) ?? entries[0];
+          : undefined;
+      const dedicatedGenericMatch =
+        !prefixMatch &&
+        nonMmproj.length === 1 &&
+        entries.length === 1 &&
+        /^mmproj/i.test(entries[0] ?? "")
+          ? entries[0]
+          : undefined;
+      const sibling = prefixMatch ?? dedicatedGenericMatch;
       if (sibling) {
         return {
           modelLabel: resolved.label,
@@ -474,6 +548,87 @@ export function resolveVisionMmproj(
     mmprojPath: null,
     download: null,
     downloaded: false,
+  };
+}
+
+/**
+ * Resolves the model + `mmproj` pair for the local `llama-server` vision sidecar:
+ * 1) Prefers an installed dedicated small vision model (`Qwen3.5-2B` / `0.8B`) so mid-turn
+ *    `look_at_screen` stays fast on GPU while the main brain remains loaded.
+ * 2) Falls back to the active brain + its matching `mmproj` if both are already on disk.
+ * 3) Otherwise recommends downloading the dedicated small vision model pair for this GPU.
+ */
+export function resolveVisionSidecarPair(
+  choice: BrainChoice,
+  modelsDir: string,
+  totalVramBytes: number | null,
+): ResolvedVisionSidecarPair {
+  const dedicatedOrder: readonly DedicatedVisionModel[] = [
+    pickDedicatedVisionModel(totalVramBytes),
+    VISION_SIDECAR_MODELS.standard,
+    VISION_SIDECAR_MODELS.compact,
+  ];
+  const seen = new Set<string>();
+  for (const cand of dedicatedOrder) {
+    if (seen.has(cand.id)) continue;
+    seen.add(cand.id);
+    const modelPath = join(modelsDir, cand.modelFileName);
+    const mmprojPath = join(modelsDir, cand.mmproj.fileName);
+    if (existsSync(modelPath) && existsSync(mmprojPath)) {
+      return {
+        source: "dedicated",
+        modelLabel: cand.label,
+        modelPath,
+        modelDownload: {
+          fileName: cand.modelFileName,
+          url: cand.modelUrl,
+          sizeBytes: cand.modelSizeBytes,
+        },
+        modelReady: true,
+        mmprojPath,
+        mmprojDownload: cand.mmproj,
+        mmprojReady: true,
+        ready: true,
+      };
+    }
+  }
+
+  // Backwards compatibility: if the active brain GGUF and its matching mmproj are both already on disk, use them.
+  const brainMm = resolveVisionMmproj(choice, modelsDir, totalVramBytes);
+  if (brainMm.downloaded && brainMm.mmprojPath && existsSync(brainMm.modelPath)) {
+    return {
+      source: "brain",
+      modelLabel: brainMm.modelLabel,
+      modelPath: brainMm.modelPath,
+      modelDownload: null,
+      modelReady: true,
+      mmprojPath: brainMm.mmprojPath,
+      mmprojDownload: brainMm.download,
+      mmprojReady: true,
+      ready: true,
+    };
+  }
+
+  // Otherwise recommend the dedicated lightweight vision model pair for download.
+  const rec = pickDedicatedVisionModel(totalVramBytes);
+  const modelPath = join(modelsDir, rec.modelFileName);
+  const mmprojPath = join(modelsDir, rec.mmproj.fileName);
+  const modelReady = existsSync(modelPath);
+  const mmprojReady = existsSync(mmprojPath);
+  return {
+    source: "dedicated",
+    modelLabel: rec.label,
+    modelPath,
+    modelDownload: {
+      fileName: rec.modelFileName,
+      url: rec.modelUrl,
+      sizeBytes: rec.modelSizeBytes,
+    },
+    modelReady,
+    mmprojPath,
+    mmprojDownload: rec.mmproj,
+    mmprojReady,
+    ready: modelReady && mmprojReady,
   };
 }
 

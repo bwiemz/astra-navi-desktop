@@ -13,7 +13,7 @@ import {
   explainWhyRemembered,
   inferMemorySource,
 } from "../src/core/learned.ts";
-import { Learner } from "../src/core/learner.ts";
+import { Learner, MAX_LEARNED_FACTS } from "../src/core/learner.ts";
 import { MemoryStore } from "../src/core/memory.ts";
 import { Recall } from "../src/core/recall.ts";
 
@@ -126,31 +126,47 @@ describe("Expanded memory eval suite & Settings UI safety", () => {
     const stubEmbedder = {
       embed: async (texts: readonly string[]) =>
         texts.map((t) => {
-          const vec = new Float32Array(8);
-          for (let i = 0; i < t.length; i += 1) vec[i % 8] = (vec[i % 8] ?? 0) + t.charCodeAt(i);
+          // Hash distinct words into 32 buckets so unrelated sentences do not collide at >= 0.94 cosine!
+          const vec = new Float32Array(32);
+          for (const word of t.toLowerCase().split(/\W+/).filter(Boolean)) {
+            let h = 2166136261;
+            for (let i = 0; i < word.length; i += 1) {
+              h = Math.imul(h ^ word.charCodeAt(i), 16777619);
+            }
+            const bucket = (h >>> 0) % 32;
+            vec[bucket] = (vec[bucket] ?? 0) + 1;
+          }
           const norm = Math.hypot(...vec) || 1;
-          for (let i = 0; i < 8; i += 1) vec[i] = (vec[i] ?? 0) / norm;
+          for (let i = 0; i < 32; i += 1) vec[i] = (vec[i] ?? 0) / norm;
           return vec;
         }),
     };
     const recall = new Recall(store, stubEmbedder);
 
-    // Seed 24 learned `profile`/`preference`/`project` facts (MAX_LEARNED_FACTS = 24).
-    // Pin the oldest one (#1) and user-edit the second-oldest (#2) so both would be first to evict if unprotected.
+    // Seed MAX_LEARNED_FACTS + 3 learned `profile`/`preference`/`project` facts (real cap = 40):
+    // #1 pinned + #2 user-edited + 41 unpinned -> plus 1 new learned fact = 42 unpinned -> 2 evicted!
     const seededIds: string[] = [];
-    for (let i = 1; i <= 24; i += 1) {
+    for (let i = 1; i <= MAX_LEARNED_FACTS + 3; i += 1) {
       const { memory } = await store.save({
         kind: "project",
         text: `Working on unique subsystem alpha number ${i}.`,
         tags: ["learned"],
         source: "learned",
       });
+      // Stagger updatedAt monotonically so oldest ordering is deterministic (not millisecond-tied).
+      memory.updatedAt = new Date(Date.UTC(2026, 0, 1, 0, i, 0)).toISOString();
       seededIds.push(memory.id);
     }
     const oldestPinnedId = seededIds[0] ?? "";
     const secondEditedId = seededIds[1] ?? "";
+    const thirdUnpinnedId = seededIds[2] ?? "";
     await store.pin(oldestPinnedId, true);
     await store.update(secondEditedId, "Working on critical kernel driver v2.");
+    // Re-stamp oldest timestamps on #1 and #2 so they would be evicted FIRST if protection failed!
+    const oldestPinned = store.get(oldestPinnedId);
+    const secondEdited = store.get(secondEditedId);
+    if (oldestPinned) oldestPinned.updatedAt = new Date(Date.UTC(2025, 0, 1, 0, 0, 0)).toISOString();
+    if (secondEdited) secondEdited.updatedAt = new Date(Date.UTC(2025, 0, 2, 0, 0, 0)).toISOString();
 
     // Seed a skill and user-correct its steps.
     const { memory: skill } = await store.learn("skill", "backup nas", ["Run old script"], {
@@ -182,7 +198,9 @@ describe("Expanded memory eval suite & Settings UI safety", () => {
 
     await learner.reflect();
 
-    // Pinned oldest fact AND user-edited fact MUST both survive Learner.dropOldestLearnedFacts()!
+    // Prove eviction actually ran: the unpinned/unedited oldest fact (#3) MUST be evicted!
+    expect(store.get(thirdUnpinnedId)).toBeUndefined();
+    // Pinned oldest fact (#1) AND user-edited fact (#2) MUST both survive Learner.dropOldestLearnedFacts()!
     expect(store.get(oldestPinnedId)).toBeDefined();
     expect(store.get(oldestPinnedId)?.pinned).toBe(true);
     expect(store.get(secondEditedId)).toBeDefined();

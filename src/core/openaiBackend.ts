@@ -95,27 +95,71 @@ interface OpenAiToolSpec {
 
 const MAX_TOOL_STEPS = 8;
 
+function normalizeMappedIpv4(host: string): string {
+  if (!host.startsWith("::ffff:")) return host;
+  const rest = host.slice("::ffff:".length);
+  const hexPair = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(rest);
+  if (!hexPair) return rest;
+  const hi = Number.parseInt(hexPair[1] ?? "0", 16);
+  const lo = Number.parseInt(hexPair[2] ?? "0", 16);
+  return `${(hi >>> 8) & 0xff}.${hi & 0xff}.${(lo >>> 8) & 0xff}.${lo & 0xff}`;
+}
+
 function isLoopbackHost(host: string): boolean {
-  if (host === "localhost" || host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  const mapped = normalizeMappedIpv4(host);
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    host === "0:0:0:0:0:0:0:1"
+  ) {
+    return true;
+  }
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(mapped)) return true;
   return false;
 }
 
 function isMetadataHost(host: string): boolean {
+  const mapped = normalizeMappedIpv4(host);
   return (
     host === "169.254.169.254" ||
+    mapped === "169.254.169.254" ||
     host === "169.254.170.2" ||
+    mapped === "169.254.170.2" ||
+    mapped.startsWith("169.254.") ||
+    mapped === "100.100.100.200" ||
+    mapped === "0.0.0.0" ||
+    host === "::" ||
     host === "metadata.google.internal" ||
     host === "metadata"
   );
 }
 
 function isPrivateLanHost(host: string): boolean {
-  if (host.endsWith(".local") || host.endsWith(".lan") || host.endsWith(".home.arpa")) {
+  const mapped = normalizeMappedIpv4(host);
+  // Single-label local hostnames (e.g. `gpu-box`, `ollama`), excluding bare numeric/hex IP forms.
+  if (
+    !host.includes(".") &&
+    !host.includes(":") &&
+    /^[a-z0-9-]+$/i.test(host) &&
+    !/^\d+$/.test(host) &&
+    !/^0x[0-9a-f]+$/i.test(host)
+  ) {
+    return true;
+  }
+  // Common LAN / Docker / Tailscale MagicDNS suffixes (Tailscale traffic is WireGuard-encrypted).
+  if (
+    host.endsWith(".local") ||
+    host.endsWith(".lan") ||
+    host.endsWith(".home") ||
+    host.endsWith(".home.arpa") ||
+    host.endsWith(".internal") ||
+    host.endsWith(".ts.net")
+  ) {
     return true;
   }
   // IPv4 RFC 1918 + Carrier-Grade NAT / Tailscale (100.64.0.0/10)
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  const ipv4 = mapped.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (ipv4) {
     const a = Number(ipv4[1]);
     const b = Number(ipv4[2]);
@@ -625,6 +669,11 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     const falseRule =
       typeof criteria["false"] === "string" ? criteria["false"] : "Only talked, asked, or declined.";
 
+    const replyExcerpt =
+      lastReply.length <= 4000
+        ? lastReply
+        : `${lastReply.slice(0, 1800)}\n...\n${lastReply.slice(-2000)}`;
+
     const res = await this.fetchImpl(`${this.locality.apiBaseUrl}/chat/completions`, {
       method: "POST",
       headers: {
@@ -644,11 +693,11 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
           },
           {
             role: "user",
-            content: `${instruction}\n\nAssistant's most recent reply:\n${lastReply.slice(0, 1600)}`,
+            content: `${instruction}\n\nAssistant's most recent reply:\n${replyExcerpt}`,
           },
         ],
         temperature: 0,
-        max_tokens: 64,
+        max_tokens: 512,
         stream: false,
       }),
       signal: extra?.signal,
@@ -953,13 +1002,28 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
 
 /** Parses `{"claimed": 0..1}` or `{"claimed": true|false}` from an OpenAI-compatible claim-check reply. */
 export function parseClaimDecisionScore(raw: string): number | null {
-  const cleaned = raw
+  // Strip thinking blocks (e.g. Qwen3/DeepSeek `<think>...</think>`) before inspecting the verdict.
+  const withoutThinking = raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, " ")
+    .replace(/<think>[\s\S]*$/i, " ")
+    .trim();
+  const cleaned = withoutThinking
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
+  if (!cleaned) return null;
+
   const candidates: string[] = [cleaned];
-  const braceMatch = /\{[\s\S]*\}/.exec(cleaned);
-  if (braceMatch) candidates.push(braceMatch[0]);
+  const braceMatches = cleaned.match(/\{[^{}]*\}/g);
+  if (braceMatches) {
+    // Prefer the last JSON object in case thinking/prose appeared before the final verdict.
+    for (let i = braceMatches.length - 1; i >= 0; i -= 1) {
+      const m = braceMatches[i];
+      if (m) candidates.push(m);
+    }
+  }
+  const outerBrace = /\{[\s\S]*\}/.exec(cleaned);
+  if (outerBrace) candidates.push(outerBrace[0]);
 
   for (const candidate of candidates) {
     try {
@@ -971,10 +1035,11 @@ export function parseClaimDecisionScore(raw: string): number | null {
           return Math.max(0, Math.min(1, val));
         }
         if (typeof val === "string") {
-          const num = Number(val);
-          if (Number.isFinite(num)) return Math.max(0, Math.min(1, num));
-          if (/^true|yes$/i.test(val.trim())) return 1;
-          if (/^false|no$/i.test(val.trim())) return 0;
+          const trimmedVal = val.trim();
+          const num = Number(trimmedVal);
+          if (trimmedVal !== "" && Number.isFinite(num)) return Math.max(0, Math.min(1, num));
+          if (/^(?:true|yes)$/i.test(trimmedVal)) return 1;
+          if (/^(?:false|no)$/i.test(trimmedVal)) return 0;
         }
       }
     } catch {

@@ -204,6 +204,7 @@ export class BargeInController {
 export interface WakeRoomGateInput {
   text: string;
   otherNames?: readonly string[];
+  characterName?: string;
   signalRms: number;
   noiseFloorRms: number;
   speakerCosine?: number;
@@ -245,7 +246,7 @@ export function evaluateWakeRoomGate(input: WakeRoomGateInput): WakeRoomGateResu
       reason: `Speaker cosine similarity (${input.speakerCosine.toFixed(2)}) is below threshold (${minSpeakerCosine}).`,
     };
   }
-  const remainder = afterWakeName(input.text, input.otherNames ?? []);
+  const remainder = afterWakeName(input.text, input.otherNames ?? [], input.characterName);
   if (remainder === null) {
     return {
       accepted: false,

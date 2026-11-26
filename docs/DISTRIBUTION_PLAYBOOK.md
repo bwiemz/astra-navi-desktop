@@ -19,8 +19,8 @@ This playbook translates roadmap items **8, 9, and 10** plus the **Qwen3.5 MTP G
   3. Untrusted external text (web pages, files, command output, MCP responses, notifications) taints the turn and enforces strict confirmation before side effects (`500/500` adversarial fuzz gate + `0` static audit findings).
   4. Users can report unexpected or problematic AI output directly in-app (**Report AI Output**).
 
-### Steam Workshop Policy (Data-Only Launch)
-- **Launch strictly with Data-Only Packs** (`avatar`, `voice`, `persona`, `emote-pack`) enforced by `src/core/workshopPack.ts` (`auditWorkshopPackDirectory()`):
+### Steam Workshop Policy (Data-Only Launch — Scaffolded, Pending Workshop Integration)
+- **Launch strictly with Data-Only Packs** (`avatar`, `voice`, `persona`, `emote-pack`), validated by the scaffolded `src/core/workshopPack.ts` (`auditWorkshopPackDirectory()`) once Steam Workshop loading is wired into runtime (not yet connected while Workshop is not live):
   - Requires `manifest.json` with `schemaVersion: 1` and `dataOnly: true`.
   - Allowlists only passive media/metadata assets (`.json`, `.vrm`, `.glb`, `.pmx`, `.pmd`, `.vrma`, `.vmd`, image & audio formats, `.txt`/`.md`).
   - Explicitly blocks symlinks, path traversal, HTML/SVG, and all script/executable binaries (`.js`, `.ts`, `.py`, `.sh`, `.ps1`, `.bat`, `.exe`, `.dll`, `.so`, `.dylib`, `.wasm`, `.node`, etc.).
@@ -81,7 +81,7 @@ powershell -ExecutionPolicy Bypass -File scripts\verify-clean-windows.ps1 -Requi
 - **Installed Embedded Runtime (`node-llama-cpp` `3.22.3`, bundled `llama.cpp` `v0.9.0`):**
   - Does **not** expose `draft-mtp` Multi-Token Prediction bindings in JS (`0` `mtp` symbols in `node_modules/node-llama-cpp/dist/`).
 - **Upstream `llama.cpp` (`llama-server`) Status:**
-  - Upstream `llama-server` natively supports Qwen3.5 MTP GGUF weights via `--spec-type draft-mtp --spec-draft-n-max 3 -np 1` (`buildLlamaCpp10Args({ mtpDraftTokens: 3, ... })` in `src/core/models.ts`).
+  - Upstream `llama-server` natively supports Qwen3.5 MTP GGUF weights via `--spec-type draft-mtp --spec-draft-n-max 3 -np 1`. `buildLlamaCpp10Args({ mtpDraftTokens: 3, ... })` in `src/core/models.ts` provides a scaffolded CLI flag helper (not yet wired into automatic in-app process launching).
   - Published NVIDIA CUDA benchmarks show roughly **1.4x–2.0x** generation speedup on larger tiers (`27B` dense / `35B-A3B` MoE) with ~50–55% draft acceptance; smaller `9B` weights on Apple Silicon Metal often see neutral or slightly slower decode due to MTP head overhead.
   - **Important Constraint:** Upstream `llama.cpp` MTP does not run simultaneously with `--mmproj` or parallel slots (`-np > 1`).
   - **Recommended Path Today:** Users with an external `llama-server` binary can launch a Qwen3.5 MTP GGUF with `--spec-type draft-mtp --spec-draft-n-max 3 -np 1` and connect Astra's **Settings → Mind → OpenAI-compatible server** to it, while Astra's separate loopback **Native Vision Sidecar** (`visionSidecar.ts`) loads `--mmproj` on demand only when `look_at_screen` is called.

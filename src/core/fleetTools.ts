@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { defineChatSessionFunction, type ChatSessionModelFunctions } from "node-llama-cpp";
 import { guarded, type ToolHost } from "./agentTools.ts";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { connectionProblem, type Fleet } from "./fleet.ts";
 import { backupFor, machineFor, readRemoteInput, REMOTE_ACTIONS } from "./fleetRules.ts";
 import { resolveToolPath, TOOLS } from "./permissions.ts";
@@ -68,9 +69,16 @@ export function createFleetTools(host: ToolHost, fleet: Fleet): ChatSessionModel
           if (step.action === "list") {
             const machines = fleet.machines();
             if (machines.length === 0) {
-              return 'No other machines have been added. Captain adds one in Settings, under "Your other machines".';
+              return replaceInternalCaptain(
+                'No other machines have been added. Captain adds one in Settings, under "Your other machines".',
+                host.userAddress?.(),
+              );
             }
-            return `Captain's other machines:\n${machines
+            const heading = replaceInternalCaptain(
+              "Captain's other machines:",
+              host.userAddress?.(),
+            );
+            return `${heading}\n${machines
               .map(
                 (machine) =>
                   `- ${machine.name}: ${machine.user}@${machine.host}${machine.lookWithoutAsking ? " (you may check its status without asking)" : ""}`,

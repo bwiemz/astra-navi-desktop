@@ -209,7 +209,16 @@ export function buildRedactedSupportBundle(input: SupportBundleInput): RedactedS
     hardware,
     bootstrapStatus: scrubBootstrap(input.bootstrapStatus),
     selfCheck,
-    settingsSummary: input.settingsSummary ? { ...input.settingsSummary } : null,
+    settingsSummary: input.settingsSummary
+      ? {
+          ...input.settingsSummary,
+          brain: scrub(
+            /^[A-Za-z]:[\\/]|^\/|^\\\\|\\|\.gguf$/i.test(input.settingsSummary.brain)
+              ? (input.settingsSummary.brain.split(/[\\/]+/).filter(Boolean).pop() ?? "custom.gguf")
+              : input.settingsSummary.brain,
+          ),
+        }
+      : null,
     recentErrors: (input.recentErrors ?? []).slice(-30).map((err) => scrub(err)),
     redactionsApplied,
   };

@@ -11,6 +11,28 @@ import { sanitizePersonaText, type ImportedPersonaCard } from "./personaCard.ts"
 export const DEFAULT_USER_ADDRESS = "Captain";
 export const DEFAULT_DISPLAY_NAME = "Astra Navi";
 
+/**
+ * Replaces internal app-authored `"Captain"` wording with neutral `"the user"` / `"User"`
+ * phrasing whenever the user has customized how the companion addresses them (e.g. a first
+ * name or empty title). Leaves built-in default `"Captain"` prompts byte-for-byte unchanged
+ * and NEVER interpolates raw custom text into tool or safety rules.
+ */
+export function replaceInternalCaptain(text: string, userAddress?: string): string {
+  if (userAddress === undefined || userAddress.trim() === DEFAULT_USER_ADDRESS) {
+    return text;
+  }
+  return text.replace(
+    /(^|[.!?\n]\s*)(Captain's|Captain)\b|\bCaptain:\s|\bCaptain's\b|\bCaptain\b/g,
+    (match, lead: string | undefined, startWord: string | undefined) => {
+      if (startWord === "Captain's") return `${lead ?? ""}The user's`;
+      if (startWord === "Captain") return `${lead ?? ""}The user`;
+      if (match.startsWith("Captain:")) return `User:${match.slice("Captain:".length)}`;
+      if (match === "Captain's") return "the user's";
+      return "the user";
+    },
+  );
+}
+
 export type CharacterConfig = Config["character"];
 
 export function defaultCharacterConfig(): CharacterConfig {

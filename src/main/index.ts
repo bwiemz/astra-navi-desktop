@@ -13,7 +13,9 @@ import {
   session,
 } from "electron";
 import { takeAwayMessage } from "../core/awayMessage.ts";
+import { safeBrainLabel } from "../core/aiReport.ts";
 import { Brain } from "../core/brain.ts";
+import { BRAIN_MODELS, findCatalogEntry, type BrainModel } from "../core/models.ts";
 import { ConfigStore } from "../core/config.ts";
 import { gameOnCard as cardGameOnCard, gpuUtilization } from "../core/cardWatch.ts";
 import { LocalEngine, type EngineStatus } from "../core/engine.ts";
@@ -1024,11 +1026,13 @@ function startShipServices(workspace: string): void {
   agendaWatch = new AgendaWatch({
     agenda,
     minutes: () => config.value.agenda.headsUpMinutes,
+    userAddress: () => config.value.character.userAddress,
     raise: (event) => void initiative?.raise(event),
   });
 
   orders = new StandingOrders(ordersFile(), {
     store: store ?? undefined,
+    userAddress: () => config.value.character.userAddress,
     // The fleet is made a little later than this; it is looked up each time a check runs.
     read: (check, signal) => orderReader({ workspace, fleet: fleet ?? undefined })(check, signal),
     mayLook: orderGuard({ workspace, home: homedir(), privateDirs: [dataDir()] }),
@@ -1380,7 +1384,11 @@ async function noticeRoutines(routines: RoutineWatch, learned: Learned): Promise
   const [routine] = routines.found();
   if (!routine) return;
   await routines.markOffered(routine.id);
-  initiative?.raise({ kind: "routine", requested: false, text: describeRoutine(routine) });
+  initiative?.raise({
+    kind: "routine",
+    requested: false,
+    text: describeRoutine(routine, config.value.character.userAddress),
+  });
 }
 
 async function shutDown(): Promise<void> {
@@ -1533,6 +1541,7 @@ async function main(): Promise<void> {
     ask: (instructions, text, signal) => thinker.sideQuestion(instructions, text, signal),
     journalFile: journalFile(),
     quietMs: quietTimeFor(config.value.idleUnloadMinutes * 60_000),
+    userAddress: () => config.value.character.userAddress,
     onLearned: (learned) => void noticeRoutines(routines, learned),
   });
   await learner.load();
@@ -1671,6 +1680,7 @@ async function main(): Promise<void> {
       read: readWebPage,
     },
     language: () => config.value.language,
+    userAddress: () => config.value.character.userAddress,
     reportsDir: join(environment.workspace, "reports"),
     memory,
     actions,
@@ -1806,18 +1816,32 @@ async function main(): Promise<void> {
     importModelFile,
     aiReportContext: () => {
       const loc = describeInferenceLocality(config.value.inference);
+      const rawBrain = config.value.brain;
+      const localBrainLabel =
+        rawBrain in BRAIN_MODELS
+          ? BRAIN_MODELS[rawBrain as BrainModel["id"]].label
+          : (findCatalogEntry(rawBrain)?.model.label ?? safeBrainLabel(rawBrain));
+      const brainLabel =
+        config.value.inference.provider === "openai-compatible"
+          ? `${config.value.inference.model.trim() || "OpenAI-compatible model"} (${loc.scope})`
+          : localBrainLabel;
+      const extraSecrets = [
+        config.value.search.braveApiKey,
+        config.value.search.searxngUrl,
+        config.value.inference.apiKey,
+        settings.stationUsername(),
+        ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
+        ...config.value.mcp.servers.flatMap((s) => [
+          ...Object.values(s.headers ?? {}),
+          ...Object.values(s.env ?? {}),
+        ]),
+      ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
       return {
         appVersion: app.getVersion(),
         reportsDir: join(dataDir(), "ai-reports"),
-        brainLabel:
-          config.value.inference.provider === "openai-compatible"
-            ? loc.label
-            : config.value.brain,
+        brainLabel,
         inferenceScope: loc.scope,
-        extraSecrets: [
-          config.value.search.braveApiKey ?? "",
-          config.value.inference.apiKey,
-        ].filter(Boolean),
+        extraSecrets,
       };
     },
   });

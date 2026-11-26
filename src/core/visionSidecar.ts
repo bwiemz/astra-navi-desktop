@@ -6,7 +6,11 @@ import { createServer } from "node:net";
 import { delimiter, dirname, join } from "node:path";
 import sharp from "sharp";
 import { downloadModelResumable } from "./modelBundle.ts";
-import { resolveVisionMmproj, type BrainChoice, type BrainMmprojAsset } from "./models.ts";
+import {
+  resolveVisionSidecarPair,
+  type BrainChoice,
+  type BrainMmprojAsset,
+} from "./models.ts";
 
 /**
  * Local `llama-server` + `mmproj` Native Vision Sidecar.
@@ -44,11 +48,18 @@ export interface VisionSidecarStatus {
   mode: "managed-sidecar" | "loopback-endpoint" | "unavailable";
   binaryPath: string | null;
   endpoint: string | null;
+  modelSource: "dedicated" | "brain";
+  modelLabel: string;
   modelPath: string;
+  modelReady: boolean;
   mmprojPath: string | null;
   mmprojReady: boolean;
   mmprojDownload: BrainMmprojAsset | null;
+  /** Combined download bytes needed when using the dedicated small vision model + projector. */
+  downloadTotalBytes: number | null;
   running: boolean;
+  backoffActive: boolean;
+  lastError: string | null;
   reason: string;
 }
 
@@ -56,7 +67,7 @@ export interface LlamaVisionSidecarOptions {
   modelsDir: string;
   /** Returns the current brain choice (`"auto"`, tier ID, preset ID, or custom GGUF path). */
   brainChoice(): BrainChoice;
-  /** Optional known total VRAM bytes for resolving `"auto"`. */
+  /** Optional known total VRAM bytes for resolving `"auto"` and dedicated vision tier. */
   totalVramBytes?(): number | null;
   /** Whether native vision is enabled in settings (default true). */
   enabled?(): boolean;
@@ -70,18 +81,29 @@ export interface LlamaVisionSidecarOptions {
   gpuBusy?(): boolean;
   /** True while the main local `node-llama-cpp` model currently occupies GPU VRAM. */
   localModelLoaded?(): boolean;
-  /** Optional probe for currently free GPU VRAM bytes to prevent double-copy GPU OOM. */
+  /** Optional probe for currently free GPU VRAM bytes to prevent GPU OOM alongside the brain. */
   freeVramBytes?(): Promise<number | null>;
   /** Called right before spawning the sidecar so the main engine can optionally yield VRAM. */
   beforeSpawn?(): Promise<void>;
   idleUnloadMs?: number;
   startupTimeoutMs?: number;
   requestTimeoutMs?: number;
+  /** Base exponential cooldown after a sidecar failure before retrying (default 15s). */
+  failureBackoffBaseMs?: number;
+  /** Max cooldown cap after consecutive sidecar failures (default 5 min). */
+  failureBackoffMaxMs?: number;
+  /** Grace period after SIGTERM before escalating to SIGKILL on shutdown (default 2000ms). */
+  killTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
 const MAX_STDERR_TAIL_CHARS = 4096;
-const SIDECAR_VRAM_HEADROOM_BYTES = Math.round(1.5 * 1024 ** 3);
+/** Compact overhead margin for a dedicated 0.8B/2B vision sidecar with 2048-token context. */
+const DEDICATED_VISION_VRAM_HEADROOM_BYTES = Math.round(0.45 * 1024 ** 3);
+const BRAIN_COPY_VRAM_HEADROOM_BYTES = Math.round(1.5 * 1024 ** 3);
+const DEFAULT_FAILURE_BACKOFF_BASE_MS = 15_000;
+const DEFAULT_FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
+const DEFAULT_KILL_TIMEOUT_MS = 2_000;
 
 function hasUnsafeBinaryChars(cmd: string): boolean {
   for (let i = 0; i < cmd.length; i += 1) {
@@ -263,20 +285,48 @@ export class LlamaVisionSidecar implements VisionDescriber {
   private starting: Promise<{ baseUrl: string; apiKey: string | null } | null> | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
   private stderrTail = "";
+  private consecutiveFailures = 0;
+  private backoffUntilMs = 0;
+  private lastError: string | null = null;
 
   constructor(options: LlamaVisionSidecarOptions) {
     this.opts = options;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  /** Reports whether native vision is ready, needs `mmproj`, or needs `llama-server`. */
+  /** Clears failure backoff (e.g. after downloading weights or updating Settings). */
+  resetBackoff(): void {
+    this.consecutiveFailures = 0;
+    this.backoffUntilMs = 0;
+    this.lastError = null;
+  }
+
+  private recordFailure(err: unknown): void {
+    this.consecutiveFailures += 1;
+    const baseMs = Math.max(50, this.opts.failureBackoffBaseMs ?? DEFAULT_FAILURE_BACKOFF_BASE_MS);
+    const maxMs = Math.max(baseMs, this.opts.failureBackoffMaxMs ?? DEFAULT_FAILURE_BACKOFF_MAX_MS);
+    const delayMs = Math.min(maxMs, baseMs * 2 ** (this.consecutiveFailures - 1));
+    this.backoffUntilMs = Date.now() + delayMs;
+    this.lastError = err instanceof Error ? err.message : String(err);
+  }
+
+  /** Reports whether native vision is ready, needs small vision weights, or needs `llama-server`. */
   status(): VisionSidecarStatus {
     const enabled = this.opts.enabled ? this.opts.enabled() : true;
-    const mm = resolveVisionMmproj(
+    const pair = resolveVisionSidecarPair(
       this.opts.brainChoice(),
       this.opts.modelsDir,
       this.opts.totalVramBytes?.() ?? null,
     );
+    const backoffActive = Date.now() < this.backoffUntilMs;
+    const downloadTotalBytes =
+      pair.source === "dedicated"
+        ? (pair.modelReady ? 0 : (pair.modelDownload?.sizeBytes ?? 0)) +
+          (pair.mmprojReady ? 0 : (pair.mmprojDownload?.sizeBytes ?? 0))
+        : pair.mmprojReady
+          ? 0
+          : (pair.mmprojDownload?.sizeBytes ?? null);
+
     const rawEndpoint = (this.opts.endpoint?.() ?? "").trim();
     if (rawEndpoint) {
       const check = validateLoopbackVisionUrl(rawEndpoint);
@@ -287,11 +337,17 @@ export class LlamaVisionSidecar implements VisionDescriber {
           mode: "unavailable",
           binaryPath: null,
           endpoint: null,
-          modelPath: mm.modelPath,
-          mmprojPath: mm.mmprojPath,
-          mmprojReady: mm.downloaded,
-          mmprojDownload: mm.download,
+          modelSource: pair.source,
+          modelLabel: pair.modelLabel,
+          modelPath: pair.modelPath,
+          modelReady: pair.modelReady,
+          mmprojPath: pair.mmprojPath,
+          mmprojReady: pair.mmprojReady,
+          mmprojDownload: pair.mmprojDownload,
+          downloadTotalBytes,
           running: false,
+          backoffActive,
+          lastError: this.lastError,
           reason: check.reason,
         };
       }
@@ -301,11 +357,17 @@ export class LlamaVisionSidecar implements VisionDescriber {
         mode: "loopback-endpoint",
         binaryPath: null,
         endpoint: check.url.origin,
-        modelPath: mm.modelPath,
-        mmprojPath: mm.mmprojPath,
-        mmprojReady: mm.downloaded,
-        mmprojDownload: mm.download,
+        modelSource: pair.source,
+        modelLabel: pair.modelLabel,
+        modelPath: pair.modelPath,
+        modelReady: pair.modelReady,
+        mmprojPath: pair.mmprojPath,
+        mmprojReady: pair.mmprojReady,
+        mmprojDownload: pair.mmprojDownload,
+        downloadTotalBytes,
         running: true,
+        backoffActive,
+        lastError: this.lastError,
         reason: enabled
           ? `Using loopback vision server at ${check.url.origin}.`
           : "Native vision is switched off in Settings.",
@@ -313,16 +375,24 @@ export class LlamaVisionSidecar implements VisionDescriber {
     }
 
     const binaryPath = findLlamaServerBinary(this.opts.binaryPath?.(), this.opts.extraBinDirs);
-    const modelReady = existsSync(mm.modelPath);
-    const available = enabled && binaryPath !== null && modelReady && mm.downloaded && mm.mmprojPath !== null;
-    let reason = "Ready (starts on demand when she looks at the screen).";
+    const available = enabled && binaryPath !== null && pair.ready && pair.mmprojPath !== null;
+    let reason =
+      pair.source === "dedicated"
+        ? `Ready (${pair.modelLabel}; starts on demand alongside your brain).`
+        : "Ready (starts on demand when she looks at the screen).";
     if (!enabled) reason = "Switched off in Settings (using Florence-2 + OCR).";
     else if (!binaryPath) reason = "llama-server not found on PATH (falling back to Florence-2 + OCR).";
-    else if (!modelReady) reason = "Brain weights have not been downloaded yet.";
-    else if (!mm.downloaded || !mm.mmprojPath) {
-      reason = mm.download
-        ? `Vision projector (${mm.download.fileName}) not downloaded yet.`
-        : "No matching mmproj GGUF found next to this custom model.";
+    else if (!pair.ready || !pair.mmprojPath) {
+      if (pair.source === "dedicated") {
+        reason = `Compact vision model (${pair.modelLabel}) not downloaded yet.`;
+      } else {
+        reason = pair.mmprojDownload
+          ? `Vision projector (${pair.mmprojDownload.fileName}) not downloaded yet.`
+          : "No matching mmproj GGUF found next to this custom model.";
+      }
+    } else if (backoffActive) {
+      const waitSec = Math.max(1, Math.ceil((this.backoffUntilMs - Date.now()) / 1000));
+      reason = `Temporarily cooling down after an error (${waitSec}s left; falling back to Florence-2 + OCR).`;
     }
 
     return {
@@ -331,43 +401,78 @@ export class LlamaVisionSidecar implements VisionDescriber {
       mode: available ? "managed-sidecar" : "unavailable",
       binaryPath,
       endpoint: this.runningBaseUrl,
-      modelPath: mm.modelPath,
-      mmprojPath: mm.mmprojPath,
-      mmprojReady: mm.downloaded,
-      mmprojDownload: mm.download,
+      modelSource: pair.source,
+      modelLabel: pair.modelLabel,
+      modelPath: pair.modelPath,
+      modelReady: pair.modelReady,
+      mmprojPath: pair.mmprojPath,
+      mmprojReady: pair.mmprojReady,
+      mmprojDownload: pair.mmprojDownload,
+      downloadTotalBytes: downloadTotalBytes && downloadTotalBytes > 0 ? downloadTotalBytes : null,
       running: this.child !== null && this.runningBaseUrl !== null,
+      backoffActive,
+      lastError: this.lastError,
       reason,
     };
   }
 
-  /** Downloads the matching `mmproj-F16.gguf` for the current brain into `modelsDir`. */
+  /** Downloads the lightweight dedicated vision model + `mmproj` (or brain `mmproj`) into `modelsDir`. */
   async ensureMmprojDownloaded(
     onProgress?: (progress: { received: number; total: number }) => void,
     signal?: AbortSignal,
   ): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
-    const mm = resolveVisionMmproj(
+    const pair = resolveVisionSidecarPair(
       this.opts.brainChoice(),
       this.opts.modelsDir,
       this.opts.totalVramBytes?.() ?? null,
     );
-    if (mm.downloaded && mm.mmprojPath) {
-      return { ok: true, path: mm.mmprojPath };
+    if (pair.ready && pair.mmprojPath) {
+      this.resetBackoff();
+      return { ok: true, path: pair.mmprojPath };
     }
-    if (!mm.download || !mm.mmprojPath) {
+    if (!pair.mmprojDownload || !pair.mmprojPath) {
       return {
         ok: false,
-        reason: "No official mmproj download is listed for this custom model file.",
+        reason: "No official vision model download is listed for this configuration.",
       };
     }
-    await mkdir(dirname(mm.mmprojPath), { recursive: true });
-    await downloadModelResumable({
-      url: mm.download.url,
-      destPath: mm.mmprojPath,
-      expectedSizeBytes: mm.download.sizeBytes,
-      signal,
-      onProgress,
-    });
-    return { ok: true, path: mm.mmprojPath };
+
+    const needModel = pair.source === "dedicated" && !pair.modelReady && pair.modelDownload !== null;
+    const needMmproj = !pair.mmprojReady;
+    const modelTotal = needModel ? (pair.modelDownload?.sizeBytes ?? 0) : 0;
+    const mmprojTotal = needMmproj ? pair.mmprojDownload.sizeBytes : 0;
+    const combinedTotal = modelTotal + mmprojTotal;
+
+    if (needModel && pair.modelDownload) {
+      await mkdir(dirname(pair.modelPath), { recursive: true });
+      await downloadModelResumable({
+        url: pair.modelDownload.url,
+        destPath: pair.modelPath,
+        expectedSizeBytes: pair.modelDownload.sizeBytes,
+        signal,
+        onProgress: onProgress
+          ? (p) => onProgress({ received: p.received, total: combinedTotal || p.total })
+          : undefined,
+      });
+    }
+    if (needMmproj) {
+      await mkdir(dirname(pair.mmprojPath), { recursive: true });
+      await downloadModelResumable({
+        url: pair.mmprojDownload.url,
+        destPath: pair.mmprojPath,
+        expectedSizeBytes: pair.mmprojDownload.sizeBytes,
+        signal,
+        onProgress: onProgress
+          ? (p) =>
+              onProgress({
+                received: modelTotal + p.received,
+                total: combinedTotal || p.total,
+              })
+          : undefined,
+      });
+    }
+    this.resetBackoff();
+    return { ok: true, path: pair.mmprojPath };
   }
 
   private scheduleIdleUnload(): void {
@@ -380,15 +485,22 @@ export class LlamaVisionSidecar implements VisionDescriber {
     this.idleTimer.unref();
   }
 
-  private async chooseGpuLayers(modelPath: string, mmprojPath: string): Promise<"0" | "99"> {
+  private async chooseGpuLayers(
+    modelPath: string,
+    mmprojPath: string,
+    source: "dedicated" | "brain",
+  ): Promise<"0" | "99"> {
     if (this.opts.gpuBusy?.()) return "0";
     if (this.opts.localModelLoaded?.()) {
       // Main local node-llama-cpp model is still loaded in VRAM (e.g. mid-turn look_at_screen).
-      // Only offload the sidecar to GPU if free VRAM comfortably fits a second copy + mmproj;
-      // otherwise run the sidecar on CPU/RAM (`-ngl 0`) to prevent double-copy GPU OOM.
+      // A dedicated 0.8B/2B vision model needs much less headroom (~0.45 GiB) and fits on GPU
+      // beside the brain on most cards; a full brain copy requires full headroom or drops to CPU.
       const freeVram = (await this.opts.freeVramBytes?.().catch(() => null)) ?? null;
       if (freeVram === null) return "0";
-      let requiredBytes = SIDECAR_VRAM_HEADROOM_BYTES;
+      let requiredBytes =
+        source === "dedicated"
+          ? DEDICATED_VISION_VRAM_HEADROOM_BYTES
+          : BRAIN_COPY_VRAM_HEADROOM_BYTES;
       try {
         requiredBytes += statSync(modelPath).size + statSync(mmprojPath).size;
       } catch {
@@ -467,7 +579,7 @@ export class LlamaVisionSidecar implements VisionDescriber {
     const boot = (async (): Promise<{ baseUrl: string; apiKey: string | null } | null> => {
       if (this.child) await this.dispose();
       await this.opts.beforeSpawn?.().catch(() => undefined);
-      const gpuLayers = await this.chooseGpuLayers(st.modelPath, mmprojPath);
+      const gpuLayers = await this.chooseGpuLayers(st.modelPath, mmprojPath, st.modelSource);
       const key = `${binaryPath}\0${st.modelPath}\0${mmprojPath}\0${gpuLayers}`;
       const port = await allocateLoopbackPort();
       const apiKey = randomBytes(24).toString("hex");
@@ -484,7 +596,7 @@ export class LlamaVisionSidecar implements VisionDescriber {
         "--api-key",
         apiKey,
         "--ctx-size",
-        "4096",
+        st.modelSource === "dedicated" ? "2048" : "4096",
         "-ngl",
         gpuLayers,
       ];
@@ -542,56 +654,70 @@ export class LlamaVisionSidecar implements VisionDescriber {
 
   /** Describes a PNG screenshot (or Set-of-Mark annotated PNG) using the local vision sidecar. */
   async describeImage(imagePng: Buffer, options: VisionDescribeOptions): Promise<string | null> {
-    const conn = await this.ensureReady(options.signal);
-    if (!conn) return null;
-
-    const normalized = await normalizeImageForVision(imagePng);
-    const messages = buildVisionMessages(normalized.toString("base64"), options);
-    const timeoutSignal = AbortSignal.timeout(
-      this.opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-    );
-    const combinedSignal = options.signal
-      ? AbortSignal.any([options.signal, timeoutSignal])
-      : timeoutSignal;
-
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      ...(conn.apiKey ? { Authorization: `Bearer ${conn.apiKey}` } : {}),
-    };
-
-    const res = await this.fetchImpl(`${conn.baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        messages,
-        max_tokens: 280,
-        temperature: 0.2,
-        stream: false,
-      }),
-      signal: combinedSignal,
-    });
-    if (!res.ok) {
-      throw new Error(`Local vision sidecar HTTP ${res.status}`);
+    if (Date.now() < this.backoffUntilMs) {
+      return null;
     }
-    const data = (await res.json()) as {
-      choices?: { message?: { content?: unknown } }[];
-    };
-    const rawContent = data?.choices?.[0]?.message?.content;
-    const text =
-      typeof rawContent === "string"
-        ? rawContent
-        : Array.isArray(rawContent)
+
+    try {
+      const conn = await this.ensureReady(options.signal);
+      if (!conn) return null;
+
+      const normalized = await normalizeImageForVision(imagePng);
+      const messages = buildVisionMessages(normalized.toString("base64"), options);
+      const timeoutSignal = AbortSignal.timeout(
+        this.opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      );
+      const combinedSignal = options.signal
+        ? AbortSignal.any([options.signal, timeoutSignal])
+        : timeoutSignal;
+
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        ...(conn.apiKey ? { Authorization: `Bearer ${conn.apiKey}` } : {}),
+      };
+
+      const res = await this.fetchImpl(`${conn.baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          messages,
+          max_tokens: 280,
+          temperature: 0.2,
+          stream: false,
+        }),
+        signal: combinedSignal,
+      });
+      if (!res.ok) {
+        throw new Error(`Local vision sidecar HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        choices?: { message?: { content?: unknown } }[];
+      };
+      const rawContent = data?.choices?.[0]?.message?.content;
+      const text =
+        typeof rawContent === "string"
           ? rawContent
-              .map((part) =>
-                typeof part === "object" && part !== null && typeof (part as { text?: unknown }).text === "string"
-                  ? (part as { text: string }).text
-                  : "",
-              )
-              .join(" ")
-          : "";
-    this.scheduleIdleUnload();
-    const cleaned = sanitizeVisionOutput(text);
-    return cleaned.length > 0 ? cleaned : null;
+          : Array.isArray(rawContent)
+            ? rawContent
+                .map((part) =>
+                  typeof part === "object" &&
+                  part !== null &&
+                  typeof (part as { text?: unknown }).text === "string"
+                    ? (part as { text: string }).text
+                    : "",
+                )
+                .join(" ")
+            : "";
+      this.resetBackoff();
+      this.scheduleIdleUnload();
+      const cleaned = sanitizeVisionOutput(text);
+      return cleaned.length > 0 ? cleaned : null;
+    } catch (err) {
+      if (!options.signal?.aborted) {
+        this.recordFailure(err);
+      }
+      throw err;
+    }
   }
 
   async dispose(): Promise<void> {
@@ -605,10 +731,42 @@ export class LlamaVisionSidecar implements VisionDescriber {
     this.runningApiKey = null;
     this.runningKey = null;
     if (!child) return;
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // Already exited.
-    }
+    if (child.exitCode !== null || child.signalCode !== null) return;
+
+    const killTimeoutMs = Math.max(100, this.opts.killTimeoutMs ?? DEFAULT_KILL_TIMEOUT_MS);
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(escalateTimer);
+        clearTimeout(hardTimer);
+        child.off("exit", done);
+        child.off("close", done);
+        resolve();
+      };
+      child.once("exit", done);
+      child.once("close", done);
+
+      const escalateTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            done();
+          }
+        }
+      }, killTimeoutMs);
+      escalateTimer.unref?.();
+
+      const hardTimer = setTimeout(done, killTimeoutMs + 1000);
+      hardTimer.unref?.();
+
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        done();
+      }
+    });
   }
 }

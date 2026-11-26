@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
-import { BRAIN_MODELS, MOE_WORKSTATION_MODELS, resolveVisionMmproj } from "../src/core/models.ts";
+import {
+  BRAIN_MODELS,
+  MOE_WORKSTATION_MODELS,
+  resolveVisionMmproj,
+  resolveVisionSidecarPair,
+  VISION_SIDECAR_MODELS,
+} from "../src/core/models.ts";
 import { Sight } from "../src/core/sight.ts";
 import {
   buildVisionMessages,
@@ -82,6 +88,37 @@ describe("models.ts vision mmproj resolution", () => {
     const custom = resolveVisionMmproj(customGguf, dir, null);
     expect(custom.downloaded).toBe(true);
     expect(custom.mmprojPath).toBe(customMmproj);
+
+    // A text-only custom model sitting next to an unrelated Qwen mmproj MUST NOT pair with it!
+    const textOnlyGguf = join(dir, "Llama-3-8B-Instruct.gguf");
+    await writeFile(join(dir, "Qwen3.5-4B-mmproj-F16.gguf"), "stub");
+    await writeFile(textOnlyGguf, "stub");
+    const textOnly = resolveVisionMmproj(textOnlyGguf, dir, null);
+    expect(textOnly.downloaded).toBe(false);
+    expect(textOnly.mmprojPath).toBeNull();
+  });
+
+  it("prefers a dedicated compact Qwen3.5-0.8B/2B vision pair over loading a second full brain copy", async () => {
+    const dir = await makeTempDir("astra-vis-ded-");
+    // Uninstalled: recommends 0.8B on 8 GB VRAM and 2B on 16 GB VRAM.
+    const rec8 = resolveVisionSidecarPair("standard", dir, 8 * 1024 ** 3);
+    expect(rec8.source).toBe("dedicated");
+    expect(rec8.ready).toBe(false);
+    expect(rec8.modelPath).toBe(join(dir, VISION_SIDECAR_MODELS.compact.modelFileName));
+
+    const rec16 = resolveVisionSidecarPair("standard", dir, 16 * 1024 ** 3);
+    expect(rec16.source).toBe("dedicated");
+    expect(rec16.modelPath).toBe(join(dir, VISION_SIDECAR_MODELS.standard.modelFileName));
+
+    // When both a 9B brain + mmproj AND dedicated 0.8B vision pair exist, dedicated 0.8B wins!
+    await writeFile(join(dir, "Qwen3.5-9B-Q4_K_M.gguf"), "brain");
+    await writeFile(join(dir, "Qwen3.5-9B-mmproj-F16.gguf"), "brain-mmproj");
+    await writeFile(join(dir, VISION_SIDECAR_MODELS.compact.modelFileName), "small-vl");
+    await writeFile(join(dir, VISION_SIDECAR_MODELS.compact.mmproj.fileName), "small-mmproj");
+    const chosen = resolveVisionSidecarPair("standard", dir, 8 * 1024 ** 3);
+    expect(chosen.source).toBe("dedicated");
+    expect(chosen.ready).toBe(true);
+    expect(chosen.modelPath).toBe(join(dir, VISION_SIDECAR_MODELS.compact.modelFileName));
   });
 });
 
@@ -395,6 +432,90 @@ describe("LlamaVisionSidecar loopback endpoint & managed process", () => {
     expect(spawnedArgs[nglIndex + 1]).toBe("0");
 
     await sidecar.dispose();
+  });
+
+  it("backs off quickly after failure and escalates SIGTERM to SIGKILL on shutdown for stubborn processes", async () => {
+    const dir = await makeTempDir("astra-vis-backoff-");
+    const smallModel = join(dir, VISION_SIDECAR_MODELS.compact.modelFileName);
+    const smallMmproj = join(dir, VISION_SIDECAR_MODELS.compact.mmproj.fileName);
+    await writeFile(smallModel, "small-vl");
+    await writeFile(smallMmproj, "small-mmproj");
+
+    // 1. Failing binary triggers exponential failure backoff -> second call fast-returns null without respawning!
+    const failBin = join(dir, "fail-llama-server");
+    await writeFile(failBin, `#!${process.execPath}\nprocess.exit(1);\n`, "utf8");
+    await chmod(failBin, 0o755);
+
+    const flaky = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => failBin,
+      startupTimeoutMs: 3_000,
+      failureBackoffBaseMs: 2_000,
+    });
+    await expect(flaky.describeImage(await makeTestPng(), { mode: "screen" })).rejects.toThrow(/exited/i);
+    expect(flaky.status().backoffActive).toBe(true);
+    const t0 = performance.now();
+    const skipped = await flaky.describeImage(await makeTestPng(), { mode: "screen" });
+    expect(skipped).toBeNull();
+    expect(performance.now() - t0).toBeLessThan(100);
+    await flaky.dispose();
+
+    // 2. Stubborn process that ignores SIGTERM MUST be killed via SIGKILL escalation on dispose()!
+    const pidLog = join(dir, "stubborn.pid");
+    const stubbornBin = join(dir, "stubborn-llama-server");
+    await writeFile(
+      stubbornBin,
+      [
+        `#!${process.execPath}`,
+        `import { createServer } from "node:http";`,
+        `import { writeFileSync } from "node:fs";`,
+        `const args = process.argv.slice(2);`,
+        `const arg = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };`,
+        `writeFileSync(${JSON.stringify(pidLog)}, String(process.pid));`,
+        // Intentionally swallow SIGTERM!
+        `process.on("SIGTERM", () => {});`,
+        `const server = createServer((req, res) => {`,
+        `  if (req.url === "/health") { res.writeHead(200); res.end("ok"); return; }`,
+        `  req.resume();`,
+        `  req.on("end", () => {`,
+        `    res.writeHead(200, { "content-type": "application/json" });`,
+        `    res.end(JSON.stringify({ choices: [{ message: { content: "Dedicated 0.8B ready." } }] }));`,
+        `  });`,
+        `});`,
+        `server.listen(Number(arg("--port")), arg("--host"));`,
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(stubbornBin, 0o755);
+
+    const stubborn = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => stubbornBin,
+      localModelLoaded: () => true,
+      // 1 GiB free VRAM fits the tiny stub dedicated vision files + 0.45 GiB headroom -> stays on GPU (-ngl 99)!
+      freeVramBytes: async () => 1 * 1024 ** 3,
+      startupTimeoutMs: 5_000,
+      killTimeoutMs: 200,
+      idleUnloadMs: 0,
+    });
+    const out = await stubborn.describeImage(await makeTestPng(), { mode: "screen" });
+    expect(out).toBe("Dedicated 0.8B ready.");
+
+    const { readFile } = await import("node:fs/promises");
+    const pid = Number((await readFile(pidLog, "utf8")).trim());
+    expect(pid).toBeGreaterThan(0);
+
+    await stubborn.dispose();
+    // Confirm the process is actually gone (SIGKILL succeeded).
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      alive = false;
+    }
+    expect(alive).toBe(false);
   });
 });
 

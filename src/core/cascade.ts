@@ -1,3 +1,4 @@
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { TOOLS } from "./permissions.ts";
 
 /** Reason the small-to-9B speculative cascade escalated a turn. */
@@ -124,9 +125,13 @@ export function buildStitchPrompt(
   originalPrompt: string,
   spokenAck: string,
   toolResults: readonly { tool: string; result: string }[],
+  userAddress?: string,
 ): string {
   const sections: string[] = [
-    "Continue seamlessly for Captain without repeating the opening acknowledgment already spoken.",
+    replaceInternalCaptain(
+      "Continue seamlessly for Captain without repeating the opening acknowledgment already spoken.",
+      userAddress,
+    ),
     `Original request:\n${originalPrompt.trim()}`,
   ];
   const ack = spokenAck.trim();

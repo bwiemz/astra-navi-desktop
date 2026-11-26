@@ -35,7 +35,10 @@ import {
   VOICE_MARK,
   type Abilities,
 } from "./persona.ts";
-import { characterOverrideFromConfig } from "./characterLayer.ts";
+import {
+  characterOverrideFromConfig,
+  replaceInternalCaptain,
+} from "./characterLayer.ts";
 import { describeRecalled, type Recall } from "./recall.ts";
 import { desktopLayout } from "./desktop.ts";
 import { SCREEN_MARK } from "./watch.ts";
@@ -224,7 +227,11 @@ const NOT_KEPT = "(what this returned was read at the time and is not kept)";
 const SAID_NOT_KEPT =
   "[[neutral]] (AI-chan told Captain what they said. Neither the notifications nor her words about them are kept: to say more about them she looks again.)";
 
-export function withoutUnsavedResults(items: readonly ChatHistoryItem[]): ChatHistoryItem[] {
+export function withoutUnsavedResults(
+  items: readonly ChatHistoryItem[],
+  userAddress?: string,
+): ChatHistoryItem[] {
+  const saidNotKept = replaceInternalCaptain(SAID_NOT_KEPT, userAddress);
   return items.map((item) => {
     if (item.type !== "model") return item;
     const read = item.response.some(
@@ -238,7 +245,7 @@ export function withoutUnsavedResults(items: readonly ChatHistoryItem[]): ChatHi
       if (typeof part === "string") {
         if (said || part.trim() === "") return [];
         said = true;
-        return [SAID_NOT_KEPT];
+        return [saidNotKept];
       }
       if (part.type === "functionCall" && NEVER_SAVED.has(part.name)) {
         return [{ ...part, result: NOT_KEPT }];
@@ -246,8 +253,59 @@ export function withoutUnsavedResults(items: readonly ChatHistoryItem[]): ChatHi
       // Her thinking about it as well.
       return part.type === "segment" ? [] : [part];
     });
-    return { ...item, response: said ? response : [...response, SAID_NOT_KEPT] };
+    return { ...item, response: said ? response : [...response, saidNotKept] };
   });
+}
+
+function adaptSchemaDescriptions(node: unknown, userAddress: string): unknown {
+  if (Array.isArray(node)) return node.map((item) => adaptSchemaDescriptions(item, userAddress));
+  if (typeof node !== "object" || node === null) return node;
+  const rec = node as Record<string, unknown>;
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rec)) {
+    if (k === "description" && typeof v === "string") {
+      const next = replaceInternalCaptain(v, userAddress);
+      if (next !== v) changed = true;
+      out[k] = next;
+    } else if (typeof v === "object" && v !== null) {
+      const next = adaptSchemaDescriptions(v, userAddress);
+      if (next !== v) changed = true;
+      out[k] = next;
+    } else {
+      out[k] = v;
+    }
+  }
+  return changed ? out : node;
+}
+
+/**
+ * Adapts built-in tool descriptions & parameter descriptions when the user customized
+ * `character.userAddress` so tool schemas never keep hard-coded "Captain" wording.
+ * Applied strictly to built-in tools BEFORE external MCP tools are merged.
+ */
+function adaptBuiltInToolsForAddress(
+  tools: ChatSessionModelFunctions,
+  userAddress: string | undefined,
+): ChatSessionModelFunctions {
+  if (userAddress === undefined || userAddress.trim() === "Captain") return tools;
+  const out: Record<string, ChatSessionModelFunctions[string]> = {};
+  for (const [name, fn] of Object.entries(tools)) {
+    const nextDesc =
+      typeof fn.description === "string"
+        ? replaceInternalCaptain(fn.description, userAddress)
+        : fn.description;
+    const nextParams =
+      fn.params !== undefined
+        ? (adaptSchemaDescriptions(fn.params, userAddress) as typeof fn.params)
+        : undefined;
+    out[name] = {
+      ...fn,
+      ...(nextDesc !== undefined ? { description: nextDesc } : {}),
+      ...(nextParams !== undefined ? { params: nextParams } : {}),
+    };
+  }
+  return out as ChatSessionModelFunctions;
 }
 
 function isHistory(value: unknown): value is ChatHistoryItem[] {
@@ -312,12 +370,6 @@ export class Brain {
    * are checked with the user. Cleared only by starting a new conversation.
    */
   private readOutsideText = false;
-  /**
-   * True once any external MCP tool schema (with server-supplied parameter descriptions)
-   * has been placed into the model's prompt in this conversation. Taints built-in tools
-   * without blocking a server's own first `readOnlyAutoAllow` call.
-   */
-  private mcpSchemaExposed = false;
   private idleWaiters: (() => void)[] = [];
   private historyLoaded = false;
   /** Counts replies begun, so work done between replies can tell that one has started since. */
@@ -503,7 +555,6 @@ export class Brain {
     this.clock.reset();
     this.deps.screen?.reset();
     this.readOutsideText = false;
-    this.mcpSchemaExposed = false;
     this.instructionsDirty = false;
     this.deps.engine.setHistory([]);
     // Unloading makes the next message start from a fresh system prompt with current memories.
@@ -745,25 +796,35 @@ export class Brain {
       // Telling an event is only telling. Its text can carry a program's output or old
       // log lines, so she gets no tools while relaying it; whatever such text "asks for"
       // cannot be carried out. A correction is the exception: it exists to make her act.
+      const userAddress = deps.config.value.character.userAddress;
+      const builtInUsual: ChatSessionModelFunctions =
+        message.event && !message.correction
+          ? {}
+          : adaptBuiltInToolsForAddress(
+              {
+                ...createTools(host),
+                ...createKnowledgeTools(host),
+                ...(deps.desktop ? createDesktopTools(host, deps.desktop) : {}),
+                ...(deps.hands && deps.config.value.hands.inPrograms
+                  ? createHandsTools(host, deps.hands)
+                  : {}),
+                ...(deps.phone ? createPhoneTools(host) : {}),
+                ...(deps.notices && deps.config.value.notices.read
+                  ? createNoticeTools(host, deps.notices)
+                  : {}),
+                // Offered once there is a machine to work on; her instructions say where one is added.
+                ...(deps.fleet && deps.fleet.machines().length > 0
+                  ? createFleetTools(host, deps.fleet)
+                  : {}),
+                ...(deps.ship ? createShipTools(host, deps.ship) : {}),
+              },
+              userAddress,
+            );
       const usual: ChatSessionModelFunctions =
         message.event && !message.correction
           ? {}
           : {
-              ...createTools(host),
-              ...createKnowledgeTools(host),
-              ...(deps.desktop ? createDesktopTools(host, deps.desktop) : {}),
-              ...(deps.hands && deps.config.value.hands.inPrograms
-                ? createHandsTools(host, deps.hands)
-                : {}),
-              ...(deps.phone ? createPhoneTools(host) : {}),
-              ...(deps.notices && deps.config.value.notices.read
-                ? createNoticeTools(host, deps.notices)
-                : {}),
-              // Offered once there is a machine to work on; her instructions say where one is added.
-              ...(deps.fleet && deps.fleet.machines().length > 0
-                ? createFleetTools(host, deps.fleet)
-                : {}),
-              ...(deps.ship ? createShipTools(host, deps.ship) : {}),
+              ...builtInUsual,
               ...(deps.mcp ? createMcpTools(host, deps.mcp) : {}),
             };
       const everyTool = deps.lab?.tools ? deps.lab.tools(usual, host) : usual;
@@ -793,9 +854,6 @@ export class Brain {
       );
       if (signal.aborted) return;
       this.offeredNow = Object.keys(functions);
-      if (this.offeredNow.some((name) => name.startsWith("mcp:"))) {
-        this.mcpSchemaExposed = true;
-      }
       if (hookCtx) hookCtx.offeredTools = [...this.offeredNow];
       // So that a later change to the conversation does not cost reading the
       // instructions again; see the engine.
@@ -895,6 +953,7 @@ export class Brain {
         onScreen,
         turnsSinceTool: this.turnsSinceTool,
         offeredFewer: this.offeredFewer,
+        userAddress: deps.config.value.character.userAddress,
         has: (tool) => Object.hasOwn(everyTool, tool),
         offered: (tool) => Object.hasOwn(functions, tool),
         aborted: () => signal.aborted,
@@ -1057,7 +1116,12 @@ export class Brain {
       // can carry other people's messages along: to say more she has to look again.
       if (this.turnReadUnsaved) {
         try {
-          deps.engine.setHistory(withoutUnsavedResults(deps.engine.getHistory()));
+          deps.engine.setHistory(
+            withoutUnsavedResults(
+              deps.engine.getHistory(),
+              deps.config.value.character.userAddress,
+            ),
+          );
         } catch (error) {
           console.warn("[brain] could not put the notifications out of mind:", error);
         }
@@ -1119,6 +1183,7 @@ export class Brain {
           fixedTokens: Math.max(0, meter.held - historyTokens),
           notesMark: [NOTES_MARK, FORM_MARK],
           fromTheShip: (text) => text.startsWith(EVENT_MARK),
+          userAddress: this.deps.config.value.character.userAddress,
         },
         {
           countTokens: (text) => engine.countTokens(text),
@@ -1237,8 +1302,8 @@ export class Brain {
         workspace: deps.environment.workspace,
         home: deps.environment.home,
         isKnownAddress: (url) => this.knownAddresses.has(Brain.addressKey(url)),
-        // Server-supplied MCP parameter descriptions are untrusted text and taint built-in tools once offered.
-        readOutsideText: this.readOutsideText || this.mcpSchemaExposed,
+        // Taint only on actual outside text / MCP tool results; server descriptions are sanitized instead.
+        readOutsideText: this.readOutsideText,
         protectedFiles: deps.ship ? [deps.ship.deckLogFile] : [],
         // Standing permission to look is for whoever is at the PC.
         maySeeScreen: deps.config.value.sight.withoutAsking && !this.turnAway,
@@ -1352,7 +1417,11 @@ export class Brain {
       // A question raised by a message from another device is not shown on the PC, where
       // whoever is sitting there could wave through something they did not ask for.
       nobodyToAsk: this.turnAway,
-      nobodyToAskReply: NOBODY_AT_THE_PC,
+      nobodyToAskReply: replaceInternalCaptain(
+        NOBODY_AT_THE_PC,
+        deps.config.value.character.userAddress,
+      ),
+      userAddress: () => deps.config.value.character.userAddress,
       ask: async (request) => {
         const allowed = this.turnAway ? false : await this.askUser(request);
         if (!allowed) this.turnRefused = true;

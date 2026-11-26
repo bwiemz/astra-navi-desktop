@@ -86,7 +86,7 @@ internal static class Program
         }
 
         var verb = args[0];
-        var rawStdin = IsStreamingVerb(verb) ? string.Empty : Console.In.ReadToEnd();
+        var rawStdin = SkipsStdinRead(verb) ? string.Empty : Console.In.ReadToEnd();
         using var doc = ParsePayloadDocument(rawStdin);
         try
         {
@@ -101,8 +101,18 @@ internal static class Program
         }
     }
 
-    private static bool IsStreamingVerb(string verb) =>
-        verb is "ping" or "version" or "wasapi-capture" or "notices-monitor";
+    private static bool SkipsStdinRead(string verb) =>
+        verb is "ping"
+            or "version"
+            or "wasapi-capture"
+            or "notices-monitor"
+            or "volume-get"
+            or "gpu-vram"
+            or "layout"
+            or "game-state"
+            or "clipboard-read"
+            or "wasapi-check"
+            or "wasapi-streams";
 
     private static JsonDocument ParsePayloadDocument(string raw)
     {

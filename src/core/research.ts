@@ -5,6 +5,7 @@ import { defineChatSessionFunction, type ChatSessionModelFunctions } from "node-
 import { describeLinks, guarded, type ToolHost, type WebAccess } from "./agentTools.ts";
 import type { ActionLog } from "./actionLog.ts";
 import { calculate } from "./calc.ts";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import type { EngineWorker } from "./engine.ts";
 import { LANGUAGES, type LanguageCode } from "./languages.ts";
 import type { MemoryStore } from "./memory.ts";
@@ -37,6 +38,8 @@ export interface ResearchDeps {
   /** The record of every tool call; her research is written into it too. */
   actions?: ActionLog;
   workspace: string;
+  /** Optional custom user form of address so background research prompts don't say "Captain". */
+  userAddress?(): string;
   onFinished(job: ResearchJob): void;
 }
 
@@ -170,7 +173,10 @@ export class ResearchDesk {
   }
 
   private async work(job: ResearchJob, stopped: AbortSignal): Promise<void> {
-    const worker = await this.deps.openWorker(instructions(this.deps.language()));
+    const userAddr = this.deps.userAddress?.();
+    const worker = await this.deps.openWorker(
+      replaceInternalCaptain(instructions(this.deps.language()), userAddr),
+    );
     if (!worker) throw new Error("Her brain is not loaded, so the research could not start.");
     const signal = AbortSignal.any([
       stopped,
@@ -190,7 +196,8 @@ export class ResearchDesk {
           temperature: 0.4,
           budgets: { thoughtTokens: 512 },
         });
-      const draft = await ask(`Captain's question: ${job.question}`);
+      const questionPrefix = replaceInternalCaptain("Captain's question:", userAddr);
+      const draft = await ask(`${questionPrefix} ${job.question}`);
       if (signal.aborted) {
         throw new Error(
           stopped.aborted

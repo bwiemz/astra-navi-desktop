@@ -780,8 +780,18 @@ export class LocalEngine {
     );
   }
 
+  /** Aborts and awaits all active background workers / side questions (e.g. research jobs). */
+  private async stopSideWorks(): Promise<void> {
+    const works = [...this.sideWorks];
+    for (const work of works) work.stop.abort();
+    await Promise.all(works.map((work) => work.done));
+  }
+
   /** Switches between built-in local GGUF and an optional OpenAI-compatible server without losing history. */
   async setInferenceBackend(inference: InferenceBackendConfig): Promise<void> {
+    // Stop any running remote/local research workers immediately so switching back to local
+    // never lets an existing remote job keep sending prompts or tool results off-machine.
+    await this.stopSideWorks();
     if (this.remoteSession && !this.remoteStale) {
       this.history = this.remoteSession.getChatHistory().filter((item) => item.type !== "system");
     }
@@ -793,6 +803,8 @@ export class LocalEngine {
       await this.unload();
       const loc = this.inferenceLocality();
       this.options.onStatus({ stage: "ready", label: loc.label });
+    } else if (this.resting) {
+      this.restingNow();
     }
   }
 
@@ -1252,6 +1264,7 @@ export class LocalEngine {
           } finally {
             this.sideWorks.delete(entry);
             finish();
+            if (this.resting) this.restingNow();
           }
         },
       };
@@ -1400,9 +1413,7 @@ export class LocalEngine {
     if (this.bgDownloadPromise) await this.bgDownloadPromise.catch(() => undefined);
     if (this.loading) await this.loading.catch(() => undefined);
     // Whoever owns a piece of side work closes it when told to stop; wait for that.
-    const works = [...this.sideWorks];
-    for (const work of works) work.stop.abort();
-    await Promise.all(works.map((work) => work.done));
+    await this.stopSideWorks();
     if (this.remoteSession && !this.remoteStale) {
       this.history = this.remoteSession.getChatHistory().filter((item) => item.type !== "system");
     }

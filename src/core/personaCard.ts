@@ -26,34 +26,53 @@ export interface ImportedPersonaCard {
   creator?: string;
 }
 
-/** Removes control chars, BiDi overrides, ChatML/tool markup, and mood-tag spoofing. */
+/**
+ * Removes control chars, invisible Unicode tag characters (`U+E0000–U+E007F`), zero-width
+ * & BiDi overrides, ChatML/tool/system markup (iterated to fixed point so nested tags
+ * cannot reconstruct delimiters), and `[[mood]]` spoofing.
+ */
 export function sanitizePersonaText(raw: string, maxChars: number): string {
-  let cleaned = "";
-  for (let i = 0; i < raw.length; i += 1) {
-    const code = raw.charCodeAt(i);
+  const safeMax = Math.max(0, maxChars);
+  if (safeMax === 0 || !raw) return "";
+  // Pre-slice before stripping so adversarial huge strings stay O(safeMax).
+  const preLimit = Math.max(2048, safeMax * 4);
+  const bounded = raw.length > preLimit ? raw.slice(0, preLimit) : raw;
+  const chars: string[] = [];
+  for (const ch of bounded) {
+    const cp = ch.codePointAt(0) ?? 0;
     if (
-      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
-      code === 0x7f ||
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069)
+      (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d) ||
+      cp === 0x7f ||
+      cp === 0x00ad ||
+      cp === 0x034f ||
+      cp === 0x061c ||
+      cp === 0x180e ||
+      (cp >= 0x200b && cp <= 0x200f) ||
+      (cp >= 0x202a && cp <= 0x202e) ||
+      (cp >= 0x2060 && cp <= 0x206f) ||
+      cp === 0xfeff ||
+      (cp >= 0xe0000 && cp <= 0xe007f)
     ) {
       continue;
     }
-    cleaned += raw[i] ?? "";
+    chars.push(ch);
   }
-  const neutralized = cleaned
-    .replaceAll("<|im_start|>", "")
-    .replaceAll("<|im_end|>", "")
-    .replaceAll("<tool_call>", "")
-    .replaceAll("</tool_call>", "")
-    .replaceAll("<tool_response>", "")
-    .replaceAll("</tool_response>", "")
-    .replace(/<function=[^>]*>/gi, "")
-    .replaceAll("[[", "[")
-    .replaceAll("]]", "]")
-    .replace(/\s+/g, " ")
-    .trim();
-  return neutralized.length > maxChars ? neutralized.slice(0, maxChars).trim() : neutralized;
+  let neutralized = chars.join("");
+  // Iterate to fixed point so nested payloads like `<tool_<tool_call>call>` or `<|im_<|im_start|>start|>` vanish.
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = neutralized
+      .replaceAll("<|im_start|>", "")
+      .replaceAll("<|im_end|>", "")
+      .replace(/<\/?(?:tool_call|tool_response|system|memories|assistant|user)[^>]{0,256}>/gi, "")
+      .replace(/<function=[^>]{0,256}>/gi, "")
+      .replaceAll("[[", "[")
+      .replaceAll("]]", "]")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (next === neutralized) break;
+    neutralized = next;
+  }
+  return neutralized.length > safeMax ? neutralized.slice(0, safeMax).trim() : neutralized;
 }
 
 function asString(value: unknown): string {

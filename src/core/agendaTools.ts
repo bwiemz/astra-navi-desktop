@@ -7,6 +7,7 @@ import {
   type Occurrence,
 } from "./agenda.ts";
 import { guarded, type ToolHost } from "./agentTools.ts";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { TOOLS } from "./permissions.ts";
 
 /** The longest stretch she may ask for at once. */
@@ -106,7 +107,11 @@ export function createAgendaTools(
     } catch (error) {
       return `Nothing was removed: ${error instanceof Error ? error.message : "it could not be saved."}`;
     }
-    return `Nothing was removed: no entry of your own has the id ${id.slice(0, 40)}. Only your own entries (the ones with an id in [brackets]) can be removed; what is in Captain's calendars is changed by Captain, in their calendar.`;
+    const tail = replaceInternalCaptain(
+      "Only your own entries (the ones with an id in [brackets]) can be removed; what is in Captain's calendars is changed by Captain, in their calendar.",
+      host.userAddress?.(),
+    );
+    return `Nothing was removed: no entry of your own has the id ${id.slice(0, 40)}. ${tail}`;
   };
 
   return {

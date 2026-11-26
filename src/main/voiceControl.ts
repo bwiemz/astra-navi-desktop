@@ -257,7 +257,11 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         if (process.env["AI_CHAN_DEBUG"]) console.log(`[debug] heard: ${JSON.stringify(text)}`);
         let said = text;
         if (nameRequired()) {
-          const rest = afterWakeName(text, deps.config.value.voice.otherNames);
+          const rest = afterWakeName(
+            text,
+            deps.config.value.voice.otherNames,
+            deps.config.value.character.displayName,
+          );
           // Not addressed to her, and not a follow-up to what she just said: not for her.
           if (rest === null && !conversationOpen()) return;
           if (rest !== null) {

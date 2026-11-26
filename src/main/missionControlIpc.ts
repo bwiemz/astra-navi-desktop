@@ -424,10 +424,12 @@ export function createMissionControlIpc(deps: MissionControlDeps): MissionContro
           const updated = await memStore.update(input.id, cleanText);
           if (!updated) return { ok: false, message: "Memory entry not found." };
           void deps.recall()?.warm().catch(() => undefined);
+          deps.brain()?.markInstructionsDirty();
           return { ok: true, message: "Updated memory entry." };
         }
         const saved = await memStore.save({ kind: input.kind, text: cleanText });
         void deps.recall()?.warm().catch(() => undefined);
+        deps.brain()?.markInstructionsDirty();
         return { ok: true, message: saved.merged ? "Merged into existing memory." : "Saved new memory." };
       },
     );
@@ -440,6 +442,7 @@ export function createMissionControlIpc(deps: MissionControlDeps): MissionContro
         if (!memStore) return { ok: false, message: "Memory store unavailable." };
         const updated = await memStore.pin(id, Boolean(pinned));
         if (!updated) return { ok: false, message: "Memory entry not found." };
+        deps.brain()?.markInstructionsDirty();
         return { ok: true, message: updated.pinned ? "Pinned memory." : "Unpinned memory." };
       },
     );
@@ -451,7 +454,10 @@ export function createMissionControlIpc(deps: MissionControlDeps): MissionContro
         const memStore = deps.memoryStore();
         if (!memStore) return { ok: false, message: "Memory store unavailable." };
         const removed = await memStore.forget(id);
-        if (removed) deps.recall()?.drop([id]);
+        if (removed) {
+          deps.recall()?.drop([id]);
+          deps.brain()?.markInstructionsDirty();
+        }
         return { ok: removed, message: removed ? "Deleted memory entry." : "Memory entry not found." };
       },
     );

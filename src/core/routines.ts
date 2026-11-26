@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 
 /**
  * Noticing habits. Each time she does a kind of task she already has a note for, the
@@ -139,6 +140,10 @@ export class RoutineWatch {
 }
 
 /** What she is told when a routine shows up, so she can offer it in her own words. */
-export function describeRoutine(routine: Routine): string {
-  return `You have noticed a habit. On ${routine.days} different days in the last two weeks, around ${routine.usualTime}, Captain asked you to: "${routine.title}". Mention that you noticed, and offer, in one or two sentences, to remind them about it every day at that time. Ask; do not assume. If they say yes, set a daily reminder then.`;
+export function describeRoutine(routine: Routine, userAddress?: string): string {
+  const lead = replaceInternalCaptain(
+    `You have noticed a habit. On ${routine.days} different days in the last two weeks, around ${routine.usualTime}, Captain asked you to:`,
+    userAddress,
+  );
+  return `${lead} "${routine.title}". Mention that you noticed, and offer, in one or two sentences, to remind them about it every day at that time. Ask; do not assume. If they say yes, set a daily reminder then.`;
 }

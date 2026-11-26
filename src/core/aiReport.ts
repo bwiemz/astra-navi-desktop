@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { withoutSecrets } from "./secrets.ts";
+import { redactSupportText } from "./supportBundle.ts";
 
 /**
  * In-App AI Output Reporting (Microsoft Store Policy 11.16 compliance & local safety triage).
@@ -53,14 +53,30 @@ export interface AiOutputReportRecord {
   userPromptExcerpt: string | null;
 }
 
-function scrub(text: string, maxChars: number, extraSecrets?: readonly string[]): string {
-  let clean = withoutSecrets(text);
-  for (const literal of extraSecrets ?? []) {
-    const trimmed = literal.trim();
-    if (trimmed.length >= 6) {
-      clean = clean.split(trimmed).join("[redacted]");
-    }
+/**
+ * Reduces any custom local GGUF file path (e.g. `C:\Users\JaneDoe\models\MyModel.gguf`)
+ * to its safe filename only, preventing OS usernames or host directories from leaking
+ * into saved reports or pre-filled GitHub issue URLs.
+ */
+export function safeBrainLabel(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "Unknown";
+  if (
+    /^[A-Za-z]:[\\/]/.test(trimmed) ||
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("\\\\") ||
+    trimmed.includes("\\") ||
+    trimmed.toLowerCase().endsWith(".gguf")
+  ) {
+    const parts = trimmed.split(/[\\/]+/).filter(Boolean);
+    const file = parts[parts.length - 1];
+    if (file) return file;
   }
+  return trimmed;
+}
+
+function scrub(text: string, maxChars: number, extraSecrets?: readonly string[]): string {
+  const clean = redactSupportText(text, extraSecrets ?? []).text;
   return clean.replace(/\s+/g, " ").trim().slice(0, maxChars);
 }
 
@@ -84,7 +100,7 @@ export function buildAiOutputReport(input: AiOutputReportInput): AiOutputReportR
     privacyNotice:
       "Saved locally only by Astra Navi Desktop. Never transmitted unless you choose to file a report.",
     appVersion: input.appVersion,
-    brainLabel: scrub(input.brainLabel || "Unknown", 120, input.extraSecrets),
+    brainLabel: scrub(safeBrainLabel(input.brainLabel || "Unknown"), 120, input.extraSecrets),
     inferenceScope: scrub(input.inferenceScope || "local-gguf", 64, input.extraSecrets),
     category,
     categoryLabel: AI_REPORT_CATEGORY_LABELS[category],

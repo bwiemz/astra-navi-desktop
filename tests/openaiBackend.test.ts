@@ -12,6 +12,7 @@ import {
   describeInferenceLocality,
   OpenAiCompatibleSession,
   openAiSideQuestion,
+  parseClaimDecisionScore,
   probeOpenAiModels,
   type InferenceBackendConfig,
 } from "../src/core/openaiBackend.ts";
@@ -542,5 +543,116 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it("allows common local/LAN/Docker/Tailscale http endpoints, aborts remote workers when switching back to local, and handles long replies + thinking tags in decide()", async () => {
+    // 1. Common local setups MUST be classified as private-lan and allowed over http://.
+    for (const url of [
+      "http://gpu-box:11434/v1",
+      "http://nas.home:11434/v1",
+      "http://host.docker.internal:11434/v1",
+      "http://mac-studio.tail1234.ts.net:11434/v1",
+      "http://workstation.local:8080/v1",
+      "http://server.lan:1234/v1",
+    ]) {
+      const res = classifyInferenceEndpoint(url);
+      expect(res.ok, `Expected ${url} to be accepted`).toBe(true);
+      if (res.ok) expect(res.scope).toBe("private-lan");
+    }
+    // Public internet & cloud metadata over plaintext http:// MUST stay rejected!
+    for (const blocked of [
+      "http://api.openai.com/v1",
+      "http://8.8.8.8:8080/v1",
+      "http://metadata.google.internal/v1",
+      "http://metadata/v1",
+      "http://169.254.169.254/v1",
+    ]) {
+      expect(classifyInferenceEndpoint(blocked).ok, `Expected ${blocked} to be rejected`).toBe(false);
+    }
+
+    // 2. Claim-check parser handles `<think>...</think>` and rejects `"nope, yes"` / `"yes, no"`!
+    expect(
+      parseClaimDecisionScore('<think>The reply claimed a timer was set.</think>\n{"claimed": 0.94}'),
+    ).toBeCloseTo(0.94, 2);
+    expect(parseClaimDecisionScore('{"claimed": "nope, yes"}')).toBeNull();
+    expect(parseClaimDecisionScore('{"claimed": "yes, no"}')).toBeNull();
+    expect(parseClaimDecisionScore('{"claimed": "yes"}')).toBe(1);
+    expect(parseClaimDecisionScore('{"claimed": "no"}')).toBe(0);
+
+    // 3. decide() inspects claims at the END of long (>3000 char) replies and grants >= 256 max_tokens.
+    let seenDecideBody: { max_tokens?: number; messages?: { role: string; content: string }[] } | null = null;
+    const mockFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      seenDecideBody = JSON.parse(String(init?.body ?? "{}")) as typeof seenDecideBody;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '<think>Saw claim at end.</think>{"claimed": 0.88}' } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const session = new OpenAiCompatibleSession(
+      {
+        provider: "openai-compatible",
+        preset: "ollama",
+        baseUrl: "http://gpu-box:11434/v1",
+        model: "qwen3.5:9b",
+        apiKey: "",
+      },
+      "You are Astra.",
+      mockFetch,
+    );
+    const longReply = `${"Introductory explanation. ".repeat(120)} All done — I have set your 10 minute timer!`;
+    session.setChatHistory([
+      { type: "system", text: "You are Astra." },
+      { type: "user", text: "Set a 10 minute timer" },
+      { type: "model", response: [longReply] },
+    ]);
+    const decision = await session.decide(CLAIM_CHECK);
+    expect(decision.claimed.value).toBeCloseTo(0.88, 2);
+    const decideBody = seenDecideBody as unknown as {
+      max_tokens?: number;
+      messages?: { role: string; content: string }[];
+    } | null;
+    expect(decideBody?.max_tokens).toBeGreaterThanOrEqual(256);
+    const userMsg = decideBody?.messages?.find((m) => m.role === "user")?.content ?? "";
+    expect(userMsg).toContain("I have set your 10 minute timer!");
+
+    // 4. Switching LocalEngine back to "local" MUST immediately abort active remote workers!
+    const modelsDir = await makeTempDir("astra-oai-switch-");
+    const engine = new LocalEngine({
+      modelsDir,
+      choice: "standard",
+      contextSize: 8192,
+      idleUnloadMs: 0,
+      inference: {
+        provider: "openai-compatible",
+        preset: "ollama",
+        baseUrl: "http://gpu-box:11434/v1",
+        model: "qwen3.5:9b",
+        apiKey: "",
+      },
+      fetchImpl: mockFetch,
+      onStatus: () => undefined,
+    });
+    const worker = await engine.openWorker("Research assistant");
+    expect(worker).not.toBeNull();
+    let closedOnAbort = false;
+    worker?.signal.addEventListener("abort", () => {
+      closedOnAbort = true;
+      void worker.close();
+    });
+    expect(worker?.signal.aborted).toBe(false);
+
+    await engine.setInferenceBackend({
+      provider: "local",
+      preset: "ollama",
+      baseUrl: "http://gpu-box:11434/v1",
+      model: "qwen3.5:9b",
+      apiKey: "",
+    });
+    expect(worker?.signal.aborted).toBe(true);
+    expect(closedOnAbort).toBe(true);
+    await engine.dispose();
   });
 });

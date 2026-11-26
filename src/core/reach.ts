@@ -176,6 +176,7 @@ export class Reach {
     const { deps, hands } = this;
     const adapter = deps.adapter;
     const watch = new ScreenWatch({
+      userAddress: () => deps.config.value.character.userAddress,
       follow: adapter
         ? async (listener) => {
             let stopped = false;

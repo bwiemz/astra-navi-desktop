@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { isStatusCommand } from "./fleetRules.ts";
 import type { HerStore } from "./store.ts";
 import { firstCharacters, hasUnseen, withoutUnseen } from "./unseen.ts";
@@ -414,6 +415,7 @@ export interface OrderDeps {
     plain: string;
     reason?: "matched" | "expired" | "stopped";
   }): void;
+  userAddress?(): string;
   now?(): Date;
 }
 
@@ -609,9 +611,14 @@ export class StandingOrders {
       if (now.getTime() >= Date.parse(order.expiresAt)) {
         this.orders = this.orders.filter((entry) => entry.id !== order.id);
         await this.save();
+        const userAddr = this.deps.userAddress?.();
+        const tellExpired = replaceInternalCaptain(
+          "Tell Captain, and that they can ask you to watch again.",
+          userAddr,
+        );
         this.deps.onNews({
           order,
-          text: `Your standing order "${order.title}" has run for a week without the thing happening, so you have stopped watching. Tell Captain, and that they can ask you to watch again.`,
+          text: `Your standing order "${order.title}" has run for a week without the thing happening, so you have stopped watching. ${tellExpired}`,
           outside: "",
           plain: `Standing order "${order.title}": a week has passed without it happening, so it is no longer being watched.`,
           reason: "expired",
@@ -652,9 +659,14 @@ export class StandingOrders {
     if (!allowed) {
       this.looking.delete(id);
       if (await this.cancel(id)) {
+        const userAddr = this.deps.userAddress?.();
+        const stoppedTail = replaceInternalCaptain(
+          "its check is no longer one you may make without asking Captain (what it looks at has changed). Tell Captain it is no longer being watched.",
+          userAddr,
+        );
         this.deps.onNews({
           order,
-          text: `You have stopped your standing order "${order.title}": its check is no longer one you may make without asking Captain (what it looks at has changed). Tell Captain it is no longer being watched.`,
+          text: `You have stopped your standing order "${order.title}": ${stoppedTail}`,
           outside: "",
           plain: `Standing order "${order.title}" has been stopped: what its check looks at has changed, so it may no longer be made without asking you.`,
           reason: "stopped",
@@ -683,9 +695,12 @@ export class StandingOrders {
       }
       await this.save();
       if (news) {
+        const userAddr = this.deps.userAddress?.();
+        const watchingLead = replaceInternalCaptain("You were keeping watch for Captain:", userAddr);
+        const tellPlain = replaceInternalCaptain("Tell Captain plainly.", userAddr);
         this.deps.onNews({
           order: current,
-          text: `You were keeping watch for Captain: "${current.title}". It has happened: ${describeCondition(current)} (the check was to ${describeCheck(current.check)}).${current.repeat ? " You are still watching." : " That standing order is now finished."} Tell Captain plainly.`,
+          text: `${watchingLead} "${current.title}". It has happened: ${describeCondition(current)} (the check was to ${describeCheck(current.check)}).${current.repeat ? " You are still watching." : " That standing order is now finished."} ${tellPlain}`,
           outside: excerpt(reading.text),
           plain: `Standing order "${current.title}": it has happened (${describeCondition(current)}).${current.repeat ? " Still watching." : ""}`,
           reason: "matched",

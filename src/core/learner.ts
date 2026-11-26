@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import type { Memory, MemoryStore } from "./memory.ts";
 import { TOOLS } from "./permissions.ts";
 import { onlyNew, type Recall } from "./recall.ts";
@@ -45,6 +46,8 @@ export interface LearnerDeps {
   journalFile: string;
   /** How long after her last reply she waits before writing things up. */
   quietMs: number;
+  /** Optional active user form of address so learned notes don't say "Captain" when customized. */
+  userAddress?(): string;
   onLearned?(learned: Learned): void;
 }
 
@@ -99,7 +102,7 @@ const FIRST_PERSON = /\b(?:i|i'm|i've|i'll|my|we|we're|our)\b|私|僕|俺|我/i;
 const STATES_A_PREFERENCE =
   /\b(?:prefer|like|love|hate|dislike|favou?rite|always|never|can't stand|rather)\b|好き|嫌い|苦手|いつも|喜欢|讨厌|总是|從不|从不|习惯|習慣/i;
 /** How many facts picked up by herself are kept; the oldest go first. Ones the user asked her to keep are never dropped. */
-const MAX_LEARNED_FACTS = 40;
+export const MAX_LEARNED_FACTS = 40;
 const ABOUT_THE_USER = ["profile", "preference", "project"] as const;
 
 const TurnSchema = z.object({
@@ -346,7 +349,9 @@ export class Learner {
   ): Promise<Learned | null> {
     try {
       const said = batch.map((turn) => turn.said).join(" ");
-      const answer = await this.deps.ask(INSTRUCTIONS, await this.describe(batch, said), signal);
+      const userAddress = this.deps.userAddress?.();
+      const instructions = replaceInternalCaptain(INSTRUCTIONS, userAddress);
+      const answer = await this.deps.ask(instructions, await this.describe(batch, said), signal);
       if (process.env["AI_CHAN_DEBUG"]) console.log(`[learner] write-up:\n${answer ?? "(none)"}`);
       if (signal.aborted || answer === null) return null;
       const writeUp = parseWriteUp(answer);
@@ -477,18 +482,22 @@ export class Learner {
       .slice(0, 3)
       .map((entry) => `- "${entry.memory.text}": ${entry.memory.points.join("; ")}`);
 
+    const userAddress = this.deps.userAddress?.();
+    const speakerLabel =
+      userAddress === undefined || userAddress.trim() === "Captain" ? "Captain" : "User";
+    const aboutHeader = replaceInternalCaptain("Already known about Captain:", userAddress);
     const lines = [
       `Known topics: ${names("topic")}`,
       `Known tasks: ${names("skill")}`,
       ...(related.length > 0
         ? ["Steps noted so far for tasks that may be coming up again:", ...related]
         : []),
-      ...(known.length > 0 ? ["Already known about Captain:", ...known] : []),
+      ...(known.length > 0 ? [aboutHeader, ...known] : []),
       "",
       "The conversation:",
     ];
     for (const turn of batch) {
-      lines.push(`Captain: ${turn.said}`);
+      lines.push(`${speakerLabel}: ${turn.said}`);
       for (const record of turn.did) {
         // An action whose details were not kept is left out: there is nothing to learn from it.
         if (!record.detail) continue;

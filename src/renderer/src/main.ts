@@ -1697,10 +1697,6 @@ function wireEmotePopover(): void {
   }
 
   if (stopClipBtn) {
-    stage?.setOnMotionClipEnded(() => {
-      stopClipBtn.hidden = true;
-      if (statusEl) statusEl.textContent = "Clip finished — returned to idle loop.";
-    });
     stopClipBtn.addEventListener("click", () => {
       stage?.stopMotionClip();
       stopClipBtn.hidden = true;
@@ -1796,6 +1792,12 @@ async function start(): Promise<void> {
   standIn.hidden = false;
   try {
     stage = await Stage.create(canvas);
+    stage.setOnMotionClipEnded(() => {
+      const stopClipBtn = document.getElementById("emote-stop-clip") as HTMLButtonElement | null;
+      const statusEl = document.getElementById("emote-status");
+      if (stopClipBtn) stopClipBtn.hidden = true;
+      if (statusEl) statusEl.textContent = "Clip finished — returned to idle loop.";
+    });
   } catch (error) {
     console.error(error);
     bridge.reportModelError(error instanceof Error ? error.message : String(error));

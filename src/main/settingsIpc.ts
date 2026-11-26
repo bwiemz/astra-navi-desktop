@@ -156,6 +156,32 @@ export function resolveProbeApiKey(
   }
 }
 
+/**
+ * Resolves the persisted API key when saving inference settings: if the server URL
+ * changes to a different origin (or is cleared) without an explicit new API key in the
+ * same save, clears the old provider's saved key so real chat traffic never sends it
+ * to the new host.
+ */
+export function resolveSavedInferenceApiKey(
+  prevBaseUrl: string,
+  prevApiKey: string,
+  nextBaseUrl: string,
+  patchApiKey: string | undefined,
+): string {
+  if (patchApiKey !== undefined) return patchApiKey.trim();
+  const prevTrimmed = prevBaseUrl.trim();
+  const nextTrimmed = nextBaseUrl.trim();
+  if (!nextTrimmed) return "";
+  if (!prevTrimmed) return prevApiKey;
+  try {
+    const prevOrigin = new URL(prevTrimmed).origin;
+    const nextOrigin = new URL(nextTrimmed).origin;
+    return prevOrigin === nextOrigin ? prevApiKey : "";
+  } catch {
+    return prevTrimmed === nextTrimmed ? prevApiKey : "";
+  }
+}
+
 export interface SettingsController {
   settingsWindow(): BrowserWindow | null;
   fromSettingsWindow(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean;
@@ -163,6 +189,7 @@ export interface SettingsController {
   openSettings(): void;
   registerSettingsIpc(): void;
   exportSupportBundle(): Promise<SupportBundleResultView>;
+  stationUsername(): string | null;
   sendDownloadProgress(status: ModelDownloadStatusView): void;
   setWatching(on: boolean): Promise<void>;
   setHearingPc(on: boolean): Promise<void>;
@@ -385,15 +412,19 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       },
       vision: (() => {
         const st = deps.visionSidecar?.()?.status();
+        const ready = Boolean(st?.modelReady && st?.mmprojReady);
         return {
           nativeVision: config.value.sight.nativeVision,
           llamaServerPath: config.value.sight.llamaServerPath,
           visionEndpoint: config.value.sight.visionEndpoint,
           available: st?.available ?? false,
           mode: st?.mode ?? "unavailable",
-          mmprojReady: st?.mmprojReady ?? false,
-          mmprojFileName: st?.mmprojDownload?.fileName ?? null,
-          mmprojSizeBytes: st?.mmprojDownload?.sizeBytes ?? null,
+          mmprojReady: ready,
+          mmprojFileName:
+            st?.modelSource === "dedicated"
+              ? st.modelLabel
+              : (st?.mmprojDownload?.fileName ?? null),
+          mmprojSizeBytes: st?.downloadTotalBytes ?? st?.mmprojDownload?.sizeBytes ?? null,
           binaryFound: st?.binaryPath !== null && st?.binaryPath !== undefined,
           reason: st?.reason ?? "Local vision sidecar status unavailable.",
         };
@@ -520,16 +551,26 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     }
 
     const nextInference = patch.inference
-      ? {
-          ...config.value.inference,
-          ...(patch.inference.provider !== undefined ? { provider: patch.inference.provider } : {}),
-          ...(patch.inference.preset !== undefined ? { preset: patch.inference.preset } : {}),
-          ...(patch.inference.baseUrl !== undefined
-            ? { baseUrl: patch.inference.baseUrl.trim() }
-            : {}),
-          ...(patch.inference.model !== undefined ? { model: patch.inference.model.trim() } : {}),
-          ...(patch.inference.apiKey !== undefined ? { apiKey: patch.inference.apiKey.trim() } : {}),
-        }
+      ? (() => {
+          const nextBaseUrl =
+            patch.inference.baseUrl !== undefined
+              ? patch.inference.baseUrl.trim()
+              : config.value.inference.baseUrl;
+          const nextApiKey = resolveSavedInferenceApiKey(
+            config.value.inference.baseUrl,
+            config.value.inference.apiKey,
+            nextBaseUrl,
+            patch.inference.apiKey,
+          );
+          return {
+            ...config.value.inference,
+            ...(patch.inference.provider !== undefined ? { provider: patch.inference.provider } : {}),
+            ...(patch.inference.preset !== undefined ? { preset: patch.inference.preset } : {}),
+            baseUrl: nextBaseUrl,
+            ...(patch.inference.model !== undefined ? { model: patch.inference.model.trim() } : {}),
+            apiKey: nextApiKey,
+          };
+        })()
       : undefined;
     if (nextInference && nextInference.baseUrl !== "") {
       const checked = classifyInferenceEndpoint(nextInference.baseUrl);
@@ -756,6 +797,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       patch.llamaServerPath !== undefined ||
       patch.visionEndpoint !== undefined
     ) {
+      deps.visionSidecar?.()?.resetBackoff();
       void deps.visionSidecar?.()?.dispose().catch(() => undefined);
     }
     if (patch.voice !== undefined) {
@@ -1511,6 +1553,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     openSettings,
     registerSettingsIpc,
     exportSupportBundle: exportSupportBundleNow,
+    stationUsername: () => stationAccount()?.username ?? null,
     sendDownloadProgress,
     setWatching,
     setHearingPc,

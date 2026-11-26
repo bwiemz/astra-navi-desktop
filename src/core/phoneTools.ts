@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { defineChatSessionFunction, type ChatSessionModelFunctions } from "node-llama-cpp";
 import { guarded, type ToolHost } from "./agentTools.ts";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { resolveToolPath, TOOLS } from "./permissions.ts";
 import {
   isWebLink,
@@ -79,7 +80,10 @@ export function createPhoneTools(
           if (input.action === "list") {
             // Their own devices, named by them: nothing here was written by a stranger.
             if (phones.length === 0) {
-              return "There is no phone paired with this computer yet. Captain pairs one in KDE Connect (System Settings, KDE Connect) with the KDE Connect app on the phone.";
+              return replaceInternalCaptain(
+                "There is no phone paired with this computer yet. Captain pairs one in KDE Connect (System Settings, KDE Connect) with the KDE Connect app on the phone.",
+                host.userAddress?.(),
+              );
             }
             return `Paired devices:\n${phones.map(describePhone).join("\n")}`;
           }

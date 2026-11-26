@@ -30,6 +30,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_RECONNECT_BASE_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_MS = 30_000;
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
+const DEFAULT_STABLE_CONNECTION_MS = 30_000;
 
 const BLOCKED_METADATA_HOSTS = new Set([
   "169.254.169.254",
@@ -72,43 +73,63 @@ const FORBIDDEN_ENV_KEYS = new Set([
 
 const SAFE_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
-/** Strips control characters, bidi overrides, and companion `[[...]]` mood markers. */
+/** Strips control, zero-width, Unicode tag, BiDi override characters, and `[[...]]` mood markers. */
 function sanitizeUntrustedText(raw: string, collapseWhitespace: boolean): string {
-  let cleaned = "";
-  for (let i = 0; i < raw.length; i += 1) {
-    const code = raw.charCodeAt(i);
+  const parts: string[] = [];
+  for (const ch of raw) {
+    const cp = ch.codePointAt(0) ?? 0;
     if (
-      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
-      code === 0x7f ||
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069)
+      (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d) ||
+      cp === 0x7f ||
+      cp === 0x00ad ||
+      cp === 0x034f ||
+      cp === 0x061c ||
+      cp === 0x180e ||
+      (cp >= 0x200b && cp <= 0x200f) ||
+      (cp >= 0x202a && cp <= 0x202e) ||
+      (cp >= 0x2060 && cp <= 0x206f) ||
+      cp === 0xfeff ||
+      (cp >= 0xe0000 && cp <= 0xe007f)
     ) {
       continue;
     }
-    if (collapseWhitespace && (code === 0x09 || code === 0x0a || code === 0x0d)) {
-      cleaned += " ";
+    if (collapseWhitespace && (cp === 0x09 || cp === 0x0a || cp === 0x0d)) {
+      parts.push(" ");
     } else {
-      cleaned += raw[i] ?? "";
+      parts.push(ch);
     }
   }
-  const withoutMood = cleaned.replaceAll("[[", "[").replaceAll("]]", "]");
+  const withoutMood = parts.join("").replaceAll("[[", "[").replaceAll("]]", "]");
   return collapseWhitespace ? withoutMood.replace(/\s+/g, " ").trim() : withoutMood;
 }
 
 /**
  * Aggressively sanitizes server-supplied MCP tool & parameter descriptions before they
- * enter the model prompt/tool schema: strips control/BiDi chars, ChatML delimiters,
- * XML tool/system/memory tags, and mood markers.
+ * enter the model prompt/tool schema: bounds input BEFORE regex stripping (preventing
+ * quadratic regex backtracking on huge descriptions), strips control/zero-width/Unicode-tag/
+ * BiDi chars, ChatML delimiters, XML tool/system/memory tags (iterated to fixed point),
+ * and mood markers.
  */
 export function sanitizeMcpMetadataText(raw: string, maxChars = MAX_TOOL_DESCRIPTION_CHARS): string {
-  const base = sanitizeUntrustedText(raw, true)
-    .replaceAll("<|im_start|>", "")
-    .replaceAll("<|im_end|>", "")
-    .replace(/<\/?(?:tool_call|tool_response|system|memories|assistant|user)[^>]*>/gi, "")
-    .replace(/<function=[^>]*>/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return base.length > maxChars ? `${base.slice(0, maxChars).trim()}…` : base;
+  const safeMax = Math.max(16, maxChars);
+  // Pre-slice before running regexes so adversarial 200K+ descriptions stay O(safeMax).
+  const preLimit = Math.max(1024, safeMax * 4);
+  const clipped = raw.length > preLimit ? raw.slice(0, preLimit) : raw;
+  let cleaned = sanitizeUntrustedText(clipped, true);
+  for (let pass = 0; pass < 6; pass += 1) {
+    const next = cleaned
+      .replaceAll("<|im_start|>", "")
+      .replaceAll("<|im_end|>", "")
+      .replace(/<\/?(?:tool_call|tool_response|system|memories|assistant|user)[^>]{0,256}>/gi, "")
+      .replace(/<function=[^>]{0,256}>/gi, "")
+      .replaceAll("[[", "[")
+      .replaceAll("]]", "]")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (next === cleaned) break;
+    cleaned = next;
+  }
+  return cleaned.length > safeMax ? `${cleaned.slice(0, safeMax).trim()}…` : cleaned;
 }
 
 /**
@@ -1024,6 +1045,8 @@ export interface McpHubOptions {
   reconnectMaxMs?: number;
   /** Maximum consecutive automatic reconnect attempts after a crash (default 5; 0 disables). */
   maxReconnectAttempts?: number;
+  /** How long a server must stay connected before resetting consecutive crash backoff (default 30000ms). */
+  stableConnectionMs?: number;
 }
 
 /** Multi-server MCP coordinator integrated with `permissions.ts` and `semanticBridge.ts`. */
@@ -1032,15 +1055,18 @@ export class McpHub {
   private readonly configSnapshots = new Map<string, string>();
   private readonly lastErrors = new Map<string, string>();
   private readonly reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly stableTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly reconnectAttempts = new Map<string, number>();
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
   private readonly maxReconnectAttempts: number;
+  private readonly stableConnectionMs: number;
 
   constructor(options: McpHubOptions = {}) {
     this.reconnectBaseMs = Math.max(10, options.reconnectBaseMs ?? DEFAULT_RECONNECT_BASE_MS);
     this.reconnectMaxMs = Math.max(this.reconnectBaseMs, options.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS);
     this.maxReconnectAttempts = Math.max(0, options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS);
+    this.stableConnectionMs = Math.max(50, options.stableConnectionMs ?? DEFAULT_STABLE_CONNECTION_MS);
   }
 
   private clearReconnectTimer(serverId: string): void {
@@ -1051,6 +1077,27 @@ export class McpHub {
     }
   }
 
+  private clearStableTimer(serverId: string): void {
+    const timer = this.stableTimers.get(serverId);
+    if (timer) {
+      clearTimeout(timer);
+      this.stableTimers.delete(serverId);
+    }
+  }
+
+  private scheduleStabilityReset(serverId: string, client: McpClient): void {
+    this.clearStableTimer(serverId);
+    if (!this.reconnectAttempts.has(serverId)) return;
+    const timer = setTimeout(() => {
+      this.stableTimers.delete(serverId);
+      if (this.clients.get(serverId) === client && client.isConnected) {
+        this.reconnectAttempts.delete(serverId);
+      }
+    }, this.stableConnectionMs);
+    timer.unref?.();
+    this.stableTimers.set(serverId, timer);
+  }
+
   private scheduleReconnect(serverId: string): void {
     if (this.maxReconnectAttempts <= 0) return;
     const client = this.clients.get(serverId);
@@ -1058,7 +1105,16 @@ export class McpHub {
     if (this.reconnectTimers.has(serverId)) return;
 
     const attempt = (this.reconnectAttempts.get(serverId) ?? 0) + 1;
-    if (attempt > this.maxReconnectAttempts) return;
+    if (attempt > this.maxReconnectAttempts) {
+      const prev = this.lastErrors.get(serverId) ?? "Server disconnected.";
+      if (!prev.includes("auto-reconnect paused")) {
+        this.lastErrors.set(
+          serverId,
+          `${prev} (auto-reconnect paused after ${this.maxReconnectAttempts} consecutive crashes; reconnect manually in Settings)`,
+        );
+      }
+      return;
+    }
     this.reconnectAttempts.set(serverId, attempt);
 
     const delayMs = Math.min(this.reconnectMaxMs, this.reconnectBaseMs * 2 ** (attempt - 1));
@@ -1078,9 +1134,11 @@ export class McpHub {
     const client = new McpClient(config, customTransport);
     const id = client.config.id;
     this.clearReconnectTimer(id);
+    this.clearStableTimer(id);
     this.reconnectAttempts.delete(id);
     client.setOnDisconnect((reason) => {
       if (this.clients.get(id) !== client) return;
+      this.clearStableTimer(id);
       this.lastErrors.set(id, reason);
       this.scheduleReconnect(id);
     });
@@ -1092,6 +1150,7 @@ export class McpHub {
 
   async unregisterServer(serverId: string): Promise<void> {
     this.clearReconnectTimer(serverId);
+    this.clearStableTimer(serverId);
     this.reconnectAttempts.delete(serverId);
     const existing = this.clients.get(serverId);
     this.clients.delete(serverId);
@@ -1152,6 +1211,7 @@ export class McpHub {
     options: { fromAutoReconnect?: boolean } = {},
   ): Promise<{ ok: boolean; tools: readonly McpToolDescriptor[]; error?: string }> {
     this.clearReconnectTimer(serverId);
+    this.clearStableTimer(serverId);
     if (!options.fromAutoReconnect) {
       this.reconnectAttempts.delete(serverId);
     }
@@ -1171,7 +1231,8 @@ export class McpHub {
       await client.initialize();
       await client.listTools();
       this.lastErrors.delete(serverId);
-      this.reconnectAttempts.delete(serverId);
+      // Only reset backoff after the server stays connected for `stableConnectionMs` so rapid crash loops give up.
+      this.scheduleStabilityReset(serverId, client);
       return { ok: true, tools: client.tools };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1329,6 +1390,8 @@ export class McpHub {
   async closeAll(): Promise<void> {
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
+    for (const timer of this.stableTimers.values()) clearTimeout(timer);
+    this.stableTimers.clear();
     this.reconnectAttempts.clear();
     this.lastErrors.clear();
     for (const client of this.clients.values()) {

@@ -410,11 +410,13 @@ export class ConversationArchive {
 }
 
 /** Writes found exchanges the way she is shown them. */
-export function describeRemembered(found: readonly Remembered[]): string {
+export function describeRemembered(found: readonly Remembered[], userAddress?: string): string {
+  const speaker =
+    userAddress === undefined || userAddress.trim() === "Captain" ? "Captain" : "The user";
   return found
     .map(
       ({ turn }) =>
-        `[${turn.at.slice(0, 10)}] Captain said: ${turn.said}\n   You answered: ${turn.reply || "(nothing recorded)"}`,
+        `[${turn.at.slice(0, 10)}] ${speaker} said: ${turn.said}\n   You answered: ${turn.reply || "(nothing recorded)"}`,
     )
     .join("\n");
 }

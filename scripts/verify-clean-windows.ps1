@@ -138,9 +138,9 @@ if ($winHandsExe) {
     Report-Fail "WinHands version" $_.Exception.Message
   }
 
-  foreach ($cmd in @("volume-get", "gpu-vram", "windows")) {
+  foreach ($cmd in @("volume-get", "gpu-vram", "layout")) {
     try {
-      $cmdOut = & $winHandsExe $cmd 2>&1
+      $cmdOut = "{}" | & $winHandsExe $cmd 2>&1
       if ($LASTEXITCODE -ne 0) {
         Report-Fail "WinHands $cmd" "Exited $LASTEXITCODE : $cmdOut"
       } else {

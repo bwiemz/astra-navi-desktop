@@ -15,6 +15,8 @@ import type { WindowSeen } from "./hands.ts";
  * of those she knows only the program's name.
  */
 
+import { replaceInternalCaptain } from "./characterLayer.ts";
+
 /** Starts the line that tells her which program the user is in. */
 export const SCREEN_MARK = "[on screen]";
 
@@ -55,6 +57,8 @@ export interface WatchDeps {
   skip(): readonly string[];
   /** Something on screen looks like it needs attention. */
   onNotice?(notice: WatchNotice): void;
+  /** Optional active user form of address so `[screen]` lines avoid "Captain" when customized. */
+  userAddress?(): string;
   now?(): number;
 }
 
@@ -385,7 +389,8 @@ export class ScreenWatch {
       since = stretch.from;
     }
     const spent = at - since;
-    return `${SCREEN_MARK} Captain is in ${programName(front.app)}${spent >= 60_000 ? ` (for ${minutes(spent)})` : ""}.`;
+    const prefix = replaceInternalCaptain("Captain is in", this.deps.userAddress?.());
+    return `${SCREEN_MARK} ${prefix} ${programName(front.app)}${spent >= 60_000 ? ` (for ${minutes(spent)})` : ""}.`;
   }
 
   /** A new conversation starts without knowing where the user is. */

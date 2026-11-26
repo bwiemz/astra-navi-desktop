@@ -1,4 +1,5 @@
 import type { ChatHistoryItem, ChatModelResponse } from "node-llama-cpp";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { estimateLongHorizonMissionKv, type KvQuantBits } from "./kvCompression.ts";
 
 /**
@@ -158,11 +159,14 @@ export function itemText(
   results: boolean,
   outside?: (text: string) => boolean,
   tails?: readonly string[],
+  userAddress?: string,
 ): string {
   if (item.type === "user") {
     if (!results && outside?.(item.text)) return "(the ship told AI-chan that something happened)";
-    // For the summariser, only what Captain said: not the lines the app put after it.
-    return `Captain: ${results ? item.text : withoutTails(item.text, tails ?? [])}`;
+    const label =
+      userAddress === undefined || userAddress.trim() === "Captain" ? "Captain" : "User";
+    // For the summariser, only what the user said: not the lines the app put after it.
+    return `${label}: ${results ? item.text : withoutTails(item.text, tails ?? [])}`;
   }
   if (item.type === "system") return "";
   const parts = item.response
@@ -182,9 +186,10 @@ export function historyText(
   results = true,
   outside?: (text: string) => boolean,
   tails?: readonly string[],
+  userAddress?: string,
 ): string {
   return items
-    .map((item) => itemText(item, results, outside, tails))
+    .map((item) => itemText(item, results, outside, tails, userAddress))
     .filter(Boolean)
     .join("\n\n");
 }
@@ -251,6 +256,8 @@ export interface CompactionPlan {
   contextTokens: number;
   /** What her instructions and tool descriptions take of it. */
   fixedTokens: number;
+  /** Optional custom user form of address so summaries don't use "Captain" when customized. */
+  userAddress?: string;
 }
 
 /** The conversation is made smaller once it and the fixed part pass this share of her working memory. */
@@ -309,13 +316,16 @@ export async function compact(
       : { items: trimmed, did: "trimmed", tokensBefore: before, tokensAfter: afterTrim };
   if (!split) return trimmedOnly;
   // An earlier summary is all that is left of what came before it, so it always goes along.
-  const carried = isSummary(split.old[0]) ? historyText(split.old.slice(0, 1), false) : "";
+  const carried = isSummary(split.old[0])
+    ? historyText(split.old.slice(0, 1), false, undefined, undefined, plan.userAddress)
+    : "";
   const tails = typeof plan.notesMark === "string" ? [plan.notesMark] : (plan.notesMark ?? []);
   let source = historyText(
     carried ? split.old.slice(2) : split.old,
     false,
     plan.fromTheShip,
     tails,
+    plan.userAddress,
   );
   // Too much to hand over at once: the newest of the old part matters most. Measured in
   // tokens as well as characters, because Japanese and Chinese run to a token or more
@@ -336,7 +346,8 @@ export async function compact(
   }
   if (left) source = `(some of what came next was left out)\n${source}`;
   if (carried) source = `${carried}\n\n${source}`;
-  const summary = await deps.summarise(SUMMARY_INSTRUCTIONS, source, signal).catch(() => null);
+  const instructions = replaceInternalCaptain(SUMMARY_INSTRUCTIONS, plan.userAddress);
+  const summary = await deps.summarise(instructions, source, signal).catch(() => null);
   const clean = summary?.trim() ?? "";
   if (clean.length < 20 || signal?.aborted) return trimmedOnly;
   const folded = [...summaryItems(clean.slice(0, 1600)), ...split.kept];

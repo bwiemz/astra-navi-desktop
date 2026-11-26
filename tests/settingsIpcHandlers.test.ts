@@ -70,7 +70,13 @@ vi.mock("electron", () => {
 import { ConfigStore } from "../src/core/config.ts";
 import { MemoryStore } from "../src/core/memory.ts";
 import { TraceKeeper } from "../src/core/trace.ts";
-import { createSettingsController, resolveProbeApiKey } from "../src/main/settingsIpc.ts";
+import { createMissionControlIpc } from "../src/main/missionControlIpc.ts";
+import {
+  createSettingsController,
+  resolveProbeApiKey,
+  resolveSavedInferenceApiKey,
+} from "../src/main/settingsIpc.ts";
+import type { Brain } from "../src/core/brain.ts";
 import type { SettingsView } from "../src/shared/settings.ts";
 
 const tempDirs: string[] = [];
@@ -301,5 +307,64 @@ describe("Real Settings IPC Handlers (createSettingsController)", () => {
     const bundleText = await readFile(exported.path, "utf8");
     expect(bundleText).not.toContain("sk-super-secret-prod-999");
     expect(bundleText).not.toContain("mcp-secret-token-777");
+
+    // 7. Changing inference baseUrl to a different origin via settings:save MUST clear the old API key!
+    expect(
+      resolveSavedInferenceApiKey(
+        "https://trusted.example/v1",
+        "sk-super-secret-prod-999",
+        "https://trusted.example/api/v1",
+        undefined,
+      ),
+    ).toBe("sk-super-secret-prod-999");
+    const afterOriginSwitch = (await saveHandler(validEvent, {
+      inference: {
+        baseUrl: "https://other-provider.example/v1",
+      },
+    })) as SettingsView;
+    expect(afterOriginSwitch.inference.hasApiKey).toBe(false);
+    expect(config.value.inference.apiKey).toBe("");
+
+    // 8. Mission Control memory IPC handlers (upsert, pin, delete) MUST mark Brain instructions dirty!
+    let dirtyCalls = 0;
+    const mc = createMissionControlIpc({
+      appOrigin: "app://astra-navi",
+      config,
+      dataDir: () => dir,
+      workspaceDir: join(dir, "ws"),
+      board: () => null,
+      approvalDesk: () => null,
+      memoryStore: () => memory,
+      episodic: () => null,
+      orders: () => null,
+      skills: () => null,
+      traces: new TraceKeeper(),
+      recall: () => null,
+      brain: () =>
+        ({
+          markInstructionsDirty: () => {
+            dirtyCalls += 1;
+          },
+        }) as unknown as Brain,
+      isAuthorizedSender: (ev) => (ev.sender as unknown) === mockWebContents,
+    });
+    mc.registerIpc();
+    const mcUpsert = invokeHandlers.get("mc:memory-upsert");
+    const mcPin = invokeHandlers.get("mc:memory-pin");
+    const mcDelete = invokeHandlers.get("mc:memory-delete");
+    if (!mcUpsert || !mcPin || !mcDelete) {
+      throw new Error("Expected Mission Control memory IPC handlers to register.");
+    }
+    const created = (await mcUpsert(validEvent, {
+      kind: "fact",
+      text: "Prefers dark mode in IDE",
+    })) as { ok: boolean };
+    expect(created.ok).toBe(true);
+    const mcNoteId = memory.all()[0]?.id ?? "";
+    expect(mcNoteId).toBeTruthy();
+    expect((await mcPin(validEvent, mcNoteId, true) as { ok: boolean }).ok).toBe(true);
+    expect((await mcUpsert(validEvent, { id: mcNoteId, kind: "fact", text: "Prefers dark mode everywhere" }) as { ok: boolean }).ok).toBe(true);
+    expect((await mcDelete(validEvent, mcNoteId) as { ok: boolean }).ok).toBe(true);
+    expect(dirtyCalls).toBe(4);
   });
 });

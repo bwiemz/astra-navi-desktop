@@ -15,6 +15,7 @@ import {
   soundsLikeARequest,
   toolForLiveState,
 } from "./claims.ts";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { TOOLS } from "./permissions.ts";
 import { describeWrongSums, sumsIn } from "./sums.ts";
 import type { TracedCheck } from "./trace.ts";
@@ -119,6 +120,8 @@ export interface FinishedReply {
   turnsSinceTool: number;
   /** She was offered only the tools picked out for this message. */
   offeredFewer: boolean;
+  /** Optional active user form of address so follow-through corrections don't say "Captain" when customized. */
+  userAddress?: string;
   /** Whether she has this tool at all, on offer just now or not. */
   has(tool: string): boolean;
   /** Whether this tool was on offer for this reply. */
@@ -165,7 +168,8 @@ export async function checkReply(turn: FinishedReply): Promise<Checked> {
   const followUps: FollowUp[] = [];
   const spokenToo = message.spoken ? SPOKEN_CORRECTION : "";
   const again = (found: FollowUp["found"], text: string, lookup: boolean): void => {
-    followUps.push({ found, did: "again", correction: { text: text + spokenToo, lookup } });
+    const adapted = replaceInternalCaptain(text, turn.userAddress);
+    followUps.push({ found, did: "again", correction: { text: adapted + spokenToo, lookup } });
   };
   const note = (found: FollowUp["found"], notice: string): void => {
     followUps.push({ found, did: "note", notice });

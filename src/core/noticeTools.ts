@@ -1,5 +1,6 @@
 import { defineChatSessionFunction, type ChatSessionModelFunctions } from "node-llama-cpp";
 import { guarded, type ToolHost } from "./agentTools.ts";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { describeNotice, KEPT_NOTICES, type NoticeWatch } from "./notices.ts";
 import { TOOLS } from "./permissions.ts";
 
@@ -37,10 +38,11 @@ export function createNoticeTools(
         () => "Looking at the notifications",
         (input) => {
           const notices = watch();
-          if (!notices) return Promise.resolve(NOTICES_OFF);
+          const noticesOffMsg = replaceInternalCaptain(NOTICES_OFF, host.userAddress?.());
+          if (!notices) return Promise.resolve(noticesOffMsg);
           if (!notices.running) {
             return Promise.resolve(
-              notices.trouble ? `Nothing was read: ${notices.trouble}` : NOTICES_OFF,
+              notices.trouble ? `Nothing was read: ${notices.trouble}` : noticesOffMsg,
             );
           }
           // The model has to fill in both, so "empty" and "0" are how it leaves them out.

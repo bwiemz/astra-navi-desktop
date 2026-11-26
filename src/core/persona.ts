@@ -53,12 +53,6 @@ export function formLine(
 /** Starts the block of her own notes that the app puts after a message when some seem related. */
 export const NOTES_MARK = "[your notes]";
 
-/** Safe literal global string replacement that never interprets JS `$'` / `$&` / `$$` patterns. */
-function literalReplaceAll(text: string, search: string, replacement: string): string {
-  if (!search) return text;
-  return text.split(search).join(replacement);
-}
-
 function installGuidance(env: EnvironmentFacts, userRef: string): string {
   const has = (command: Parameters<typeof env.commands.has>[0]): boolean =>
     env.commands.has(command);
@@ -204,48 +198,92 @@ export interface CharacterPersonaOverride {
 }
 
 /**
- * Substitutes the user's preferred form of address ONLY inside explicit localized
- * voice-instruction and example templates using literal string replacement (never
- * JS `replaceAll` metacharacters like `$'` and never across safety rules or OS paths).
+ * Single-pass placeholder regex for localized voice-instruction and example templates.
+ * Ordered longest-first with ASCII word boundaries so substituted values (such as
+ * `"Captain Bob"`, `"Astra-chan"`, `"Astral"` + `"Nova"`, or `"$'$'$'$'"`) are NEVER
+ * re-scanned, doubled, partially mangled, or expanded by JS replacement patterns.
  */
-function adaptTemplateAddress(
+const VOICE_TEMPLATE_TOKEN_RE =
+  /Call the user "Captain" and|Call the user "Captain"|yourself "Astra"|ユーザーのことは「艦長」、|「艦長」|「アストラ」|称呼用户为“舰长”，|“舰长”|“阿斯特拉”|, Captain\?|艦長、|舰长，|\bCaptain's\b|\bCaptain\b|\bAstra\b|艦長|アストラ|舰长|阿斯特拉/g;
+
+/**
+ * Performs single-pass slot substitution of the user's preferred form of address and
+ * companion display name ONLY inside explicit localized voice-instruction and example
+ * templates (never across safety rules, OS paths, or `<memories>`).
+ */
+function adaptVoiceTemplate(
   text: string,
   userAddress: string | undefined,
+  shortName: string,
 ): string {
-  if (userAddress === undefined || userAddress === "Captain") return text;
-  const trimmed = userAddress.trim();
-  if (trimmed === "") {
-    let out = text;
-    out = literalReplaceAll(
-      out,
-      'Call the user "Captain" and',
-      "Address the user naturally without a fixed title, and call",
-    );
-    out = literalReplaceAll(
-      out,
-      "ユーザーのことは「艦長」、",
-      "ユーザーに決まった肩書は使わず自然に呼び、",
-    );
-    out = literalReplaceAll(
-      out,
-      "称呼用户为“舰长”，",
-      "不要强加固定称呼，自然称呼用户，",
-    );
-    out = literalReplaceAll(out, ", Captain?", "?");
-    out = literalReplaceAll(out, "艦長、", "");
-    out = literalReplaceAll(out, "舰长，", "");
-    out = literalReplaceAll(out, "Captain's", "the user's");
-    out = literalReplaceAll(out, "Captain", "the user");
-    return out;
-  }
-  let out = text;
-  out = literalReplaceAll(out, 'Call the user "Captain"', `Call the user "${trimmed}"`);
-  out = literalReplaceAll(out, "「艦長」", `「${trimmed}」`);
-  out = literalReplaceAll(out, "“舰长”", `“${trimmed}”`);
-  out = literalReplaceAll(out, "艦長", trimmed);
-  out = literalReplaceAll(out, "舰长", trimmed);
-  out = literalReplaceAll(out, "Captain", trimmed);
-  return out;
+  const customAddress = userAddress !== undefined && userAddress !== "Captain";
+  const customName = shortName !== "Astra";
+  if (!customAddress && !customName) return text;
+
+  const trimmed = customAddress ? userAddress.trim() : "Captain";
+  const noTitle = customAddress && trimmed === "";
+
+  return text.replace(VOICE_TEMPLATE_TOKEN_RE, (token) => {
+    switch (token) {
+      case 'Call the user "Captain" and':
+        if (!customAddress) return token;
+        return noTitle
+          ? "Address the user naturally without a fixed title, and call"
+          : `Call the user "${trimmed}" and`;
+      case 'Call the user "Captain"':
+        if (!customAddress) return token;
+        return noTitle
+          ? "Address the user naturally without a fixed title"
+          : `Call the user "${trimmed}"`;
+      case 'yourself "Astra"':
+        return customName ? `yourself "${shortName}"` : token;
+      case "ユーザーのことは「艦長」、":
+        if (!customAddress) return token;
+        return noTitle
+          ? "ユーザーに決まった肩書は使わず自然に呼び、"
+          : `ユーザーのことは「${trimmed}」、`;
+      case "「艦長」":
+        if (!customAddress) return token;
+        return noTitle ? "ユーザー" : `「${trimmed}」`;
+      case "「アストラ」":
+        return customName ? `「${shortName}」` : token;
+      case "称呼用户为“舰长”，":
+        if (!customAddress) return token;
+        return noTitle
+          ? "不要强加固定称呼，自然称呼用户，"
+          : `称呼用户为“${trimmed}”，`;
+      case "“舰长”":
+        if (!customAddress) return token;
+        return noTitle ? "用户" : `“${trimmed}”`;
+      case "“阿斯特拉”":
+        return customName ? `“${shortName}”` : token;
+      case ", Captain?":
+        if (!customAddress) return token;
+        return noTitle ? "?" : `, ${trimmed}?`;
+      case "艦長、":
+        if (!customAddress) return token;
+        return noTitle ? "" : `${trimmed}、`;
+      case "舰长，":
+        if (!customAddress) return token;
+        return noTitle ? "" : `${trimmed}，`;
+      case "Captain's":
+        if (!customAddress) return token;
+        return noTitle ? "the user's" : `${trimmed}'s`;
+      case "Captain":
+        if (!customAddress) return token;
+        return noTitle ? "the user" : trimmed;
+      case "艦長":
+      case "舰长":
+        if (!customAddress) return token;
+        return noTitle ? "" : trimmed;
+      case "Astra":
+      case "アストラ":
+      case "阿斯特拉":
+        return customName ? shortName : token;
+      default:
+        return token;
+    }
+  });
 }
 
 export function buildSystemPrompt(
@@ -273,16 +311,7 @@ export function buildSystemPrompt(
       ? "Captain"
       : customAddress.trim() || "User";
 
-  const adaptLine = (raw: string): string => {
-    let out = adaptTemplateAddress(raw, customAddress);
-    if (shortName !== "Astra") {
-      out = literalReplaceAll(out, 'yourself "Astra"', `yourself "${shortName}"`);
-      out = literalReplaceAll(out, "「アストラ」", `「${shortName}」`);
-      out = literalReplaceAll(out, "“阿斯特拉”", `“${shortName}”`);
-      out = literalReplaceAll(out, "Astra", shortName);
-    }
-    return out;
-  };
+  const adaptLine = (raw: string): string => adaptVoiceTemplate(raw, customAddress, shortName);
 
   const examples = tongue.examples
     .map(([user, mood, reply], index) => {
