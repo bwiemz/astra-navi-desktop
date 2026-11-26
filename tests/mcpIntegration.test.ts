@@ -960,6 +960,7 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
     });
     expect(electronFallback.command).toBe("C:\\Program Files\\Astra Navi\\Astra Navi Desktop.exe");
     expect(electronFallback.useElectronAsNode).toBe(true);
+    expect(electronFallback.prependPathDir).toBe("C:\\Users\\tommy\\AppData\\Roaming\\npm");
   });
 
   it("preserves sibling/required properties and primitive types under $ref budget, strips nested array/$ref/union nulls, keeps ZWJ/ZWNJ in output, runs sanitizers to fixed point, and fixes closeAll/reconnect/overflow races", async () => {
@@ -1290,8 +1291,9 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
       ),
     ).toEqual({ action: { kind: "ping" } });
 
-    // 5. Property-based fuzz test: 220 seeded random schemas with $ref DAGs/cycles, anyOf/oneOf,
-    //    large enums, >24 properties, and late required keys.
+    // 5. Property-based fuzz test: 240 seeded random schemas widened to depth 8, 9-way unions,
+    //    const discriminators, multi-byte UTF-8, >24 properties, and late required keys —
+    //    asserting BOTH structural bounds AND no-degradation-when-under-12KB & null-stripping invariants!
     let seed = 0x5eed1234;
     const rand = (): number => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -1300,10 +1302,13 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
     const randInt = (max: number): number => Math.floor(rand() * max);
 
     const makeRandomNode = (depth: number, defNames: string[]): Record<string, unknown> => {
-      const pick = randInt(depth >= 3 ? 5 : 9);
+      const pick = randInt(depth >= 6 ? 6 : 11);
       switch (pick) {
         case 0:
-          return { type: "string", description: "desc ".repeat(1 + randInt(12)) };
+          return {
+            type: "string",
+            description: (rand() < 0.2 ? "説明日本語 " : "desc ").repeat(1 + randInt(12)),
+          };
         case 1:
           return { type: "integer" };
         case 2:
@@ -1311,27 +1316,40 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
         case 3:
           return { type: "boolean" };
         case 4: {
-          const count = 2 + randInt(40);
+          // Small enum (<= 16 values, <= 512 bytes) — MUST NEVER be degraded when schema fits under 12 KB!
+          const count = 2 + randInt(8);
+          return {
+            type: "string",
+            description: "Select mode ".repeat(1 + randInt(5)),
+            enum: Array.from({ length: count }, (_, i) => `m_${i}`),
+          };
+        }
+        case 5: {
+          // Oversized enum (> 16 values or large strings) — MUST stay within 12 KB!
+          const count = 20 + randInt(30);
           return {
             type: "string",
             enum: Array.from({ length: count }, (_, i) => `val_${i}_${"a".repeat(randInt(35))}`),
           };
         }
-        case 5: {
+        case 6:
+          return { const: `tag_${randInt(50)}` };
+        case 7: {
           if (defNames.length > 0) {
             return { $ref: `#/$defs/${defNames[randInt(defNames.length)]}` };
           }
           return { type: "string" };
         }
-        case 6: {
-          const branches = 2 + randInt(4);
+        case 8: {
+          // Up to 9-way unions!
+          const branches = 2 + randInt(8);
           return {
             [rand() < 0.5 ? "anyOf" : "oneOf"]: Array.from({ length: branches }, () =>
               makeRandomNode(depth + 1, defNames),
             ),
           };
         }
-        case 7:
+        case 9:
           return { type: "array", items: makeRandomNode(depth + 1, defNames) };
         default: {
           const propCount = 1 + randInt(5);
@@ -1347,16 +1365,16 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
       }
     };
 
-    for (let trial = 0; trial < 220; trial += 1) {
-      const defCount = randInt(6);
+    for (let trial = 0; trial < 240; trial += 1) {
+      const defCount = randInt(8);
       const defNames = Array.from({ length: defCount }, (_, i) => `D${i}`);
       const randDefs: Record<string, unknown> = {};
       for (let i = 0; i < defCount; i += 1) {
-        // Allow both DAG edges and occasional cycles
-        const targetPool = rand() < 0.8 ? defNames.slice(i + 1) : defNames;
+        // Allow deep DAG chains up to depth 8 plus occasional cycles
+        const targetPool = rand() < 0.85 ? defNames.slice(i + 1) : defNames;
         randDefs[`D${i}`] = makeRandomNode(1, targetPool);
       }
-      const topPropCount = 1 + randInt(34);
+      const topPropCount = 1 + randInt(32);
       const topProps: Record<string, unknown> = {};
       const topReq: string[] = [];
       for (let p = 0; p < topPropCount; p += 1) {
@@ -1365,6 +1383,33 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
         if (rand() < 0.25 || (p >= 24 && rand() < 0.4)) {
           topReq.push(key);
         }
+      }
+      // Inject a const-discriminated union on 1/3 of trials to fuzz stripNullOptionalArgs invariants too.
+      const discTag = `disc_${trial}`;
+      const hasDiscUnion = trial % 3 === 0;
+      if (hasDiscUnion) {
+        topProps["disc_action"] = {
+          oneOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { const: `${discTag}_a` },
+                reqNull: { type: "null" },
+                optStr: { type: "string" },
+              },
+              required: ["kind", "reqNull"],
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { const: `${discTag}_b` },
+                reqNull: { type: "string" },
+                other: { type: "integer" },
+              },
+              required: ["kind", "other"],
+            },
+          ],
+        };
       }
       const schema: Record<string, unknown> = {
         type: "object",
@@ -1378,17 +1423,191 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
       const elapsed = performance.now() - tStart;
       expect(elapsed, `Trial ${trial} took ${elapsed.toFixed(1)}ms`).toBeLessThan(50);
 
-      const bytes = JSON.stringify(out).length;
-      expect(bytes, `Trial ${trial} serialized to ${bytes} bytes`).toBeLessThanOrEqual(12_288);
+      const utf8Bytes = Buffer.byteLength(JSON.stringify(out), "utf8");
+      expect(utf8Bytes, `Trial ${trial} serialized to ${utf8Bytes} UTF-8 bytes`).toBeLessThanOrEqual(
+        12_288,
+      );
 
       for (const rk of topReq) {
         expect(out.properties[rk], `Trial ${trial} dropped required prop ${rk}`).toBeDefined();
         expect(out.required ?? [], `Trial ${trial} dropped ${rk} from required[]`).toContain(rk);
       }
 
+      // Invariant: if normalized schema fits comfortably under 12 KB (< 10.5 KB), NO kept
+      // top-level small enum, const, or primitive integer/number/boolean type may be degraded!
+      if (utf8Bytes < 10_500) {
+        for (const [k, outProp] of Object.entries(out.properties)) {
+          const rawProp = topProps[k] as Record<string, unknown> | undefined;
+          if (!rawProp || !outProp) continue;
+          const outRec = outProp as unknown as Record<string, unknown>;
+          if (Array.isArray(rawProp["enum"]) && rawProp["enum"].length <= 16) {
+            const rawEnumBytes = Buffer.byteLength(JSON.stringify(rawProp["enum"]), "utf8");
+            if (rawEnumBytes <= 512) {
+              expect(
+                Array.isArray(outRec["enum"]),
+                `Trial ${trial} degraded small enum on "${k}" despite output being ${utf8Bytes} bytes`,
+              ).toBe(true);
+            }
+          }
+          if ("const" in rawProp && typeof rawProp["const"] === "string" && rawProp["const"].length <= 128) {
+            const hasConst =
+              "const" in outRec ||
+              (Array.isArray(outRec["oneOf"]) &&
+                outRec["oneOf"].some(
+                  (b) => typeof b === "object" && b !== null && "const" in (b as Record<string, unknown>),
+                ));
+            expect(
+              hasConst,
+              `Trial ${trial} degraded const on "${k}" despite output being ${utf8Bytes} bytes`,
+            ).toBe(true);
+          }
+          if (
+            rawProp["type"] === "integer" ||
+            rawProp["type"] === "number" ||
+            rawProp["type"] === "boolean"
+          ) {
+            const expectedType = rawProp["type"];
+            const actualType = outRec["type"];
+            const preservesType =
+              actualType === expectedType ||
+              (Array.isArray(actualType) && actualType.includes(expectedType));
+            expect(
+              preservesType,
+              `Trial ${trial} degraded primitive "${expectedType}" on "${k}" to ${JSON.stringify(actualType)}`,
+            ).toBe(true);
+          }
+        }
+      }
+
+      if (hasDiscUnion) {
+        expect(
+          stripNullOptionalArgs(
+            { disc_action: { kind: `${discTag}_a`, reqNull: null, optStr: null } },
+            schema,
+          ),
+        ).toEqual({ disc_action: { kind: `${discTag}_a`, reqNull: null } });
+      }
+
       const compiled = new LlamaJsonSchemaGrammar(fakeLlama as never, out as never);
       expect(compiled.grammar.length, `Trial ${trial} produced empty GBNF`).toBeGreaterThan(10);
     }
+
+    // 6. Pinned Round 5 exact regressions:
+    // (a) Union chain buried 5 levels deep with N = 12 branches -> < 50 ms & <= 12 KB!
+    const buriedDefs: Record<string, unknown> = {};
+    for (let i = 0; i < 12; i += 1) {
+      const next = i === 11 ? { type: "integer" } : { $ref: `#/$defs/B${i + 1}` };
+      buriedDefs[`B${i}`] = { anyOf: Array.from({ length: 12 }, () => next) };
+    }
+    const buriedUnionSchema: Record<string, unknown> = {
+      type: "object",
+      properties: {
+        l0: {
+          type: "object",
+          properties: {
+            l1: {
+              type: "object",
+              properties: {
+                l2: {
+                  type: "object",
+                  properties: {
+                    l3: {
+                      type: "object",
+                      properties: {
+                        l4: { $ref: "#/$defs/B0" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        count: { type: "integer" },
+      },
+      required: ["count"],
+      $defs: buriedDefs,
+    };
+    const b0 = performance.now();
+    const normBuried = normalizeMcpParamsSchema(buriedUnionSchema);
+    expect(performance.now() - b0).toBeLessThan(50);
+    expect(Buffer.byteLength(JSON.stringify(normBuried), "utf8")).toBeLessThanOrEqual(12_288);
+    expect((normBuried.properties["count"] as Record<string, unknown>)["type"]).toBe("integer");
+
+    // (b) 18 enums with 120-char descriptions AND 24 enums with 80-char descriptions -> ALL enums kept!
+    const eighteenProps: Record<string, unknown> = {};
+    for (let i = 0; i < 18; i += 1) {
+      eighteenProps[`state_${i}`] = {
+        type: "string",
+        enum: ["open", "closed", "pending"],
+        description: `Parameter ${i}: ${"detailed explanation ".repeat(6)}`.slice(0, 120),
+      };
+    }
+    const norm18 = normalizeMcpParamsSchema({ type: "object", properties: eighteenProps });
+    for (let i = 0; i < 18; i += 1) {
+      const prop = norm18.properties[`state_${i}`] as unknown as Record<string, unknown>;
+      expect(prop?.["enum"], `Expected enum kept on state_${i}`).toEqual(["open", "closed", "pending", null]);
+    }
+    expect(Buffer.byteLength(JSON.stringify(norm18), "utf8")).toBeLessThanOrEqual(12_288);
+
+    const twentyFourProps: Record<string, unknown> = {};
+    for (let i = 0; i < 24; i += 1) {
+      twentyFourProps[`opt_${i}`] = {
+        type: "string",
+        enum: ["low", "medium", "high"],
+        description: `Option ${i}: ${"setting help ".repeat(6)}`.slice(0, 80),
+      };
+    }
+    const norm24 = normalizeMcpParamsSchema({ type: "object", properties: twentyFourProps });
+    for (let i = 0; i < 24; i += 1) {
+      const prop = norm24.properties[`opt_${i}`] as unknown as Record<string, unknown>;
+      expect(prop?.["enum"], `Expected enum kept on opt_${i}`).toEqual(["low", "medium", "high", null]);
+    }
+
+    // (c) 48 required long const keys (~14.8 KB raw + multi-byte UTF-8) -> <= 12,288 UTF-8 bytes & all 48 keys kept!
+    const req48Props: Record<string, unknown> = {};
+    const req48Keys: string[] = [];
+    for (let i = 0; i < 48; i += 1) {
+      const key = `required_constant_field_number_${String(i).padStart(2, "0")}_日本語`;
+      req48Keys.push(key);
+      req48Props[key] = {
+        const: `constant_value_${i}_${"あ".repeat(30)}`,
+        description: "Long description text ".repeat(5),
+      };
+    }
+    const norm48 = normalizeMcpParamsSchema({
+      type: "object",
+      properties: req48Props,
+      required: req48Keys,
+    });
+    expect(Buffer.byteLength(JSON.stringify(norm48), "utf8")).toBeLessThanOrEqual(12_288);
+    expect(norm48.required).toHaveLength(48);
+    expect(new LlamaJsonSchemaGrammar(fakeLlama as never, norm48 as never).grammar.length).toBeGreaterThan(20);
+
+    // (d) Per-property degrade budget + depth/context memo: heavy $ref sibling MUST NOT strip
+    //     null from `anyOf: [integer, null]` or poison a shallow direct `$ref`!
+    const siblingDegradeSchema: Record<string, unknown> = {
+      type: "object",
+      $defs: {
+        SharedItem: { type: "array", items: { type: "integer" } },
+        Heavy0: { anyOf: [{ $ref: "#/$defs/Heavy1" }, { $ref: "#/$defs/Heavy1" }, { $ref: "#/$defs/SharedItem" }] },
+        Heavy1: { anyOf: [{ $ref: "#/$defs/Heavy2" }, { $ref: "#/$defs/Heavy2" }] },
+        Heavy2: { anyOf: [{ $ref: "#/$defs/Heavy3" }, { $ref: "#/$defs/Heavy3" }] },
+        Heavy3: { anyOf: [{ $ref: "#/$defs/SharedItem" }, { type: "string" }] },
+      },
+      properties: {
+        heavy: { $ref: "#/$defs/Heavy0" },
+        nullableCount: { anyOf: [{ type: "integer" }, { type: "null" }] },
+        directInts: { $ref: "#/$defs/SharedItem" },
+      },
+      required: ["nullableCount", "directInts"],
+    };
+    const normSib = normalizeMcpParamsSchema(siblingDegradeSchema);
+    const nc = normSib.properties["nullableCount"] as unknown as Record<string, unknown>;
+    expect(Array.isArray(nc["type"]) && (nc["type"] as string[]).includes("integer") && (nc["type"] as string[]).includes("null")).toBe(true);
+    const di = normSib.properties["directInts"] as unknown as Record<string, unknown>;
+    expect(di["type"]).toBe("array");
+    expect((di["items"] as Record<string, unknown>)["type"]).toBe("integer");
   });
 
   it("gates research + long clipboard on mcpSchemasOffered, cancels in-flight syncServers on closeAll, preserves TOML/nested JSON/LRM-RLM, resolves Volta npx.exe, and prevents MCP routing fatigue", async () => {
@@ -1448,15 +1667,25 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
     expect(racingHub.listPrefixedTools()).toHaveLength(0);
     expect(racingHub.statusFor("slowboot").connected).toBe(false);
 
-    // 3. sanitizeUntrustedOutput preserves TOML [[servers]], nested JSON [[1, 2]], and LRM/RLM while neutralizing [[happy]]/[[worried]]!
-    const structured = "TOML:\n[[servers]]\nmatrix = [[1, 2], [3, 4]]\nRTL:\u200Eabc\u200F\nSpoof: [[happy]] [[worried]] \u202E";
+    // 3. sanitizeUntrustedOutput preserves TOML [[servers]], nested JSON [[1, 2]], LRM/RLM,
+    //    flag emoji tag sequences (🏴󠁧󠁢󠁥󠁮󠁧󠁿), and balanced BiDi isolates while neutralizing [[happy]]/[[ happy ]]!
+    const englandFlag = "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+    const structured = `TOML:\n[[servers]]\nmatrix = [[1, 2], [3, 4]]\nRTL:\u200Eabc\u200F \u2066iso\u2069 ${englandFlag}\nSpoof: [[happy]] [[ worried ]] \u202E\u2066\u{E0041}`;
     const cleaned = sanitizeUntrustedOutput(structured);
     expect(cleaned).toContain("[[servers]]");
     expect(cleaned).toContain("[[1, 2], [3, 4]]");
     expect(cleaned).toContain("\u200Eabc\u200F");
+    expect(cleaned).toContain("\u2066iso\u2069");
+    expect(cleaned).toContain(englandFlag);
     expect(cleaned).not.toContain("[[happy]]");
-    expect(cleaned).not.toContain("[[worried]]");
+    expect(cleaned).not.toContain("[[ worried ]]");
     expect(cleaned).not.toContain("\u202E");
+    expect(cleaned).not.toContain("\u{E0041}");
+    // Unmatched trailing U+2066 must be stripped (only 1 balanced U+2066 remains).
+    expect([...cleaned].filter((c) => c === "\u2066")).toHaveLength(1);
+
+    // 3b. callPrefixedTool() after closeAll() MUST reject cleanly without re-initializing!
+    await expect(racingHub.callPrefixedTool("mcp:slowboot.ping", {})).rejects.toThrow(/closed/i);
 
     // 4. Windows Volta native npx.exe and standard Program Files\nodejs scan with prependPathDir!
     const voltaFs = new Set(["C:\\Users\\alice\\AppData\\Local\\Volta\\bin\\npx.exe"]);
@@ -1485,28 +1714,93 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
     expect(resolvedStdNode.command).toBe("C:\\Program Files\\nodejs\\node.exe");
     expect(resolvedStdNode.prependPathDir).toBe("C:\\Program Files\\nodejs");
 
-    // 5. MCP routing fatigue: generic filesystem verbs ("read", "file", "list") do NOT trigger
-    //    MCP filesystem tools, while specific domain phrases DO, and unused MCP tools do NOT stick across turns!
+    // 5. MCP routing regressions & invariants:
+    //    - Filesystem & database MCP tools ARE reachable by exact tool name, multi-word phrase, or semantic embedding;
+    //    - Unrelated chat / single generic verbs ("remember green tea", "list my reminders") do NOT trip MCP tools;
+    //    - Every generated MCP tool ALWAYS routes when its exact tool name appears in the message;
+    //    - Brain keeps routed MCP tools for 1 follow-up turn (clarifying Q&A), then drops on turn +2,
+    //      and Learner withholds replies on MCP turns!
     const router = new ToolRouter(null);
-    const mcpAvail = ["mcp:fs.read_file", "mcp:home.dim_lights", TOOLS.remember];
+    const mcpAvail = [
+      "mcp:fs.read_file",
+      "mcp:fs.list_directory",
+      "mcp:sqlite.query",
+      "mcp:home.dim_lights",
+      TOOLS.remember,
+    ];
     const mcpDescs = {
       "mcp:fs.read_file": "[MCP server: fs] Read file contents from disk",
+      "mcp:fs.list_directory": "[MCP server: fs] List files in a directory",
+      "mcp:sqlite.query": "[MCP server: sqlite] Run a SQL query against database tables",
       "mcp:home.dim_lights": "[MCP server: home] Dim bedroom lights percentage",
       [TOOLS.remember]: "Save a note",
     };
-    const genericPick = await router.route("Can you read my file and list files?", {
-      available: mcpAvail,
-      toolDescriptions: mcpDescs,
-    });
-    expect(genericPick.offered).not.toContain("mcp:fs.read_file");
 
-    const domainPick = await router.route("Please dim the bedroom lights", {
-      available: mcpAvail,
-      toolDescriptions: mcpDescs,
-    });
-    expect(domainPick.offered).toContain("mcp:home.dim_lights");
+    // Exact regressions from Round 5:
+    expect(
+      (await router.route("call the read_file tool on ~/notes.txt", { available: mcpAvail, toolDescriptions: mcpDescs }))
+        .offered,
+    ).toContain("mcp:fs.read_file");
+    expect(
+      (await router.route("list the directory ~/projects", { available: mcpAvail, toolDescriptions: mcpDescs })).offered,
+    ).toContain("mcp:fs.list_directory");
+    expect(
+      (await router.route("query the users table in my database", { available: mcpAvail, toolDescriptions: mcpDescs }))
+        .offered,
+    ).toContain("mcp:sqlite.query");
+    expect(
+      (await router.route("Please dim the bedroom lights", { available: mcpAvail, toolDescriptions: mcpDescs })).offered,
+    ).toContain("mcp:home.dim_lights");
 
-    // Verify Brain does NOT carry offered-but-unused MCP tools into the next turn's recent tools.
+    // No prompt fatigue on unrelated chat or single generic verbs:
+    expect(
+      (await router.route("Remember that I like green tea", { available: mcpAvail, toolDescriptions: mcpDescs }))
+        .offered,
+    ).not.toContain("mcp:fs.read_file");
+    expect(
+      (await router.route("List my reminders", { available: mcpAvail, toolDescriptions: mcpDescs })).offered,
+    ).not.toContain("mcp:fs.list_directory");
+
+    // Invariant: EVERY MCP tool routes when its exact tool name appears in the message (50 names).
+    const testToolNames = [
+      "read_file", "write_file", "list_directory", "query", "get", "set", "delete_row",
+      "create_issue", "search_code", "list_tables", "run_sql", "fetch_page", "open_tab",
+      "send_message", "get_weather", "dim_light", "toggle_switch", "check_status",
+      "add_comment", "update_record", "read", "list", "write", "copy", "move",
+      ...Array.from({ length: 25 }, (_, i) => `custom_action_${i}`),
+    ];
+    for (const tName of testToolNames) {
+      const full = `mcp:srv.${tName}`;
+      const routed = await router.route(`Please invoke the ${tName} tool now.`, {
+        available: [full, TOOLS.remember],
+        toolDescriptions: { [full]: "External tool", [TOOLS.remember]: "Save a note" },
+      });
+      expect(routed.offered, `Exact tool name "${tName}" failed to route`).toContain(full);
+    }
+
+    // Semantic embedder routing matches MCP description with high threshold even without shared keywords:
+    const semanticRouter = new ToolRouter({
+      embed: async (texts) =>
+        texts.map((t) => {
+          const low = t.toLowerCase();
+          if (low.includes("sql") || low.includes("schema") || low.includes("database")) {
+            return new Float32Array([0.99, 0.14, 0, 0]);
+          }
+          return new Float32Array([0.1, 0.99, 0, 0]);
+        }),
+    });
+    const semPick = await semanticRouter.route("inspect my relational schema", {
+      available: ["mcp:db.inspect", TOOLS.remember, TOOLS.weather],
+      toolDescriptions: {
+        "mcp:db.inspect": "Examine SQL database tables and column definitions",
+        [TOOLS.remember]: "Save a note",
+        [TOOLS.weather]: "Check forecast",
+      },
+    });
+    expect(semPick.offered).toContain("mcp:db.inspect");
+
+    // Verify Brain keeps a routed MCP tool for 1 follow-up turn (clarifying Q&A), drops it on turn +2,
+    // AND withholds the reply from Learner on MCP turns!
     const cfg = new ConfigStore(join(dir, "config.json"));
     await cfg.load();
     await cfg.update({ fittingTools: true });
@@ -1541,11 +1835,20 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
       },
     ]);
     const offeredPerTurn: string[][] = [];
+    const journaledReplies: (string | null)[] = [];
     let hist: ChatHistoryItem[] = [];
     const brain = new Brain({
       config: cfg,
       memory: mem,
       mcp: mcpHub,
+      learner: {
+        record: (entry: { reply: string | null }) => {
+          journaledReplies.push(entry.reply);
+        },
+        rest: () => undefined,
+        busy: () => undefined,
+        dispose: async () => undefined,
+      } as never,
       environment: {
         userName: "alice",
         home: dir,
@@ -1568,10 +1871,13 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
         dispose: async () => undefined,
         brainInfo: async () => ({ label: "stub", fileName: null, onDisk: true, loaded: true }),
         session: async () => ({
-          prompt: async (_text: string, opts?: { functions?: ChatSessionModelFunctions }) => {
+          prompt: async (
+            _text: string,
+            opts?: { functions?: ChatSessionModelFunctions; onTextChunk?: (chunk: string) => void },
+          ) => {
             offeredPerTurn.push(Object.keys(opts?.functions ?? {}));
-            // Do NOT invoke the MCP tool on turn 1.
-            return "[[calm]] Noted.";
+            opts?.onTextChunk?.("[[calm]] Which brightness percentage?");
+            return "[[calm]] Which brightness percentage?";
           },
           decide: async () => ({ claimed: { value: 0 } }),
         }),
@@ -1582,11 +1888,19 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
     try {
       brain.send("Please dim the bedroom lights");
       await brain.whenIdle();
+      // Turn 2: answering a clarifying question ("30%") STILL keeps the routed MCP tool!
+      brain.send("30%");
+      await brain.whenIdle();
+      // Turn 3: unrelated follow-up MUST drop the unused MCP tool!
       brain.send("Remember that I like oolong tea");
       await brain.whenIdle();
       expect(offeredPerTurn[0]).toContain("mcp:home.dim_lights");
-      // Because turn 1 never USED mcp:home.dim_lights, turn 2 MUST NOT carry it over!
-      expect(offeredPerTurn[1]).not.toContain("mcp:home.dim_lights");
+      expect(offeredPerTurn[1]).toContain("mcp:home.dim_lights");
+      expect(offeredPerTurn[2]).not.toContain("mcp:home.dim_lights");
+      // Learner withheld replies on MCP turns (turns 0 & 1) and kept the clean non-MCP turn (turn 2).
+      expect(journaledReplies[0]).toBeNull();
+      expect(journaledReplies[1]).toBeNull();
+      expect(journaledReplies[2]).toBeTruthy();
     } finally {
       await brain.dispose();
       await mcpHub.closeAll();

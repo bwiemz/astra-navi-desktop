@@ -14,6 +14,7 @@ import {
 } from "electron";
 import { takeAwayMessage } from "../core/awayMessage.ts";
 import { safeBrainLabel } from "../core/aiReport.ts";
+import { collectMcpEnvSecrets } from "../core/supportBundle.ts";
 import { Brain } from "../core/brain.ts";
 import { BRAIN_MODELS, findCatalogEntry, type BrainModel } from "../core/models.ts";
 import { ConfigStore } from "../core/config.ts";
@@ -1838,9 +1839,7 @@ async function main(): Promise<void> {
         settings.stationUsername(),
         ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
       ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-      const mcpEnvSecrets = config.value.mcp.servers
-        .flatMap((s) => [...Object.values(s.headers ?? {}), ...Object.values(s.env ?? {})])
-        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+      const mcpEnvSecrets = collectMcpEnvSecrets(config.value.mcp.servers);
       return {
         appVersion: app.getVersion(),
         reportsDir: join(dataDir(), "ai-reports"),

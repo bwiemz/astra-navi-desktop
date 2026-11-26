@@ -947,6 +947,7 @@ export class LocalEngine {
           remote,
           systemPrompt,
           this.options.fetchImpl,
+          this.options.contextSize,
         );
         this.remoteStale = false;
         if (this.history.length > 0) {

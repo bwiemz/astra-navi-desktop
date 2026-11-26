@@ -58,6 +58,8 @@ const SAFE_ENV_KEYS = [
   "APPDATA",
   "LOCALAPPDATA",
   "PATHEXT",
+  "VOLTA_HOME",
+  "NVM_SYMLINK",
 ] as const;
 
 const FORBIDDEN_ENV_KEYS = new Set([
@@ -74,33 +76,78 @@ const FORBIDDEN_ENV_KEYS = new Set([
 
 const SAFE_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
-const MOOD_TAG_RE = new RegExp(`\\[\\[(${MOODS.join("|")})\\]\\]`, "gi");
+const MOOD_TAG_RE = new RegExp(`\\[\\[\\s*(${MOODS.join("|")})\\s*\\]\\]`, "gi");
 
 /**
- * Strips non-whitespace control chars, invisible Unicode tag characters (`U+E0000–U+E007F`),
- * true BiDi overrides/isolates (`U+202A–U+202E`, `U+2066–U+2069`, `U+061C`), and known
- * companion mood tags (`[[happy]]`, etc.) from MCP tool *outputs* and *resources* while
- * preserving legitimate TOML tables (`[[servers]]`), nested arrays (`[[1, 2]]`),
- * LRM/RLM (`U+200E`/`U+200F`), and zero-width joiners (`U+200D` ZWJ for compound emoji
- * like 👩‍💻 and `U+200C` ZWNJ for Persian/Arabic/Indic text).
+ * Strips non-whitespace control chars, standalone/unanchored invisible Unicode tag chars
+ * (`U+E0000–U+E007F`), BiDi overrides (`U+202A–U+202E`, `U+061C`), unbalanced BiDi isolates,
+ * and companion mood tags (`[[happy]]`, `[[ happy ]]`, etc.) from MCP tool *outputs* and
+ * *resources* while preserving legitimate TOML tables (`[[servers]]`), nested arrays
+ * (`[[1, 2]]`), LRM/RLM (`U+200E`/`U+200F`), ZWJ/ZWNJ (`U+200D`/`U+200C`), valid regional
+ * flag emoji tag sequences (🏴󠁧󠁢󠁥󠁮󠁧󠁿, 🏴󠁧󠁢󠁳󠁣󠁴󠁿, 🏴󠁧󠁢󠁷󠁬󠁳󠁿), and properly balanced BiDi isolate pairs (`U+2066–U+2068`..`U+2069`).
  */
 export function sanitizeUntrustedOutput(raw: string): string {
-  const parts: string[] = [];
-  for (const ch of raw) {
+  const chars = [...raw];
+  // First pass: keep characters, allowing valid black-flag emoji tag sequences (U+1F3F4 + 1..8 tags + U+E007F).
+  const kept: string[] = [];
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i] ?? "";
     const cp = ch.codePointAt(0) ?? 0;
+
+    // Preserve valid regional subdivision flag emoji tag sequences (e.g. England/Scotland/Wales).
+    if (cp === 0x1f3f4) {
+      kept.push(ch);
+      let j = i + 1;
+      const tagSeq: string[] = [];
+      while (j < chars.length && tagSeq.length < 8) {
+        const nextCp = chars[j]?.codePointAt(0) ?? 0;
+        if (nextCp >= 0xe0030 && nextCp <= 0xe007a) {
+          tagSeq.push(chars[j] ?? "");
+          j += 1;
+        } else {
+          break;
+        }
+      }
+      if (tagSeq.length > 0 && (chars[j]?.codePointAt(0) ?? 0) === 0xe007f) {
+        kept.push(...tagSeq, chars[j] ?? "");
+        i = j;
+      }
+      continue;
+    }
+
     if (
       (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d) ||
       cp === 0x7f ||
       cp === 0x061c ||
       (cp >= 0x202a && cp <= 0x202e) ||
-      (cp >= 0x2066 && cp <= 0x2069) ||
       (cp >= 0xe0000 && cp <= 0xe007f)
     ) {
       continue;
     }
-    parts.push(ch);
+    kept.push(ch);
   }
-  return parts.join("").replace(MOOD_TAG_RE, "[$1]");
+
+  // Second pass: drop any unmatched BiDi isolate openers (U+2066..U+2068) or closers (U+2069),
+  // preserving only properly balanced isolate pairs.
+  const openStack: number[] = [];
+  const dropIndices = new Set<number>();
+  for (let i = 0; i < kept.length; i += 1) {
+    const cp = kept[i]?.codePointAt(0) ?? 0;
+    if (cp >= 0x2066 && cp <= 0x2068) {
+      openStack.push(i);
+    } else if (cp === 0x2069) {
+      if (openStack.length > 0) {
+        openStack.pop();
+      } else {
+        dropIndices.add(i);
+      }
+    }
+  }
+  for (const unmatched of openStack) dropIndices.add(unmatched);
+
+  const balanced =
+    dropIndices.size === 0 ? kept.join("") : kept.filter((_, idx) => !dropIndices.has(idx)).join("");
+  return balanced.replace(MOOD_TAG_RE, "[$1]");
 }
 
 /** Strips control, zero-width, Unicode tag, BiDi override characters, and `[[...]]` mood markers for schema metadata. */
@@ -225,9 +272,19 @@ export function resolveStdioCommand(
     return null;
   };
 
-  const findNodeExe = (): { command: string; useElectronAsNode: boolean; prependPathDir?: string } => {
+  const findNodeExe = (
+    cliPath?: string,
+  ): { command: string; useElectronAsNode: boolean; prependPathDir?: string } => {
+    if (cliPath) {
+      // Prefer a real `node.exe` colocated with the discovered `npx-cli.js` / `npm-cli.js` install root.
+      const installRoot = pathLib.resolve(pathLib.dirname(cliPath), "..", "..", "..");
+      const siblingNode = pathLib.join(installRoot, "node.exe");
+      if (exists(siblingNode)) {
+        return { command: siblingNode, useElectronAsNode: false, prependPathDir: installRoot };
+      }
+    }
     if (pathLib.basename(nodeExec).toLowerCase() === "node.exe" && exists(nodeExec)) {
-      return { command: nodeExec, useElectronAsNode: false };
+      return { command: nodeExec, useElectronAsNode: false, prependPathDir: pathLib.dirname(nodeExec) };
     }
     for (const dir of searchDirs) {
       const cand = pathLib.join(dir, "node.exe");
@@ -235,16 +292,19 @@ export function resolveStdioCommand(
         return { command: cand, useElectronAsNode: false, prependPathDir: dir };
       }
     }
+    // Electron fallback (`ELECTRON_RUN_AS_NODE=1`): still prepend the npm root dir so bin shims resolve.
+    const fallbackDir = cliPath ? pathLib.resolve(pathLib.dirname(cliPath), "..", "..", "..") : undefined;
     return {
       command: nodeExec,
       useElectronAsNode: pathLib.basename(nodeExec).toLowerCase() !== "node.exe",
+      ...(fallbackDir ? { prependPathDir: fallbackDir } : {}),
     };
   };
 
   if (baseLower === "npx" || baseLower === "npx.cmd") {
     const cli = findNodeCliScript("npx-cli.js");
     if (cli) {
-      const node = findNodeExe();
+      const node = findNodeExe(cli);
       return {
         command: node.command,
         args: [cli, ...args],
@@ -268,7 +328,7 @@ export function resolveStdioCommand(
   if (baseLower === "npm" || baseLower === "npm.cmd") {
     const cli = findNodeCliScript("npm-cli.js");
     if (cli) {
-      const node = findNodeExe();
+      const node = findNodeExe(cli);
       return {
         command: node.command,
         args: [cli, ...args],
@@ -1497,13 +1557,26 @@ export class McpHub {
     args: Record<string, unknown> = {},
     guard?: McpCallGuard,
   ): Promise<McpCallResult> {
+    if (this.closed) {
+      throw new Error(`Cannot call MCP tool "${fullToolName}": MCP hub is closed.`);
+    }
     const parsed = this.parsePrefixedToolName(fullToolName);
     if (!parsed) throw new Error(`Invalid MCP tool name "${fullToolName}".`);
     const { serverId, toolName, client } = parsed;
     if (!client) throw new Error(`Unknown MCP server "${serverId}".`);
-    if (!client.isConnected) await client.initialize();
+    if (!client.isConnected) {
+      await client.initialize();
+      if (this.closed) {
+        await client.close().catch(() => undefined);
+        throw new Error(`Cannot call MCP tool "${fullToolName}": MCP hub is closed.`);
+      }
+    }
     if (client.tools.length === 0) {
       await client.listTools();
+      if (this.closed) {
+        await client.close().catch(() => undefined);
+        throw new Error(`Cannot call MCP tool "${fullToolName}": MCP hub is closed.`);
+      }
     }
     const registeredTool = client.tools.find((t) => t.name === toolName);
     if (!registeredTool) {

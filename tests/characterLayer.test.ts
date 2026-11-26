@@ -19,7 +19,7 @@ import { describeNotice as describeWatchNotice } from "../src/core/reach.ts";
 import { describeRecalled, Recall } from "../src/core/recall.ts";
 import { describeRoutine } from "../src/core/routines.ts";
 import { describeAgendaReading, selfCheck } from "../src/core/selfCheck.ts";
-import { afterWakeName } from "../src/core/wakeName.ts";
+import { afterWakeName, extractSafeLegacyFirstWordAlias } from "../src/core/wakeName.ts";
 import { ScreenWatch } from "../src/core/watch.ts";
 import type { ChatHistoryItem, ChatSessionModelFunctions } from "node-llama-cpp";
 import {
@@ -812,14 +812,26 @@ describe("Character Layer security: literal slot substitution & Brain integratio
   });
 
   it("handles Round 4 CJK 1-char wake safety, one-time legacy wake migration, and the remaining 6 Captain sites", async () => {
-    // 1. 1-char CJK alias "星" MUST NOT cut built-in "星航" or hijack ordinary words like "星期"!
+    // 1. Short CJK aliases (1- and 2-char: "星", "阿斯", "アス") and "Hey Astra" MUST NEVER cut
+    //    longer built-in names or hijack ordinary words!
     expect(afterWakeName("星航，打开笔记", ["星"], "星")).toBe("打开笔记");
     expect(afterWakeName("星期天去哪", ["星"], "星")).toBeNull();
     expect(afterWakeName("星、天気は？", ["星"], "星")).toBe("天気は？");
     expect(afterWakeName("星", ["星"], "星")).toBe("");
+    expect(afterWakeName("阿斯特拉，打开笔记", ["阿斯"])).toBe("打开笔记");
+    expect(afterWakeName("アストラ、メモ開いて", ["アス"])).toBe("メモ開いて");
+    expect(afterWakeName("アスファルトは熱い", ["アス"])).toBeNull();
+    expect(afterWakeName("アス、天気は？", ["アス"])).toBe("天気は？");
+    expect(afterWakeName("Hey Astra Navi, open notes", ["Hey Astra"])).toBe("open notes");
 
-    // 2. ConfigStore.load() performs a one-time wake-alias migration for existing multi-word custom
-    //    names ("Lyra Vance" -> adds "Lyra" once), skips stop-words ("The Navigator"), and respects user removal!
+    // Punctuated titles ("Mr.", "Dr.", "Prof.", "St.") are skipped by legacy alias extraction!
+    expect(extractSafeLegacyFirstWordAlias("Mr. Spock")).toBeNull();
+    expect(extractSafeLegacyFirstWordAlias("Dr. House")).toBeNull();
+    expect(extractSafeLegacyFirstWordAlias("Prof. Oak")).toBeNull();
+    expect(extractSafeLegacyFirstWordAlias("St. Jude")).toBeNull();
+
+    // 2. ConfigStore.load() sets wakeAliasMigrated unconditionally on first load, and card/bundle/reset
+    //    rebuilders ALL preserve wakeAliasMigrated: true so importing "Nova Stern" later NEVER adds "Nova"!
     const dir = await makeTempDir("astra-wake-mig-");
     const cfgPath = join(dir, "config.json");
     await writeFile(
@@ -841,7 +853,7 @@ describe("Character Layer security: literal slot substitution & Brain integratio
     await store2.load();
     expect(store2.value.voice.otherNames).toEqual([]);
 
-    // Stop-word leading name ("The Navigator") must NOT get "The" added.
+    // Stop-word leading name ("The Navigator") STILL marks wakeAliasMigrated: true unconditionally!
     const stopPath = join(dir, "stop-config.json");
     await writeFile(
       stopPath,
@@ -854,6 +866,17 @@ describe("Character Layer security: literal slot substitution & Brain integratio
     const stopStore = new ConfigStore(stopPath);
     await stopStore.load();
     expect(stopStore.value.voice.otherNames).toEqual([]);
+    expect(stopStore.value.character.wakeAliasMigrated).toBe(true);
+
+    // Importing a new card ("Nova Stern") preserves wakeAliasMigrated: true so next reload does NOT add "Nova"!
+    const novaCard = parsePersonaCardJson({ displayName: "Nova Stern", userAddress: "Alex" });
+    const novaChar = characterFromImportedCard(novaCard, "Alex");
+    expect(novaChar.wakeAliasMigrated).toBe(true);
+    expect(defaultCharacterConfig().wakeAliasMigrated).toBe(true);
+    await stopStore.update({ character: novaChar });
+    const reloadedAfterImport = new ConfigStore(stopPath);
+    await reloadedAfterImport.load();
+    expect(reloadedAfterImport.value.voice.otherNames).toEqual([]);
 
     // 3. Remaining 6 Captain sites adapt static wording while keeping user/machine/app names intact!
     const recalledText = describeRecalled(

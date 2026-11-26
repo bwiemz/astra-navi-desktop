@@ -33,6 +33,7 @@ jobs:
 
       - run: npm ci
       - run: npm run check
+      - run: npm run check:model-sizes
       - run: npm run build
       - run: npm run eval -- --fuzz
       - run: npm run eval -- --audit

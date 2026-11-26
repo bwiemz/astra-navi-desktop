@@ -39,11 +39,25 @@ function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 429 || (status >= 500 && status <= 599);
 }
 
+/** Parses an HTTP `Retry-After` header (delta seconds or HTTP date) into ms, clamped to [0, 15_000]. */
+function parseRetryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const trimmed = header.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Math.min(15_000, Math.max(0, Number(trimmed) * 1_000));
+  }
+  const dateMs = Date.parse(trimmed);
+  if (Number.isFinite(dateMs)) {
+    return Math.min(15_000, Math.max(0, dateMs - Date.now()));
+  }
+  return null;
+}
+
 async function probeRemoteSizeOnce(
   url: string,
   fetchImpl: typeof fetch,
   timeoutMs: number,
-): Promise<{ status: number; actualBytes: number | null; retryable: boolean }> {
+): Promise<{ status: number; actualBytes: number | null; retryable: boolean; retryAfterMs?: number | null }> {
   // First try manual-redirect HEAD so Hugging Face's `x-linked-size` header answers in 1 hop
   // without chasing CDN/LFS redirects.
   const manualRes = await fetchImpl(url, {
@@ -65,6 +79,7 @@ async function probeRemoteSizeOnce(
       status: manualRes.status,
       actualBytes: null,
       retryable: isRetryableStatus(manualRes.status),
+      retryAfterMs: parseRetryAfterMs(manualRes.headers.get("retry-after")),
     };
   }
 
@@ -79,6 +94,7 @@ async function probeRemoteSizeOnce(
       status: headRes.status,
       actualBytes: null,
       retryable: isRetryableStatus(headRes.status),
+      retryAfterMs: parseRetryAfterMs(headRes.headers.get("retry-after")),
     };
   }
   const headLen =
@@ -101,6 +117,7 @@ async function probeRemoteSizeOnce(
       status: rangeRes.status,
       actualBytes: null,
       retryable: isRetryableStatus(rangeRes.status),
+      retryAfterMs: parseRetryAfterMs(rangeRes.headers.get("retry-after")),
     };
   }
   const total =
@@ -119,9 +136,11 @@ async function probeRemoteSize(
   let lastStatus: number | null = null;
   let lastError: string | undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let retryAfterMs: number | null = null;
     try {
       const res = await probeRemoteSizeOnce(url, fetchImpl, timeoutMs);
       lastStatus = res.status;
+      retryAfterMs = res.retryAfterMs ?? null;
       if (res.actualBytes !== null || !res.retryable || attempt === maxAttempts) {
         return { status: res.status, actualBytes: res.actualBytes };
       }
@@ -132,8 +151,10 @@ async function probeRemoteSize(
         return { status: lastStatus, actualBytes: null, lastError };
       }
     }
-    if (retryBaseDelayMs > 0) {
-      await new Promise((r) => setTimeout(r, retryBaseDelayMs * 2 ** (attempt - 1)));
+    const backoffMs = retryBaseDelayMs > 0 ? retryBaseDelayMs * 2 ** (attempt - 1) : 0;
+    const waitMs = retryAfterMs !== null ? Math.max(retryAfterMs, backoffMs) : backoffMs;
+    if (waitMs > 0) {
+      await new Promise((r) => setTimeout(r, waitMs));
     }
   }
   return { status: lastStatus, actualBytes: null, lastError };

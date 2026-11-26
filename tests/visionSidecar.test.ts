@@ -857,5 +857,130 @@ describe("Round 3 vision catalog integrity, pairing precision, migration, flags,
     expect(hfCheck.ok).toBe(true);
     expect(attempts).toBe(2);
     expect(hfCheck.results[0]?.actualBytes).toBe(204_987_232);
+
+    // 5. checkCatalogSizes() honors Retry-After header on HTTP 429!
+    let rateAttempts = 0;
+    const tRate0 = performance.now();
+    const rateCheck = await checkCatalogSizes(
+      [
+        {
+          label: "0.8B mmproj",
+          fileName: "Qwen3.5-0.8B-mmproj-F16.gguf",
+          url: "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-F16.gguf",
+          sizeBytes: 204_987_232,
+        },
+      ],
+      {
+        maxAttempts: 2,
+        retryBaseDelayMs: 5,
+        fetchImpl: (async () => {
+          rateAttempts += 1;
+          if (rateAttempts === 1) {
+            // HTTP date ~120ms in the future tests Retry-After parsing without slowing the suite.
+            return new Response(null, {
+              status: 429,
+              headers: { "retry-after": new Date(Date.now() + 120).toUTCString() },
+            });
+          }
+          return new Response(null, {
+            status: 302,
+            headers: { "x-linked-size": "204987232" },
+          });
+        }) as typeof fetch,
+      },
+    );
+    expect(rateCheck.ok).toBe(true);
+    expect(rateAttempts).toBe(2);
+    expect(performance.now() - tRate0).toBeLessThan(2_000);
+
+    // 6. Calling describeImage() immediately after dispose() clears stale `starting` and boots cleanly!
+    const okBin = join(dir, "llama-ok-relaunch");
+    await writeFile(
+      okBin,
+      [
+        `#!${process.execPath}`,
+        `import { createServer } from "node:http";`,
+        `const args = process.argv.slice(2);`,
+        `const arg = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };`,
+        `const server = createServer((req, res) => {`,
+        `  if (req.url === "/health") { res.writeHead(200); res.end("ok"); return; }`,
+        `  req.resume();`,
+        `  req.on("end", () => {`,
+        `    res.writeHead(200, { "content-type": "application/json" });`,
+        `    res.end(JSON.stringify({ choices: [{ message: { content: "fresh-boot-ok" } }] }));`,
+        `  });`,
+        `});`,
+        `server.listen(Number(arg("--port")), arg("--host"));`,
+        `process.on("SIGTERM", () => server.close(() => process.exit(0)));`,
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(okBin, 0o755);
+
+    let holdFirst = true;
+    const relaunchSidecar = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => okBin,
+      beforeSpawn: async () => {
+        if (holdFirst) {
+          holdFirst = false;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      },
+      startupTimeoutMs: 5_000,
+      idleUnloadMs: 120,
+    });
+    const firstBoot = relaunchSidecar.describeImage(png, { mode: "screen" });
+    await new Promise((r) => setTimeout(r, 25));
+    await relaunchSidecar.dispose();
+    // Immediately start a brand-new call while the old boot promise is still settling -> must boot fresh!
+    const secondResult = await relaunchSidecar.describeImage(png, { mode: "screen" });
+    expect(await firstBoot).toBeNull();
+    expect(secondResult).toBe("fresh-boot-ok");
+    await relaunchSidecar.dispose();
+
+    // 7. A crashed child's idle timer MUST NOT abort a subsequent boot!
+    const crashThenBootCount = join(dir, "crash-then-boot.txt");
+    const crashThenBootBin = join(dir, "llama-crash-then-boot");
+    await writeFile(
+      crashThenBootBin,
+      [
+        `#!${process.execPath}`,
+        `import { createServer } from "node:http";`,
+        `import { appendFileSync, readFileSync } from "node:fs";`,
+        `appendFileSync(${JSON.stringify(crashThenBootCount)}, "1\\n");`,
+        `const n = readFileSync(${JSON.stringify(crashThenBootCount)}, "utf8").trim().split("\\n").length;`,
+        `const args = process.argv.slice(2);`,
+        `const arg = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };`,
+        `const server = createServer((req, res) => {`,
+        `  if (req.url === "/health") { res.writeHead(200); res.end("ok"); return; }`,
+        `  req.resume();`,
+        `  req.on("end", () => {`,
+        `    res.writeHead(200, { "content-type": "application/json" });`,
+        `    res.end(JSON.stringify({ choices: [{ message: { content: "boot-" + n } }] }));`,
+        // Crash child 1 shortly after serving request 1 (before its 140ms idle timer fires)!
+        `    if (n === 1) setTimeout(() => process.exit(1), 25);`,
+        `  });`,
+        `});`,
+        // Boot 2 starts slightly slower (200ms) so it spans across child 1's old 140ms idle deadline.
+        `setTimeout(() => server.listen(Number(arg("--port")), arg("--host")), n === 2 ? 200 : 0);`,
+        `process.on("SIGTERM", () => server.close(() => process.exit(0)));`,
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(crashThenBootBin, 0o755);
+
+    const idleRaceSidecar = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => crashThenBootBin,
+      startupTimeoutMs: 5_000,
+      idleUnloadMs: 140,
+    });
+    expect(await idleRaceSidecar.describeImage(png, { mode: "screen" })).toBe("boot-1");
+    await new Promise((r) => setTimeout(r, 60)); // child 1 has exited
+    expect(await idleRaceSidecar.describeImage(png, { mode: "screen" })).toBe("boot-2");
+    await idleRaceSidecar.dispose();
   });
 });

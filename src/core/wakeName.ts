@@ -44,12 +44,18 @@ const LEGACY_FIRST_WORD_STOP_WORDS = new Set([
   "ms",
   "miss",
   "dr",
+  "prof",
   "sir",
   "lady",
   "lord",
+  "saint",
+  "st",
   "captain",
+  "commander",
   "agent",
   "assistant",
+  "ai",
+  "bot",
   "little",
   "big",
   "new",
@@ -69,19 +75,21 @@ export function isValidWakeAlias(raw: string): boolean {
 
 /**
  * Extracts a safe first-word alias for one-time migration of existing multi-word custom
- * character names (e.g. `"Lyra Vance"` -> `"Lyra"`), skipping short or stop-word prefixes
- * like `"The Navigator"` or `"Hey Jude"`.
+ * character names (e.g. `"Lyra Vance"` -> `"Lyra"`), skipping punctuated titles (`"Mr."`,
+ * `"Dr."`), short prefixes, or stop-words like `"The Navigator"` or `"Hey Jude"`.
  */
 export function extractSafeLegacyFirstWordAlias(displayName: string | undefined): string | null {
   const trimmed = (displayName ?? "").trim();
   if (!trimmed || BUILTIN_DEFAULT_NAMES.has(trimmed.toLowerCase())) return null;
   const words = trimmed.split(/\s+/).filter(Boolean);
   if (words.length < 2) return null;
-  const first = words[0] ?? "";
-  if (first.length < 3) return null;
-  const key = first.toLowerCase();
+  const rawFirst = words[0] ?? "";
+  // Strip surrounding punctuation so "Mr." -> "Mr", "Dr." -> "Dr", "(The)" -> "The".
+  const cleaned = rawFirst.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+  if (cleaned.length < 3) return null;
+  const key = cleaned.toLowerCase();
   if (BUILTIN_DEFAULT_NAMES.has(key) || LEGACY_FIRST_WORD_STOP_WORDS.has(key)) return null;
-  return first;
+  return cleaned;
 }
 
 /** Builds wake-name candidates from an active custom character name plus user-configured aliases. */
@@ -116,9 +124,10 @@ function buildAliasRegex(name: string): RegExp {
     .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
     .replace(/\s+/g, String.raw`[\s-]*`);
   const endsWithCjk = CJK_CHAR_RE.test(name.slice(-1));
-  if (name.length === 1 && endsWithCjk) {
-    // 1-character CJK wake names MUST be followed by a separator (comma/pause/space) or end of
-    // utterance so words starting with that character (e.g. "星期" for "星") never misfire.
+  if (endsWithCjk && name.length <= 2) {
+    // 1- and 2-character CJK wake aliases (e.g. "星", "阿斯", "アス") MUST be followed by a
+    // separator (comma/pause/space) or end of utterance so longer built-in names ("星航",
+    // "阿斯特拉", "アストラ") and ordinary words ("星期", "アスファルト") never get hijacked.
     return new RegExp(
       String.raw`^\s*${GREETING}${escaped}(?:[\s,.!?:;、。！？，-]+|$)`,
       "iu",
@@ -142,14 +151,30 @@ export function afterWakeName(
   characterName?: string,
 ): string | null {
   const aliases = wakeAliasesWithCharacter(otherNames, characterName);
-  const multiCharForms = aliases.filter((name) => name.length >= 2).map(buildAliasRegex);
-  const singleCharCjkForms = aliases.filter((name) => name.length === 1).map(buildAliasRegex);
-  // Order: multi-char custom aliases (longest first, e.g. "Astra-chan", "Lyra Vance") ->
-  // built-in NAME_FORMS (so "星航，打开笔记" matches "星航" before 1-char "星") ->
-  // 1-character CJK aliases (requiring a trailing separator).
-  for (const form of [...multiCharForms, ...NAME_FORMS, ...singleCharCjkForms]) {
+  const aliasForms = aliases.map(buildAliasRegex);
+
+  // Pick the LONGEST actual match in the utterance (breaking ties in favor of built-in NAME_FORMS)
+  // so aliases like "Hey Astra" can never cut "Hey Astra Navi, open notes" and short CJK aliases
+  // ("星", "阿斯", "アス") can never hijack "星航", "阿斯特拉", or "アストラ".
+  let bestLen = -1;
+  let bestIsBuiltin = false;
+
+  for (const form of NAME_FORMS) {
     const match = form.exec(heard);
-    if (match) return heard.slice(match[0].length).trim();
+    if (match && match[0].length > bestLen) {
+      bestLen = match[0].length;
+      bestIsBuiltin = true;
+    }
   }
-  return null;
+  for (const form of aliasForms) {
+    const match = form.exec(heard);
+    if (!match) continue;
+    const len = match[0].length;
+    if (len > bestLen || (len === bestLen && !bestIsBuiltin)) {
+      bestLen = len;
+      bestIsBuiltin = false;
+    }
+  }
+
+  return bestLen >= 0 ? heard.slice(bestLen).trim() : null;
 }

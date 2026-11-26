@@ -45,6 +45,7 @@ export function defaultCharacterConfig(): CharacterConfig {
     bio: "",
     source: "default",
     sourceName: "",
+    wakeAliasMigrated: true,
   };
 }
 
@@ -110,6 +111,7 @@ export function characterFromBundleManifest(
     bio: sanitizePersonaText(persona?.bio ?? "", 800),
     source: "bundle",
     sourceName: sanitizePersonaText(manifest.name, 80),
+    wakeAliasMigrated: true,
   };
 }
 
@@ -130,6 +132,7 @@ export function characterFromImportedCard(
     bio: card.bio,
     source: "card",
     sourceName: card.sourceName,
+    wakeAliasMigrated: true,
   };
 }
 

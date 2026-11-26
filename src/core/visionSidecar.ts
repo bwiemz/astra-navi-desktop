@@ -550,12 +550,24 @@ export class LlamaVisionSidecar implements VisionDescriber {
     return { ok: true, path: pair.mmprojPath };
   }
 
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
   private scheduleIdleUnload(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.clearIdleTimer();
     const delay = this.opts.idleUnloadMs ?? DEFAULT_IDLE_UNLOAD_MS;
-    if (delay <= 0) return;
+    const targetChild = this.child;
+    if (delay <= 0 || !targetChild) return;
     this.idleTimer = setTimeout(() => {
-      void this.dispose();
+      // Only dispose if this exact child is still the active process — a crashed child's
+      // stale timer must NEVER abort a newer boot or a replacement child!
+      if (this.child === targetChild) {
+        void this.dispose();
+      }
     }, delay);
     this.idleTimer.unref();
   }
@@ -786,6 +798,7 @@ export class LlamaVisionSidecar implements VisionDescriber {
         child.on("error", (err: Error) => {
           spawnError = err;
           if (this.child === child) {
+            this.clearIdleTimer();
             this.child = null;
             this.runningBaseUrl = null;
             this.runningApiKey = null;
@@ -794,6 +807,7 @@ export class LlamaVisionSidecar implements VisionDescriber {
         });
         child.once("exit", () => {
           if (this.child === child) {
+            this.clearIdleTimer();
             this.child = null;
             this.runningBaseUrl = null;
             this.runningApiKey = null;
@@ -923,10 +937,8 @@ export class LlamaVisionSidecar implements VisionDescriber {
 
   async dispose(): Promise<void> {
     this.disposeGeneration += 1;
-    if (this.idleTimer) {
-      clearTimeout(this.idleTimer);
-      this.idleTimer = null;
-    }
+    this.clearIdleTimer();
+    this.starting = null;
     this.bootAbort?.abort();
     const child = this.child;
     this.child = null;

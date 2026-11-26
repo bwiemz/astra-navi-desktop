@@ -819,6 +819,7 @@ async function loadHistory(): Promise<void> {
 
 /** Past conversations were erased on purpose: nothing of them stays on the page either. */
 function forgetLog(): void {
+  resetAiReportDialog();
   historyAsked.callOff();
   latestTurnNodes = [];
   latestTurnActionsBar = null;
@@ -857,6 +858,7 @@ function finishEntry(): void {
 }
 
 let resetAiReportDialog: () => void = () => undefined;
+let refreshAiReportOnNewReply: () => void = () => undefined;
 
 /** Clears what is live. In the panel a finished reply is already in the list above. */
 function clearLive(): void {
@@ -1270,7 +1272,7 @@ function onBrainEvent(event: BrainEvent): void {
       }
       break;
     case "reply-start":
-      resetAiReportDialog();
+      refreshAiReportOnNewReply();
       setReply("");
       break;
     case "text":
@@ -1724,12 +1726,37 @@ function wireAiReportDialog(): void {
   let lastIssueUrl = "";
   let snapshotReply = "";
   let snapshotHeard = "";
+  let inFlight = false;
+  let lastSavedKey = "";
+  const buildReportKey = (): string =>
+    `${categoryEl.value}\0${includeBox.checked ? "1" : "0"}\0${detailsEl.value.trim()}\0${snapshotReply}\0${snapshotHeard}`;
+  const markReportDirty = (): void => {
+    lastSavedKey = "";
+    if (!inFlight) saveBtn.disabled = false;
+  };
+  detailsEl.addEventListener("input", markReportDirty);
+  categoryEl.addEventListener("change", markReportDirty);
+  includeBox.addEventListener("change", markReportDirty);
+
   resetAiReportDialog = (): void => {
     dialogEl.hidden = true;
     snapshotReply = "";
     snapshotHeard = "";
     lastIssueUrl = "";
+    lastSavedKey = "";
     detailsEl.value = "";
+    if (statusEl) statusEl.textContent = "";
+    if (githubBtn) githubBtn.hidden = true;
+    if (!inFlight) saveBtn.disabled = false;
+  };
+  refreshAiReportOnNewReply = (): void => {
+    // Only refresh when the dialog is closed so incoming proactive reminders/events never
+    // close the dialog or wipe a note the user is currently typing.
+    if (!dialogEl.hidden) return;
+    snapshotReply = "";
+    snapshotHeard = "";
+    lastIssueUrl = "";
+    lastSavedKey = "";
     if (statusEl) statusEl.textContent = "";
     if (githubBtn) githubBtn.hidden = true;
   };
@@ -1740,6 +1767,8 @@ function wireAiReportDialog(): void {
       // new replies arriving while the user types a note never overwrite what they reported.
       snapshotReply = document.getElementById("reply")?.textContent ?? "";
       snapshotHeard = document.getElementById("heard")?.textContent ?? "";
+      lastSavedKey = "";
+      if (!inFlight) saveBtn.disabled = false;
       if (statusEl) statusEl.textContent = "";
       if (githubBtn) githubBtn.hidden = true;
       lastIssueUrl = "";
@@ -1753,6 +1782,13 @@ function wireAiReportDialog(): void {
     if (lastIssueUrl) bridge.openLink(lastIssueUrl);
   });
   saveBtn.addEventListener("click", () => {
+    if (inFlight) return;
+    const reportKey = buildReportKey();
+    if (lastSavedKey && reportKey === lastSavedKey) {
+      if (statusEl) statusEl.textContent = "Already saved locally (edit details to save another report).";
+      return;
+    }
+    inFlight = true;
     saveBtn.disabled = true;
     if (statusEl) statusEl.textContent = "Saving scrubbed report locally…";
     void bridge
@@ -1766,9 +1802,12 @@ function wireAiReportDialog(): void {
       .then((res) => {
         if (res.ok) {
           lastIssueUrl = res.issueUrl;
+          lastSavedKey = buildReportKey();
           if (githubBtn) githubBtn.hidden = false;
           if (statusEl) statusEl.textContent = `Saved locally: ${res.filePath}`;
           detailsEl.value = "";
+          // Update key after clearing textarea so a second immediate Save click cannot write a duplicate.
+          lastSavedKey = buildReportKey();
         } else if (statusEl) {
           statusEl.textContent = res.error;
         }
@@ -1777,6 +1816,7 @@ function wireAiReportDialog(): void {
         if (statusEl) statusEl.textContent = error instanceof Error ? error.message : String(error);
       })
       .finally(() => {
+        inFlight = false;
         saveBtn.disabled = false;
       });
   });

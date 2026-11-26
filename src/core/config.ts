@@ -390,28 +390,37 @@ export class ConfigStore {
       const parsed = ConfigSchema.safeParse(JSON.parse(raw));
       if (parsed.success) {
         this.current = parsed.data;
-        // One-time migration: preserve first-word wake alias for existing users with multi-word
-        // custom character names (e.g. "Lyra Vance" -> adds "Lyra" to voice.otherNames once).
+        // Genuine one-time migration: preserve first-word wake alias for pre-existing multi-word
+        // custom character names (e.g. "Lyra Vance" -> adds "Lyra" to voice.otherNames once),
+        // then unconditionally mark `wakeAliasMigrated: true` so later card/bundle imports never re-run it.
         if (this.current.character.wakeAliasMigrated !== true) {
           const legacyFirst = extractSafeLegacyFirstWordAlias(this.current.character.displayName);
-          if (legacyFirst) {
-            const existing = this.current.voice.otherNames;
-            const hasAlready = existing.some(
-              (name) => name.trim().toLowerCase() === legacyFirst.toLowerCase(),
-            );
-            const nextOtherNames =
-              !hasAlready && existing.length < 5 ? [...existing, legacyFirst] : existing;
-            await this.update({
-              voice: { ...this.current.voice, otherNames: nextOtherNames },
-              character: { ...this.current.character, wakeAliasMigrated: true },
-            });
-          }
+          const existing = this.current.voice.otherNames;
+          const hasAlready =
+            legacyFirst !== null &&
+            existing.some((name) => name.trim().toLowerCase() === legacyFirst.toLowerCase());
+          const nextOtherNames =
+            legacyFirst !== null && !hasAlready && existing.length < 5
+              ? [...existing, legacyFirst]
+              : existing;
+          await this.update({
+            ...(nextOtherNames !== existing
+              ? { voice: { ...this.current.voice, otherNames: nextOtherNames } }
+              : {}),
+            character: { ...this.current.character, wakeAliasMigrated: true },
+          });
         }
       } else {
         console.warn(`[config] ignoring invalid config file: ${parsed.error.message}`);
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        // Fresh install with no legacy config on disk: mark migration complete in memory.
+        this.current = {
+          ...this.current,
+          character: { ...this.current.character, wakeAliasMigrated: true },
+        };
+      } else {
         console.warn(`[config] could not read ${this.file}:`, error);
       }
     }

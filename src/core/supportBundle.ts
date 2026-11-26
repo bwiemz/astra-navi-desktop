@@ -118,6 +118,40 @@ const COMMON_NON_SECRET_LITERALS = new Set([
   "system",
 ]);
 
+const NON_SECRET_MCP_ENV_KEYS = new Set([
+  "PORT",
+  "HOST",
+  "HOSTNAME",
+  "TZ",
+  "LANG",
+  "LC_ALL",
+  "NODE_ENV",
+  "LOG_LEVEL",
+  "DEBUG",
+  "VERBOSE",
+  "TIMEOUT",
+  "RETRIES",
+  "MAX_RETRIES",
+  "WORKERS",
+]);
+
+/** Collects MCP server header and env values worth redacting, skipping benign non-secret env keys like `PORT` or `LOG_LEVEL`. */
+export function collectMcpEnvSecrets(
+  servers: readonly { headers?: Record<string, string>; env?: Record<string, string> }[],
+): string[] {
+  const out: string[] = [];
+  for (const server of servers) {
+    for (const val of Object.values(server.headers ?? {})) {
+      if (typeof val === "string" && val.trim().length > 0) out.push(val);
+    }
+    for (const [key, val] of Object.entries(server.env ?? {})) {
+      if (NON_SECRET_MCP_ENV_KEYS.has(key.trim().toUpperCase())) continue;
+      if (typeof val === "string" && val.trim().length > 0) out.push(val);
+    }
+  }
+  return out;
+}
+
 function escapeRegexLiteral(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -125,9 +159,6 @@ function escapeRegexLiteral(literal: string): string {
 function shouldRedactMcpEnvLiteral(secret: string): boolean {
   if (secret.length < 2) return false;
   if (COMMON_NON_SECRET_LITERALS.has(secret.toLowerCase())) return false;
-  // Common small numeric MCP env values (PORT=11434, TIMEOUT=30, RETRIES=3) aren't secrets;
-  // long numeric pins/tokens (>= 6 digits) and ALL strict extraSecrets are still redacted.
-  if (/^\d{1,5}$/.test(secret)) return false;
   return true;
 }
 
@@ -136,6 +167,10 @@ function shouldRedactMcpEnvLiteral(secret: string): boolean {
  * SSH public/host fingerprints, email addresses, IP addresses, OS user paths,
  * strict secrets (hostnames, usernames, machine names — even short or numeric),
  * and MCP env/header values (excluding common benign config words like `true`/`info`).
+ *
+ * All candidate literals are sorted longest-first and matched case-insensitively so
+ * short names (`nas`, `pve`) NEVER partially rewrite longer hostnames (`nas.tail1234.ts.net`,
+ * `pve.home.arpa`) and uppercase variants (`NAS`) cannot leak through.
  */
 export function redactSupportText(
   text: string,
@@ -153,32 +188,40 @@ export function redactSupportText(
     }
   };
 
-  const redactLiteral = (secret: string): void => {
-    if (!out.includes(secret)) return;
-    // Alphanumeric tokens < 16 chars use whole-token boundaries so short hostnames/usernames
-    // ("pve", "nas", "admin", "kenji", "84726193") are ALWAYS scrubbed without mangling
-    // unrelated English words ("improves", "information").
-    if (secret.length < 16 && /^[A-Za-z0-9_]+$/.test(secret)) {
-      replaceCount(
-        new RegExp(`(?<![A-Za-z0-9_])${escapeRegexLiteral(secret)}(?![A-Za-z0-9_])`, "g"),
-        "[redacted]",
-      );
-    } else {
-      out = out.split(secret).join("[redacted]");
-      count += 1;
-    }
-  };
-
+  // Deduplicate case-insensitively and sort LONGEST FIRST so `nas.tail1234.ts.net` is always
+  // scrubbed before `nas`, preventing `[redacted].tail1234.ts.net` leaks.
+  const seenLower = new Set<string>();
+  const orderedLiterals: string[] = [];
   for (const rawSecret of extraSecrets) {
     const secret = rawSecret.trim();
     if (secret.length < 2) continue;
-    redactLiteral(secret);
+    const lower = secret.toLowerCase();
+    if (seenLower.has(lower)) continue;
+    seenLower.add(lower);
+    orderedLiterals.push(secret);
   }
-
   for (const rawEnv of mcpEnvSecrets) {
     const secret = rawEnv.trim();
     if (!shouldRedactMcpEnvLiteral(secret)) continue;
-    redactLiteral(secret);
+    const lower = secret.toLowerCase();
+    if (seenLower.has(lower)) continue;
+    seenLower.add(lower);
+    orderedLiterals.push(secret);
+  }
+  orderedLiterals.sort((a, b) => b.length - a.length);
+
+  for (const secret of orderedLiterals) {
+    // Alphanumeric tokens < 16 chars use whole-token boundaries so short hostnames/usernames
+    // ("pve", "nas", "admin", "kenji", "84726193") are ALWAYS scrubbed case-insensitively
+    // without mangling unrelated English words ("gymnasium", "administrator", "information").
+    if (secret.length < 16 && /^[A-Za-z0-9_]+$/.test(secret)) {
+      replaceCount(
+        new RegExp(`(?<![A-Za-z0-9_])${escapeRegexLiteral(secret)}(?![A-Za-z0-9_])`, "gi"),
+        "[redacted]",
+      );
+    } else {
+      replaceCount(new RegExp(escapeRegexLiteral(secret), "gi"), "[redacted]");
+    }
   }
 
   const currentHome = homedir();

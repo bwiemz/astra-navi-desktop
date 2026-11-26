@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertSupportBundleSafe,
   buildRedactedSupportBundle,
+  collectMcpEnvSecrets,
   formatSupportBundleJson,
   redactSupportText,
 } from "../src/core/supportBundle.ts";
@@ -81,6 +82,43 @@ describe("redacted support bundle", () => {
     expect(json).not.toContain("/home/alice/.local/share/her.db");
     expect(bundle.redactionsApplied).toBeGreaterThanOrEqual(4);
     expect(bundle.selfCheck?.storage[0]).toEqual({ label: "Her records database", bytes: 4096 });
+  });
+
+  it("sorts secrets longest-first, matches case-insensitively, scrubs short/numeric secrets & 4-digit MCP PINs, and skips non-secret MCP env keys", () => {
+    const sample =
+      "More information available (debug=true on localhost:11434) at gymnasium for administrator; " +
+      "connect to nas.tail1234.ts.net, NAS, pve.home.arpa, PVE, user admin, user kenji, " +
+      "pin 84726193, mcp pin 4829, and token ha-secret-token-7788.";
+    // Deliberately pass short secrets BEFORE longer hostnames to verify longest-first sorting!
+    const mcpEnv = collectMcpEnvSecrets([
+      {
+        headers: { Authorization: "ha-secret-token-7788" },
+        env: { PORT: "11434", LOG_LEVEL: "info", DEBUG: "true", PIN: "4829" },
+      },
+    ]);
+    expect(mcpEnv).not.toContain("11434");
+    expect(mcpEnv).toContain("4829");
+    expect(mcpEnv).toContain("ha-secret-token-7788");
+
+    const scrubbed = redactSupportText(
+      sample,
+      ["nas", "nas.tail1234.ts.net", "pve", "pve.home.arpa", "admin", "kenji", "84726193"],
+      ["info", "true", "debug", "localhost", ...mcpEnv],
+    );
+    expect(scrubbed.text).toContain("More information available");
+    expect(scrubbed.text).toContain("debug=true");
+    expect(scrubbed.text).toContain("localhost:11434");
+    expect(scrubbed.text).toContain("gymnasium");
+    expect(scrubbed.text).toContain("administrator");
+    expect(scrubbed.text).not.toContain("tail1234.ts.net");
+    expect(scrubbed.text).not.toContain("home.arpa");
+    expect(scrubbed.text).not.toMatch(/\bnas\b/i);
+    expect(scrubbed.text).not.toMatch(/\bpve\b/i);
+    expect(scrubbed.text).not.toMatch(/\badmin\b/i);
+    expect(scrubbed.text).not.toContain("kenji");
+    expect(scrubbed.text).not.toContain("84726193");
+    expect(scrubbed.text).not.toContain("4829");
+    expect(scrubbed.text).not.toContain("ha-secret-token-7788");
   });
 
   it("rejects forbidden private fields or unredacted keys if ever injected", () => {

@@ -16,7 +16,7 @@ import {
   probeOpenAiModels,
   type InferenceBackendConfig,
 } from "../src/core/openaiBackend.ts";
-import { redactSupportText } from "../src/core/supportBundle.ts";
+import { collectMcpEnvSecrets, redactSupportText } from "../src/core/supportBundle.ts";
 
 const tempDirs: string[] = [];
 
@@ -658,16 +658,22 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
   });
 
   it("avoids over-redacting common words/substrings, preserves running research on unrelated inference edits, snapshots AI report at open time, and checks real Python voice deps on Windows", async () => {
-    // 1. Redaction separates strict secrets (hostnames, usernames, machine names, keys — NO <6 or digit exemption!)
-    //    from soft MCP env values (common words like "info", "true", "debug" skipped so prose isn't mangled).
+    // 1. Redaction sorts longest-first, matches case-insensitively, scrubs short/numeric secrets
+    //    (even 4-digit MCP PINs), and never partially leaks `nas.tail1234.ts.net` -> `[redacted].tail1234.ts.net`!
     const sample =
       "More information available (debug=true on localhost:11434) at gymnasium for administrator; " +
-      "myalpha99x stays, but host pve, box nas, user admin, user kenji, pin 84726193, alpha99, " +
-      "mcp token ha-secret-token-7788, and super-secret-key-98765 must all be scrubbed.";
+      "myalpha99x stays, but nas.tail1234.ts.net, NAS, pve.home.arpa, PVE, user admin, user kenji, " +
+      "pin 84726193, mcp pin 4829, alpha99, ha-secret-token-7788, and super-secret-key-98765 must all be scrubbed.";
+    const collectedMcp = collectMcpEnvSecrets([
+      {
+        headers: { Authorization: "ha-secret-token-7788" },
+        env: { PORT: "11434", PIN: "4829", LOG_LEVEL: "info", DEBUG: "true" },
+      },
+    ]);
     const scrubbed = redactSupportText(
       sample,
-      ["pve", "nas", "admin", "kenji", "84726193", "alpha99", "super-secret-key-98765"],
-      ["info", "true", "debug", "localhost", "11434", "ha-secret-token-7788"],
+      ["pve", "nas", "nas.tail1234.ts.net", "pve.home.arpa", "admin", "kenji", "84726193", "alpha99", "super-secret-key-98765"],
+      ["info", "true", "debug", "localhost", ...collectedMcp],
     );
     expect(scrubbed.text).toContain("More information available");
     expect(scrubbed.text).toContain("debug=true");
@@ -675,11 +681,14 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
     expect(scrubbed.text).toContain("gymnasium");
     expect(scrubbed.text).toContain("administrator");
     expect(scrubbed.text).toContain("myalpha99x");
-    expect(scrubbed.text).not.toMatch(/\bpve\b/);
-    expect(scrubbed.text).not.toMatch(/\bnas\b/);
-    expect(scrubbed.text).not.toMatch(/\badmin\b/);
+    expect(scrubbed.text).not.toContain("tail1234.ts.net");
+    expect(scrubbed.text).not.toContain("home.arpa");
+    expect(scrubbed.text).not.toMatch(/\bpve\b/i);
+    expect(scrubbed.text).not.toMatch(/\bnas\b/i);
+    expect(scrubbed.text).not.toMatch(/\badmin\b/i);
     expect(scrubbed.text).not.toContain("kenji");
     expect(scrubbed.text).not.toContain("84726193");
+    expect(scrubbed.text).not.toContain("4829");
     expect(scrubbed.text).not.toContain(" alpha99");
     expect(scrubbed.text).not.toContain("ha-secret-token-7788");
     expect(scrubbed.text).not.toContain("super-secret-key-98765");
@@ -720,19 +729,30 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
     await worker?.close();
     await engine.dispose();
 
-    // 3. Report dialog snapshots #reply & #heard at dialog OPEN time and resets on clearLive() and reply-start!
+    // 3. Report dialog resets on BOTH clearLive() AND forgetLog() ("Forget all past exchanges"),
+    //    only refreshes on reply-start when closed (preserving user's note during proactive events),
+    //    and guards against duplicate Save writes!
     const rendererMain = await readFile(join(process.cwd(), "src/renderer/src/main.ts"), "utf8");
     const dialogFn = rendererMain.slice(rendererMain.indexOf("function wireAiReportDialog()"));
     expect(dialogFn).toContain("snapshotReply = document.getElementById(\"reply\")");
     expect(dialogFn).toContain("replyExcerpt: snapshotReply");
-    expect(rendererMain).toContain("resetAiReportDialog = (): void =>");
+    expect(dialogFn).toContain("if (!dialogEl.hidden) return;");
+    expect(dialogFn).toContain("if (lastSavedKey && reportKey === lastSavedKey)");
     const clearLiveIdx = rendererMain.indexOf("function clearLive()");
     expect(rendererMain.slice(clearLiveIdx, clearLiveIdx + 250)).toContain("resetAiReportDialog()");
+    const forgetLogIdx = rendererMain.indexOf("function forgetLog()");
+    expect(rendererMain.slice(forgetLogIdx, forgetLogIdx + 250)).toContain("resetAiReportDialog()");
     const replyStartIdx = rendererMain.indexOf('case "reply-start":');
-    expect(rendererMain.slice(replyStartIdx, replyStartIdx + 250)).toContain("resetAiReportDialog()");
+    expect(rendererMain.slice(replyStartIdx, replyStartIdx + 250)).toContain("refreshAiReportOnNewReply()");
 
-    // 4. decide() keeps the full reply up to 12,000 chars (catching middle claims) with max_tokens=256.
-    let seenMidBody: { max_tokens?: number; messages?: { role: string; content: string }[] } | null = null;
+    // 4. decide() disables thinking (/no_think + chat_template_kwargs with HTTP 400 fallback),
+    //    grants max_tokens=1024, keeps mid-reply claims on 8K+ contexts, and scales excerpt to 2K contexts!
+    const decideBodies: {
+      max_tokens?: number;
+      chat_template_kwargs?: { enable_thinking?: boolean };
+      messages?: { role: string; content: string }[];
+    }[] = [];
+    let failFirst400 = true;
     const midSession = new OpenAiCompatibleSession(
       {
         provider: "openai-compatible",
@@ -743,12 +763,18 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
       },
       "You are Astra.",
       (async (_u: string | URL | Request, init?: RequestInit) => {
-        seenMidBody = JSON.parse(String(init?.body ?? "{}")) as typeof seenMidBody;
+        const parsed = JSON.parse(String(init?.body ?? "{}")) as (typeof decideBodies)[number];
+        decideBodies.push(parsed);
+        if (failFirst400 && parsed.chat_template_kwargs) {
+          failFirst400 = false;
+          return new Response("unknown field chat_template_kwargs", { status: 400 });
+        }
         return new Response(
           JSON.stringify({ choices: [{ message: { content: '{"claimed": 0.92}' } }] }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }) as typeof fetch,
+      8_192,
     );
     const midReply = `${"Opening paragraph. ".repeat(200)} I have just restarted nginx on your server. ${"Closing advice. ".repeat(200)}`;
     midSession.setChatHistory([
@@ -756,15 +782,45 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
       { type: "user", text: "Restart nginx" },
       { type: "model", response: [midReply] },
     ]);
-    await midSession.decide(CLAIM_CHECK);
-    const capturedMid = seenMidBody as unknown as {
-      max_tokens?: number;
-      messages?: { role: string; content: string }[];
-    } | null;
-    expect(capturedMid?.max_tokens).toBe(256);
-    expect(capturedMid?.messages?.find((m) => m.role === "user")?.content).toContain(
+    const midRes = await midSession.decide(CLAIM_CHECK);
+    expect(midRes.claimed.value).toBeCloseTo(0.92, 2);
+    expect(decideBodies).toHaveLength(2);
+    expect(decideBodies[0]?.chat_template_kwargs?.enable_thinking).toBe(false);
+    expect(decideBodies[1]?.chat_template_kwargs).toBeUndefined();
+    expect(decideBodies[1]?.max_tokens).toBe(1_024);
+    expect(decideBodies[1]?.messages?.find((m) => m.role === "system")?.content).toContain("/no_think");
+    expect(decideBodies[1]?.messages?.find((m) => m.role === "user")?.content).toContain(
       "I have just restarted nginx on your server.",
     );
+
+    // Small 2048-token context caps reply excerpt so verifier call cannot overflow local context.
+    let smallUserContent = "";
+    const smallCtxSession = new OpenAiCompatibleSession(
+      {
+        provider: "openai-compatible",
+        preset: "ollama",
+        baseUrl: "http://gpu-box:11434/v1",
+        model: "qwen3.5:4b",
+        apiKey: "",
+      },
+      "You are Astra.",
+      (async (_u: string | URL | Request, init?: RequestInit) => {
+        const parsed = JSON.parse(String(init?.body ?? "{}")) as (typeof decideBodies)[number];
+        smallUserContent = parsed.messages?.find((m) => m.role === "user")?.content ?? "";
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: '{"claimed": 0.1}' } }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch,
+      2_048,
+    );
+    smallCtxSession.setChatHistory([
+      { type: "system", text: "You are Astra." },
+      { type: "user", text: "Explain Rust lifetimes" },
+      { type: "model", response: ["A".repeat(10_000)] },
+    ]);
+    await smallCtxSession.decide(CLAIM_CHECK);
+    expect(smallUserContent.length).toBeLessThan(3_600);
 
     // 5. Windows clean-install verification checks actual voice-server/server.py imports (numpy, torch, qwen_tts).
     const winScript = await readFile(join(process.cwd(), "scripts/verify-clean-windows.ps1"), "utf8");

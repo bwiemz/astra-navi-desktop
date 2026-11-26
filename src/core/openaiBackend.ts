@@ -584,6 +584,7 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
   private readonly config: InferenceBackendConfig;
   private readonly locality: EndpointLocality;
   private readonly fetchImpl: typeof fetch;
+  private readonly contextSize: number;
   private systemPrompt: string;
   private history: ChatHistoryItem[] = [];
   private inputTokens = 0;
@@ -593,6 +594,7 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     config: InferenceBackendConfig,
     systemPrompt: string,
     fetchImpl: typeof fetch = fetch,
+    contextSize = 8_192,
   ) {
     const checked = classifyInferenceEndpoint(config.baseUrl);
     if (!checked.ok) {
@@ -605,6 +607,7 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     this.locality = checked;
     this.systemPrompt = systemPrompt;
     this.fetchImpl = fetchImpl;
+    this.contextSize = Math.max(1_024, Math.floor(contextSize));
   }
 
   getChatHistory(): ChatHistoryItem[] {
@@ -669,44 +672,62 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     const falseRule =
       typeof criteria["false"] === "string" ? criteria["false"] : "Only talked, asked, or declined.";
 
-    // Preserve the full reply up to 12K chars so claims in the middle of long responses are never
-    // dropped; only extreme replies (>12K) are sampled across start, middle, and end.
+    // Size the reply excerpt dynamically to the configured context window (2.4K–12K chars) so
+    // small 2K–4K local contexts never overflow while 8K+ contexts inspect full mid-reply claims.
+    const maxExcerptChars = Math.max(2_400, Math.min(12_000, Math.floor(this.contextSize * 1.5)));
     const replyExcerpt =
-      lastReply.length <= 12_000
+      lastReply.length <= maxExcerptChars
         ? lastReply
         : (() => {
-            const midStart = Math.max(4000, Math.floor((lastReply.length - 4000) / 2));
-            return `${lastReply.slice(0, 4000)}\n...\n${lastReply.slice(midStart, midStart + 4000)}\n...\n${lastReply.slice(-4000)}`;
+            const sliceLen = Math.max(600, Math.floor(maxExcerptChars / 3));
+            const midStart = Math.max(sliceLen, Math.floor((lastReply.length - sliceLen) / 2));
+            return `${lastReply.slice(0, sliceLen)}\n...\n${lastReply.slice(midStart, midStart + sliceLen)}\n...\n${lastReply.slice(-sliceLen)}`;
           })();
 
-    const res = await this.fetchImpl(`${this.locality.apiBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json",
-        ...authHeaders(this.config.apiKey),
-      },
-      body: JSON.stringify({
-        model: this.config.model.trim(),
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a strict binary verifier. Reply ONLY with a single JSON object " +
-              '{"claimed": <number between 0.0 and 1.0>} and nothing else. ' +
-              `1.0 means: ${trueRule}. 0.0 means: ${falseRule}.`,
-          },
-          {
-            role: "user",
-            content: `${instruction}\n\nAssistant's most recent reply:\n${replyExcerpt}`,
-          },
-        ],
-        temperature: 0,
-        max_tokens: 256,
-        stream: false,
-      }),
-      signal: extra?.signal,
-    });
+    const basePayload = {
+      model: this.config.model.trim(),
+      messages: [
+        {
+          role: "system",
+          content:
+            "/no_think\nYou are a strict binary verifier. Reply ONLY with a single JSON object " +
+            '{"claimed": <number between 0.0 and 1.0>} and nothing else. ' +
+            `1.0 means: ${trueRule}. 0.0 means: ${falseRule}.`,
+        },
+        {
+          role: "user",
+          content: `${instruction}\n\nAssistant's most recent reply:\n${replyExcerpt}`,
+        },
+      ],
+      temperature: 0,
+      // Keep ample headroom (1024 tokens) in case a server ignores `enable_thinking: false` and emits `<think>...</think>`.
+      max_tokens: 1_024,
+      stream: false,
+    };
+
+    const sendDecide = (withThinkingToggle: boolean): Promise<Response> =>
+      this.fetchImpl(`${this.locality.apiBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          ...authHeaders(this.config.apiKey),
+        },
+        body: JSON.stringify(
+          withThinkingToggle
+            ? { ...basePayload, chat_template_kwargs: { enable_thinking: false } }
+            : basePayload,
+        ),
+        signal: extra?.signal,
+      });
+
+    // Pass `chat_template_kwargs: { enable_thinking: false }` on local/LAN OpenAI-compatible servers
+    // (llama-server, vLLM, SGLang, Ollama) and transparently retry once without it if a server rejects it (HTTP 400).
+    const tryDisableThinking = this.locality.scope !== "remote-internet";
+    let res = await sendDecide(tryDisableThinking);
+    if (tryDisableThinking && res.status === 400) {
+      res = await sendDecide(false);
+    }
     if (!res.ok) {
       throw new Error(`OpenAI-compatible claim-check returned HTTP ${res.status}`);
     }

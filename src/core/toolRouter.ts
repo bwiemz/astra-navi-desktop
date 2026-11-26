@@ -311,43 +311,64 @@ function namesAMachine(message: string, machines: readonly string[]): boolean {
   return machines.some((name) => name.length >= 2 && said.includes(name.toLowerCase()));
 }
 
-const MCP_STOP_WORDS = new Set([
-  "a", "about", "add", "all", "an", "and", "any", "are", "as", "at", "be", "by", "call", "can",
-  "check", "close", "content", "contents", "copy", "create", "data", "delete", "dir", "directory",
-  "do", "does", "down", "edit", "external", "fetch", "file", "files", "find", "first", "folder",
-  "folders", "for", "from", "get", "give", "has", "have", "help", "here", "how", "i", "in", "info",
-  "information", "instructions", "into", "is", "it", "item", "items", "its", "just", "know",
-  "last", "like", "line", "lines", "list", "load", "look", "make", "mcp", "me", "metadata", "more",
-  "move", "my", "name", "names", "need", "new", "next", "not", "now", "of", "old", "on", "one",
-  "only", "open", "or", "out", "output", "over", "path", "please", "print", "query", "read",
-  "remove", "rename", "run", "save", "search", "see", "send", "server", "set", "show", "some",
-  "status", "tell", "text", "that", "the", "their", "there", "this", "to", "tool", "tools", "two",
-  "type", "up", "update", "use", "value", "values", "want", "what", "when", "where", "which",
-  "who", "will", "with", "write", "you", "your",
+const MCP_GRAMMAR_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "by", "call", "can", "do", "does", "for", "from",
+  "has", "have", "how", "i", "in", "into", "is", "it", "its", "just", "mcp", "me", "my", "not",
+  "of", "on", "only", "or", "please", "server", "that", "the", "their", "there", "this", "to",
+  "tool", "tools", "use", "what", "when", "where", "which", "who", "will", "with", "you", "your",
+]);
+
+/** Generic prose words suppressed in MCP descriptions & single-word generic matching (never blocking exact tool/server names). */
+const MCP_DESC_STOP_WORDS = new Set([
+  ...MCP_GRAMMAR_STOP_WORDS,
+  "about", "add", "all", "any", "check", "close", "content", "contents", "copy", "create", "data",
+  "delete", "down", "edit", "external", "fetch", "file", "files", "find", "first", "get", "give",
+  "help", "here", "info", "information", "instructions", "item", "items", "know", "last", "like",
+  "line", "lines", "list", "load", "look", "make", "metadata", "more", "move", "name", "names",
+  "need", "new", "next", "now", "old", "one", "open", "out", "output", "over", "path", "print",
+  "read", "remove", "rename", "run", "save", "search", "see", "send", "set", "show", "some",
+  "status", "tell", "text", "two", "type", "up", "update", "value", "values", "want", "write",
 ]);
 
 /** Maximum MCP tools offered by lexical/description routing on a single turn. */
 export const MAX_ROUTED_MCP_TOOLS = 8;
+const MAX_ROUTED_MCP_BY_MEANING = 4;
+const MCP_EMBED_STANDS_OUT = 1.8;
+const MCP_EMBED_MIN_SIM = 0.45;
+const MAX_MCP_VECTOR_CACHE = 256;
 
-function splitIdentifierWords(raw: string): string[] {
+function escapeRegexLiteral(raw: string): string {
+  return raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function splitIdentifierWords(raw: string, stopWords: ReadonlySet<string> = MCP_DESC_STOP_WORDS): string[] {
   const expanded = raw.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
   const matches = expanded.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [];
-  return matches.filter((w) => !MCP_STOP_WORDS.has(w));
+  return matches.filter((w) => !stopWords.has(w));
 }
 
 function tokenMatches(queryToken: string, targetTokens: ReadonlySet<string>): boolean {
   if (targetTokens.has(queryToken)) return true;
   if (queryToken.length >= 4) {
-    // Handle simple English singular/plural stems (e.g. "lights" <-> "light", "issues" <-> "issue").
+    // Handle simple English singular/plural stems (e.g. "lights" <-> "light", "issues" <-> "issue", "directories" <-> "directory").
+    if (queryToken.endsWith("ies") && targetTokens.has(`${queryToken.slice(0, -3)}y`)) return true;
     if (queryToken.endsWith("s") && targetTokens.has(queryToken.slice(0, -1))) return true;
     if (queryToken.endsWith("es") && targetTokens.has(queryToken.slice(0, -2))) return true;
     if (targetTokens.has(`${queryToken}s`)) return true;
+    if (queryToken.endsWith("y") && targetTokens.has(`${queryToken.slice(0, -1)}ies`)) return true;
   }
   return false;
 }
 
+function hasExactTokenMatch(rawTextLower: string, identifierLower: string): boolean {
+  if (!identifierLower) return false;
+  return new RegExp(`(?<![a-z0-9_-])${escapeRegexLiteral(identifierLower)}(?![a-z0-9_-])`, "i").test(
+    rawTextLower,
+  );
+}
+
 function scoreMcpToolMatch(
-  queryTokens: readonly string[],
+  rawQueryTokens: readonly string[],
   rawTextLower: string,
   fullName: string,
   description: string | undefined,
@@ -357,32 +378,69 @@ function scoreMcpToolMatch(
   const serverId = dotIdx >= 0 ? rest.slice(0, dotIdx) : rest;
   const toolName = dotIdx >= 0 ? rest.slice(dotIdx + 1) : "";
 
-  const serverTokens = new Set(splitIdentifierWords(serverId));
-  const toolTokens = new Set(splitIdentifierWords(toolName));
-  const descTokens = new Set(splitIdentifierWords(description ?? ""));
+  const serverLower = serverId.toLowerCase();
+  const toolLower = toolName.toLowerCase();
+  const fullLower = fullName.toLowerCase();
 
   let score = 0;
   let matchedBy = "mcp description";
 
-  const spacedServer = serverId.replace(/[-_]+/g, " ").toLowerCase();
+  // Invariant: mentioning the exact MCP tool name, prefixed name, or server ID ALWAYS routes.
   if (
-    (serverId.length >= 3 && rawTextLower.includes(serverId.toLowerCase())) ||
-    (spacedServer.length >= 3 && rawTextLower.includes(spacedServer))
+    rawTextLower.includes(fullLower) ||
+    (toolLower.length >= 2 && hasExactTokenMatch(rawTextLower, toolLower))
   ) {
-    score += 4;
-    matchedBy = "mcp server";
+    score += 10;
+    matchedBy = "mcp exact name";
   }
 
-  for (const qt of queryTokens) {
-    if (tokenMatches(qt, toolTokens)) {
-      score += 3;
-      matchedBy = "mcp name";
-    } else if (tokenMatches(qt, serverTokens)) {
+  const spacedServer = serverLower.replace(/[-_]+/g, " ").trim();
+  if (
+    (serverLower.length >= 2 && hasExactTokenMatch(rawTextLower, serverLower)) ||
+    (spacedServer.length >= 3 && hasExactTokenMatch(rawTextLower, spacedServer))
+  ) {
+    score += 5;
+    if (matchedBy === "mcp description") matchedBy = "mcp server";
+  }
+
+  // Tool-name tokens keep meaningful domain/action words (excluding only tiny grammar words)
+  // so multi-word filesystem/database tools like `list_directory` and `query` stay reachable
+  // without single generic verbs ("read", "list") causing false positives on unrelated chat.
+  const toolTokensAll = [...new Set(splitIdentifierWords(toolName, MCP_GRAMMAR_STOP_WORDS))];
+  const toolTokensSet = new Set(toolTokensAll);
+  const serverTokensSet = new Set(splitIdentifierWords(serverId, MCP_GRAMMAR_STOP_WORDS));
+  const descTokensSet = new Set(splitIdentifierWords(description ?? "", MCP_DESC_STOP_WORDS));
+
+  let matchedToolTokens = 0;
+  let matchedSpecificToolTokens = 0;
+  for (const qt of rawQueryTokens) {
+    if (tokenMatches(qt, toolTokensSet)) {
+      matchedToolTokens += 1;
+      const isGeneric = MCP_DESC_STOP_WORDS.has(qt);
+      if (isGeneric) {
+        score += 0.5;
+      } else {
+        matchedSpecificToolTokens += 1;
+        score += 3;
+      }
+      if (matchedBy === "mcp description") matchedBy = "mcp name";
+    } else if (!MCP_DESC_STOP_WORDS.has(qt) && tokenMatches(qt, serverTokensSet)) {
       score += 2;
       if (matchedBy === "mcp description") matchedBy = "mcp server";
-    } else if (tokenMatches(qt, descTokens)) {
+    } else if (!MCP_DESC_STOP_WORDS.has(qt) && tokenMatches(qt, descTokensSet)) {
       score += 1.5;
     }
+  }
+
+  // Full multi-word tool name phrase coverage (e.g. "list the directory" -> list + directory):
+  // grant a bonus when every token of a multi-word tool name is present and at least one is specific.
+  if (
+    toolTokensAll.length >= 2 &&
+    matchedToolTokens >= toolTokensAll.length &&
+    matchedSpecificToolTokens >= 1
+  ) {
+    score += 2;
+    if (matchedBy === "mcp description") matchedBy = "mcp name";
   }
 
   return { score, reason: matchedBy };
@@ -435,10 +493,54 @@ export const MOST_BY_MEANING = 4;
 export class ToolRouter {
   private readonly embedder: Embedder | null;
   private sayings: Promise<Map<string, Float32Array[]>> | null = null;
+  private readonly mcpVectors = new Map<string, Float32Array>();
 
   /** @param embedder Null to go by words and recent use alone (when the model for it is not there). */
   constructor(embedder: Embedder | null) {
     this.embedder = embedder;
+  }
+
+  private async mcpEmbeddingsFor(
+    mcpTools: readonly string[],
+    descriptions: Readonly<Record<string, string>> | undefined,
+  ): Promise<Map<string, Float32Array>> {
+    const result = new Map<string, Float32Array>();
+    if (!this.embedder || mcpTools.length === 0) return result;
+
+    const missing: { tool: string; cacheKey: string; text: string }[] = [];
+    for (const tool of mcpTools) {
+      const desc = (descriptions?.[tool] ?? "").slice(0, 240);
+      const cacheKey = `${tool}\0${desc}`;
+      const cached = this.mcpVectors.get(cacheKey);
+      if (cached) {
+        result.set(tool, cached);
+      } else {
+        const readable = tool
+          .slice("mcp:".length)
+          .replace(/[._-]+/g, " ")
+          .trim();
+        missing.push({ tool, cacheKey, text: desc ? `${readable}: ${desc}` : readable });
+      }
+    }
+
+    if (missing.length > 0) {
+      const vectors = await this.embedder.embed(
+        missing.map((m) => m.text),
+        "passage",
+      );
+      for (let i = 0; i < missing.length; i += 1) {
+        const entry = missing[i];
+        const vec = vectors[i];
+        if (!entry || !vec) continue;
+        if (this.mcpVectors.size >= MAX_MCP_VECTOR_CACHE) {
+          const oldest = this.mcpVectors.keys().next().value;
+          if (oldest !== undefined) this.mcpVectors.delete(oldest);
+        }
+        this.mcpVectors.set(entry.cacheKey, vec);
+        result.set(entry.tool, vec);
+      }
+    }
+    return result;
   }
 
   private known(): Promise<Map<string, Float32Array[]>> {
@@ -489,15 +591,14 @@ export class ToolRouter {
     for (const tool of options.recent ?? []) add(tool, "used just now");
     if (mcpTools.length > 0 && message.trim().length > 0) {
       // Match MCP tools against the current user message only (not `options.before`), so an
-      // unused MCP keyword from the previous turn never bleeds into an unrelated next turn
-      // and triggers `mcpSchemasOffered` prompt fatigue. Actually-used MCP tools still carry
-      // forward for one follow-up turn via `options.recent`.
-      const queryTokens = [...new Set(splitIdentifierWords(message))];
+      // unused MCP keyword from the previous turn never bleeds into an unrelated next turn.
+      // Routed MCP tools still carry forward for one follow-up turn via `options.recent`.
+      const rawQueryTokens = [...new Set(splitIdentifierWords(message, MCP_GRAMMAR_STOP_WORDS))];
       const rawLower = message.toLowerCase();
       const scoredMcp = mcpTools
         .map((tool) => {
           const { score, reason } = scoreMcpToolMatch(
-            queryTokens,
+            rawQueryTokens,
             rawLower,
             tool,
             options.toolDescriptions?.[tool],
@@ -513,7 +614,7 @@ export class ToolRouter {
     }
     try {
       const known = await this.known();
-      if (this.embedder && known.size > 0 && message.trim().length > 0) {
+      if (this.embedder && (known.size > 0 || mcpTools.length > 0) && message.trim().length > 0) {
         const [asked] = await this.embedder.embed([message.slice(0, 600)], "query");
         if (asked) {
           const scored = [...known.entries()]
@@ -535,6 +636,33 @@ export class ToolRouter {
                 add(tool, `meaning +${out.toFixed(1)}`);
               }
             });
+          }
+
+          // Semantic matching against external MCP tool descriptions using the same embedder,
+          // gated by a stricter standing-out threshold so small talk never trips MCP prompts.
+          if (mcpTools.length > 0) {
+            const mcpVecs = await this.mcpEmbeddingsFor(mcpTools, options.toolDescriptions);
+            const mcpScored = [...mcpVecs.entries()]
+              .map(([tool, vec]) => ({ tool, score: nearness(asked, vec) }))
+              .sort((a, b) => b.score - a.score);
+            const combinedScores = [...scored.map((s) => s.score), ...mcpScored.map((s) => s.score)];
+            const cMean =
+              combinedScores.reduce((sum, s) => sum + s, 0) / (combinedScores.length || 1);
+            const cSpread = Math.sqrt(
+              combinedScores.reduce((sum, s) => sum + (s - cMean) ** 2, 0) /
+                (combinedScores.length || 1),
+            );
+            if (cSpread > 1e-6) {
+              let addedMcp = 0;
+              for (const { tool, score } of mcpScored) {
+                if (addedMcp >= MAX_ROUTED_MCP_BY_MEANING) break;
+                const z = (score - cMean) / cSpread;
+                if (score >= MCP_EMBED_MIN_SIM && z >= MCP_EMBED_STANDS_OUT) {
+                  add(tool, `mcp meaning +${z.toFixed(1)}`);
+                  addedMcp += 1;
+                }
+              }
+            }
           }
         }
       }
