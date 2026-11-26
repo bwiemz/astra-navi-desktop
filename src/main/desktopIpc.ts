@@ -13,8 +13,10 @@ import type {
   DropFilesResult,
   PastExchange,
   PermissionDecision,
+  PickedMotionClip,
   WindowLayout,
 } from "../shared/ipc.ts";
+import { detectMotionClipFormat } from "../shared/avatarMotion.ts";
 import { clampModelFraming } from "../shared/spatialStage.ts";
 import type { VoiceController } from "./voiceControl.ts";
 
@@ -145,6 +147,45 @@ export function registerDesktopIpc(deps: DesktopIpcDeps): void {
     const entries = Object.entries(next);
     const trimmed = entries.length > 64 ? Object.fromEntries(entries.slice(-64)) : next;
     void config.update({ avatarFraming: trimmed }).catch((error: unknown) => console.warn("[config]", error));
+  });
+  ipcMain.handle("stage:pick-motion", async (event): Promise<PickedMotionClip> => {
+    if (!fromMainWindow(event)) throw new Error("Not allowed from here.");
+    const picked = await dialog.showOpenDialog({
+      title: "Play Avatar Motion Clip (.vrma or .vmd)",
+      properties: ["openFile"],
+      filters: [{ name: "Avatar Animations (.vrma, .vmd)", extensions: ["vrma", "vmd"] }],
+    });
+    const filePath = picked.filePaths[0];
+    if (picked.canceled || !filePath) return { ok: false, canceled: true };
+    try {
+      const info = await stat(filePath);
+      if (info.size > 24 * 1024 * 1024) {
+        return { ok: false, canceled: false, error: "Animation file exceeds the 24 MB safety limit." };
+      }
+      const raw = await readFile(filePath);
+      const name = basename(filePath);
+      const format = detectMotionClipFormat(raw, name);
+      if (format === "unknown") {
+        return {
+          ok: false,
+          canceled: false,
+          error: "File is not a valid VRMA (.vrma) or MMD (.vmd) motion clip.",
+        };
+      }
+      return {
+        ok: true,
+        canceled: false,
+        name,
+        format,
+        bytesBase64: raw.toString("base64"),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        canceled: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   });
   ipcMain.on("window:click-through", (event, on: unknown) => {
     if (!fromMainWindow(event) || typeof on !== "boolean") return;

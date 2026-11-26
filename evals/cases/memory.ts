@@ -256,4 +256,173 @@ export const MEMORY_CASES: EvalCase[] = [
     turns: ["我的猫叫什么名字来着？"],
     expect: { reply: { matches: [/团子/], language: "zh" }, noCallsExcept: ["recall"] },
   },
+  {
+    // A pinned older fact stays prioritized in her prompt even behind 14 newer everyday notes.
+    id: "memory/pinned-old-fact",
+    category: "memory",
+    quietNotes: true,
+    notes: [
+      {
+        kind: "fact",
+        text: "Captain's backup encryption passphrase hint is 'Blue Heron 42'.",
+        pinned: true,
+      },
+      ...EVERYDAY,
+    ],
+    turns: ["What was the hint for my backup encryption passphrase?"],
+    expect: {
+      reply: { matches: [/Blue Heron 42/i], lacks: [READ_OUT] },
+      noCallsExcept: ["recall"],
+    },
+  },
+  {
+    // Explicit user request to store a new fact must call the remember tool.
+    id: "memory/save-explicit-remember",
+    category: "memory",
+    turns: ["Please remember that my NAS local IP is 10.0.0.42."],
+    expect: {
+      calls: [{ tool: "remember", args: { text: /10\.0\.0\.42/ } }],
+      honest: true,
+    },
+  },
+  {
+    // Explicit user request to forget an outdated note must call the forget tool.
+    id: "memory/forget-explicit-request",
+    category: "memory",
+    notes: [{ kind: "fact", text: "Captain's old Wi-Fi router is a Netgear R7000." }],
+    turns: ["I replaced that old Netgear R7000 router — please forget that note."],
+    expect: {
+      calls: [{ tool: "forget" }],
+      honest: true,
+    },
+  },
+  {
+    // When a newer corrected note contradicts an older one, follow the newer correction.
+    id: "memory/updated-fact-supersedes-old",
+    category: "memory",
+    notes: [
+      { kind: "fact", text: "Captain's main workstation runs Ubuntu 22.04." },
+      { kind: "fact", text: "Captain switched the main workstation from Ubuntu to Arch Linux." },
+    ],
+    turns: ["Which Linux distro is my main workstation running now?"],
+    expect: {
+      reply: { matches: [/Arch/i], lacks: [READ_OUT] },
+      noCallsExcept: ["recall"],
+    },
+  },
+  {
+    // Two preferences held simultaneously must both shape the answer.
+    id: "memory/multi-constraint-preferences",
+    category: "memory",
+    notes: [
+      { kind: "preference", text: "Captain wants distances in kilometres, never miles." },
+      { kind: "preference", text: "Captain wants comparison answers as a short bullet list." },
+    ],
+    turns: ["My run tracker logged 5 miles today. Summarize that alongside a 10K target."],
+    expect: {
+      reply: {
+        matches: [/8(?:\.0\d?)?\s*(?:km|kilomet)/i, /^\s*[-*•]\s/m],
+        lacks: [READ_OUT],
+      },
+    },
+  },
+  {
+    // Cross-turn correction: user corrects a detail on turn 2 and asks about it on turn 3.
+    id: "memory/cross-turn-correction",
+    category: "memory",
+    turns: [
+      "I scheduled my dentist appointment for Tuesday at 2 PM.",
+      "Actually, they just moved it to Thursday at 11 AM.",
+      "Quick reminder: when is my dentist appointment now?",
+    ],
+    expect: {
+      reply: {
+        matches: [/Thursday/i, /11(?::00)?\s*(?:AM|a\.m\.)?/i],
+        lacks: [/Tuesday/i],
+      },
+    },
+  },
+  {
+    // Partial note exists; do not invent missing details that were never saved.
+    id: "memory/no-hallucinate-missing-detail",
+    category: "memory",
+    quietNotes: true,
+    notes: [
+      {
+        kind: "project",
+        text: "Captain is building a synth patch library called Sunburst.",
+      },
+    ],
+    turns: ["What price did I decide to sell Sunburst for?"],
+    expect: {
+      reply: {
+        anyOf: [/\bnot\b|n't|\bno\b|never|didn't|haven't|unknown|don't have/i],
+        lacks: [/\$\d+|€\d+|\d+\s*dollars/i],
+      },
+    },
+  },
+  {
+    // Answering "why do you know / remember that?" naturally without leaking raw markup.
+    id: "memory/provenance-natural-explanation",
+    category: "memory",
+    notes: [{ kind: "fact", text: "Captain's cat is called Biscuit." }],
+    turns: ["Wait — how do you know my cat's name is Biscuit?"],
+    expect: {
+      reply: {
+        anyOf: [/note|remember|saved|told|memory/i],
+        lacks: [READ_OUT],
+      },
+      noCallsExcept: ["recall"],
+    },
+  },
+  {
+    // Stored episode of a prior fix should guide the troubleshooting reply when it recurs.
+    id: "memory/episodic-follow-up",
+    category: "memory",
+    notes: [
+      {
+        kind: "episode",
+        text: "On 2026-11-10, PipeWire crackled on Captain's SSL 2+ interface until we set clock.force-quantum to 256.",
+      },
+    ],
+    turns: ["My SSL 2+ audio is crackling again — what fixed it last time?"],
+    expect: {
+      reply: {
+        matches: [/256/],
+        anyOf: [/quantum|PipeWire/i],
+        lacks: [READ_OUT],
+      },
+      noCallsExcept: ["recall"],
+    },
+  },
+  {
+    // Stored skill steps adapted to a new target path.
+    id: "memory/skill-step-adaptation",
+    category: "memory",
+    approve: "all",
+    tools: {
+      run_command: () => "Exit code 0\nsent 12.4K bytes  received 35 bytes",
+    },
+    notes: [
+      {
+        kind: "skill",
+        text: "Sync notes folder to backup drive",
+        points: [
+          "rsync -av --delete ~/Notes/ /mnt/backup/Notes/",
+          "Captain always uses --delete so removed notes stay mirrored",
+        ],
+      },
+    ],
+    turns: ["Run our usual notes backup sync, but sync ~/Projects/docs/ to /mnt/backup/docs/."],
+    expect: {
+      calls: [
+        {
+          tool: ["run_command", "start_mission"],
+          args: {
+            command: /^(?=[\s\S]*rsync)(?=[\s\S]*--delete)(?=[\s\S]*docs)/,
+          },
+        },
+      ],
+    },
+  },
 ];

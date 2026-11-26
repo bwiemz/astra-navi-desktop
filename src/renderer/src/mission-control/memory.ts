@@ -45,16 +45,26 @@ export function renderMemoryPanel(
   searchInput.value = searchText;
 
   const kindSelect = document.createElement("select");
-  for (const opt of ["all", "fact", "preference", "goal", "promise", "event", "pinned-only"]) {
+  for (const opt of [
+    "all",
+    "pinned-only",
+    "profile",
+    "preference",
+    "project",
+    "fact",
+    "topic",
+    "skill",
+    "episode",
+  ]) {
     const o = document.createElement("option");
     o.value = opt;
-    o.textContent = opt === "all" ? "All kinds" : opt;
+    o.textContent = opt === "all" ? "All kinds" : opt === "pinned-only" ? "Pinned only" : opt;
     if (opt === kindFilter) o.selected = true;
     kindSelect.appendChild(o);
   }
 
   const newKind = document.createElement("select");
-  for (const k of ["fact", "preference", "goal", "promise", "event"] as const) {
+  for (const k of ["fact", "preference", "profile", "project", "episode"] as const) {
     const o = document.createElement("option");
     o.value = k;
     o.textContent = k;
@@ -147,6 +157,16 @@ export function renderMemoryPanel(
 
         const textEl = el("div", "", mem.text);
         row.appendChild(textEl);
+
+        if (mem.whyRemembered) {
+          const details = document.createElement("details");
+          const summary = document.createElement("summary");
+          summary.className = "muted";
+          summary.textContent = "Why do you remember this?";
+          const why = el("div", "muted", mem.whyRemembered);
+          details.append(summary, why);
+          row.appendChild(details);
+        }
 
         editBtn.addEventListener("click", () => {
           const input = document.createElement("textarea");

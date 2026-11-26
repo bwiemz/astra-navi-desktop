@@ -1639,3 +1639,93 @@ body[data-avatar-only="true"] .ask {
   gap: 6px;
   margin-top: 4px;
 }
+
+.remote-inference-badge {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 12;
+  padding: 3px 10px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  max-width: calc(100% - 24px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 2px 2px 0 var(--ink);
+  pointer-events: auto;
+}
+
+.remote-inference-badge[hidden] {
+  display: none;
+}
+
+.remote-inference-badge[data-scope="private-lan"] {
+  background: #fff3bf;
+  color: #7c3a00;
+}
+
+.remote-inference-badge[data-scope="remote-internet"] {
+  background: #ffe0e8;
+  color: #8f1436;
+}
+
+.emote-popover {
+  width: 224px;
+  gap: 8px;
+}
+
+.emote-popover select {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1.5px solid var(--ink);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.emote-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.emote-btn {
+  padding: 4px 6px;
+  border: 1.5px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.emote-btn:hover {
+  background: var(--lemon);
+}
+
+.emote-motion-row {
+  display: flex;
+  gap: 6px;
+}
+
+.emote-loop-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.emote-status {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ink-soft);
+}

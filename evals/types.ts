@@ -102,6 +102,8 @@ export interface NoteSeed {
   text: string;
   /** For a topic or a task: its key points or steps. */
   points?: string[];
+  /** Pin this note so it stays prioritized in her prompt snapshot even behind newer notes. */
+  pinned?: boolean;
 }
 
 export interface EvalCase {

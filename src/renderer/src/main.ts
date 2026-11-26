@@ -1,5 +1,9 @@
 import "./style.css";
 import { formatAttachedPrompt } from "../../core/dropRouter.ts";
+import {
+  BUILT_IN_EMOTE_PACKS,
+  type IdleLoopPreset,
+} from "../../shared/avatarMotion.ts";
 import type {
   AichanBridge,
   AppState,
@@ -1293,6 +1297,7 @@ function onBrainEvent(event: BrainEvent): void {
       permissionQueue.push(event.request);
       // A question is a step of its own, and stays off the trail until it is answered.
       stepAsked(steps, event.request.id, event.request.title);
+      stage?.triggerEventReaction("approval-needed");
       showNextPermission();
       break;
     case "permission-resolved": {
@@ -1383,7 +1388,9 @@ function onVoiceEvent(event: VoiceEvent): void {
     case "heard": {
       setHeard(event.from === undefined ? event.text : `${event.from}: ${event.text}`);
       // Her name alone gets no reply, so it waits for none.
-      if (event.noReply !== true) {
+      if (event.noReply === true) {
+        stage?.triggerEventReaction("wake-word");
+      } else {
         const queue = event.from === undefined ? saidWaiting.here : saidWaiting.away;
         queue.push({
           text: event.text,
@@ -1549,6 +1556,22 @@ async function applyState(state: AppState): Promise<void> {
   document.body.dataset["clickThrough"] = state.clickThrough ? "true" : "false";
   stage?.setLowPowerMode(state.lowPowerStage);
   stage?.setSolidBackdrop(state.windowMode === "solid-docked");
+  const remoteBadge = document.getElementById("remote-inference-badge");
+  if (remoteBadge) {
+    const inf = state.inferenceBackend;
+    if (inf && inf.leavesMachine) {
+      remoteBadge.hidden = false;
+      remoteBadge.dataset["scope"] = inf.scope;
+      remoteBadge.textContent =
+        inf.scope === "private-lan"
+          ? `Off-PC LAN: ${inf.host ?? "LAN"}`
+          : `External API: ${inf.host ?? "remote"}`;
+      remoteBadge.title = `Inference is leaving this machine: ${inf.label}`;
+    } else {
+      remoteBadge.hidden = true;
+      remoteBadge.textContent = "";
+    }
+  }
   updateStatusPill();
   // The invitation to import a model is only for when there is none, not for one still loading.
   firstRun.hidden = state.modelUrl !== null;
@@ -1582,6 +1605,105 @@ async function applyState(state: AppState): Promise<void> {
   }
 }
 
+function decodeBase64Bytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+function wireEmotePopover(): void {
+  const toggleBtn = document.getElementById("emote-popover-toggle");
+  const popover = document.getElementById("emote-popover");
+  const idleSelect = document.getElementById("emote-idle-preset") as HTMLSelectElement | null;
+  const grid = document.getElementById("emote-grid");
+  const loadClipBtn = document.getElementById("emote-load-clip") as HTMLButtonElement | null;
+  const stopClipBtn = document.getElementById("emote-stop-clip") as HTMLButtonElement | null;
+  const loopClipBox = document.getElementById("emote-loop-clip") as HTMLInputElement | null;
+  const statusEl = document.getElementById("emote-status");
+  if (!toggleBtn || !popover || !grid) return;
+
+  toggleBtn.addEventListener("click", () => {
+    const opening = popover.hidden;
+    const framingPop = document.getElementById("framing-popover");
+    if (opening && framingPop) framingPop.hidden = true;
+    popover.hidden = !opening;
+    toggleBtn.setAttribute("aria-expanded", String(opening));
+  });
+
+  if (idleSelect) {
+    idleSelect.addEventListener("change", () => {
+      const preset = idleSelect.value as IdleLoopPreset;
+      stage?.setIdleLoopPreset(preset);
+      if (statusEl) statusEl.textContent = `Idle loop: ${idleSelect.selectedOptions[0]?.textContent ?? preset}`;
+    });
+  }
+
+  const pack = BUILT_IN_EMOTE_PACKS[0];
+  if (pack) {
+    grid.replaceChildren(
+      ...pack.emotes.map((emote) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "emote-btn";
+        btn.textContent = emote.label;
+        btn.addEventListener("click", () => {
+          stage?.playEmote(emote);
+          if (statusEl) statusEl.textContent = `Playing emote: ${emote.label}`;
+        });
+        return btn;
+      }),
+    );
+  }
+
+  if (loadClipBtn) {
+    loadClipBtn.addEventListener("click", () => {
+      loadClipBtn.disabled = true;
+      if (statusEl) statusEl.textContent = "Choose a .vrma (VRM) or .vmd (MMD) motion clip…";
+      void bridge
+        .pickMotionClip()
+        .then(async (picked) => {
+          if (!picked.ok) {
+            if (statusEl) statusEl.textContent = picked.canceled ? "" : (picked.error ?? "Could not open clip.");
+            return;
+          }
+          if (!stage) {
+            if (statusEl) statusEl.textContent = "3D stage is not active.";
+            return;
+          }
+          const bytes = decodeBase64Bytes(picked.bytesBase64);
+          const result = await stage.playMotionBytes(bytes, {
+            name: picked.name,
+            format: picked.format,
+            loop: loopClipBox?.checked === true,
+          });
+          if (result.ok) {
+            if (stopClipBtn) stopClipBtn.hidden = false;
+            if (statusEl) statusEl.textContent = `Playing ${result.kind.toUpperCase()}: ${result.name}`;
+          } else if (statusEl) {
+            statusEl.textContent = result.reason;
+          }
+        })
+        .catch((error: unknown) => {
+          if (statusEl) statusEl.textContent = error instanceof Error ? error.message : String(error);
+        })
+        .finally(() => {
+          loadClipBtn.disabled = false;
+        });
+    });
+  }
+
+  if (stopClipBtn) {
+    stopClipBtn.addEventListener("click", () => {
+      stage?.stopMotionClip();
+      stopClipBtn.hidden = true;
+      if (statusEl) statusEl.textContent = "Returned to idle loop.";
+    });
+  }
+}
+
 async function start(): Promise<void> {
   setVoiceState("off");
   logToggle.title = "The conversation so far (Ctrl+L)";
@@ -1597,6 +1719,10 @@ async function start(): Promise<void> {
   bridge.onForgotten(forgetLog);
   // Her reply was stopped: what was waiting behind it gets no answer, so nothing waits for one.
   bridge.onDropped((typedTaken) => dropWaiting(saidWaiting, typedTaken));
+  bridge.onAvatarReaction(({ event }) => {
+    stage?.triggerEventReaction(event);
+  });
+  wireEmotePopover();
   new ResizeObserver(updateLayout).observe(balloon);
   new ResizeObserver(updateLayout).observe(askForm);
 

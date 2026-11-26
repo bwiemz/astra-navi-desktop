@@ -752,12 +752,70 @@
       </section>
 
       <section id="sec-memory" class="panel">
-        <h2>Her memory</h2>
+        <h2>Her memory (100% local &amp; editable)</h2>
+        <p class="note">
+          You own every note she remembers — stored strictly on this computer in plain JSON, never
+          uploaded to any cloud. Pin key facts to keep them at the top of her prompt, correct any
+          mistake inline, forget anything, or click <strong>Why?</strong> to see where a memory came
+          from.
+        </p>
         <div class="row">
-          <span class="what">What she has learned</span>
-          <button type="button" data-open="learned">Open her notes</button>
-          <span id="notes" class="why"></span>
+          <span class="what">Stored notes</span>
+          <div class="backup-actions">
+            <span id="notes" class="why"></span>
+            <button type="button" class="quiet" data-open="learned">Export Markdown</button>
+          </div>
+          <span id="memory-ownership-path" class="why mcp-target"></span>
         </div>
+        <div class="row">
+          <span class="what">Filter &amp; search</span>
+          <div class="backup-actions">
+            <input
+              id="memory-search"
+              type="search"
+              placeholder="Search memories, topics, skills, or IDs…"
+              autocomplete="off"
+            />
+            <select id="memory-filter-kind" aria-label="Filter memories by kind">
+              <option value="all">All kinds</option>
+              <option value="pinned">Pinned only</option>
+              <option value="profile">Profile</option>
+              <option value="preference">Preference</option>
+              <option value="project">Project</option>
+              <option value="fact">Fact</option>
+              <option value="topic">Topic</option>
+              <option value="skill">Skill</option>
+              <option value="episode">Episode</option>
+            </select>
+          </div>
+        </div>
+        <form id="memory-add-form" class="machine-form" autocomplete="off">
+          <div class="row">
+            <span class="what">Add a note directly</span>
+            <div class="backup-actions">
+              <select id="memory-add-kind" aria-label="New memory kind">
+                <option value="fact">Fact</option>
+                <option value="preference">Preference</option>
+                <option value="profile">Profile</option>
+                <option value="project">Project</option>
+                <option value="episode">Episode</option>
+              </select>
+              <input
+                id="memory-add-text"
+                type="text"
+                maxlength="400"
+                placeholder="e.g. I prefer metric units and concise bullet points"
+              />
+              <label class="machine-look">
+                <input id="memory-add-pin" type="checkbox" />
+                <span>Pin</span>
+              </label>
+              <button id="memory-add-submit" type="submit">Save note</button>
+            </div>
+            <span id="memory-status" class="why" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+        <ul id="memory-list" class="machines"></ul>
         <label class="row switch">
           <input id="keepConversations" type="checkbox" />
           <span class="what">Keep past conversations</span>
@@ -800,6 +858,71 @@
         <h2>Her mind</h2>
         <p id="desktop-session-notice" class="why" hidden></p>
         <label class="row">
+          <span class="what">Inference backend</span>
+          <select id="inf-provider">
+            <option value="local">Built-in local model (default — stays on this PC)</option>
+            <option value="openai-compatible">
+              OpenAI-compatible server (Ollama, LM Studio, llama-server, LAN PC)
+            </option>
+          </select>
+          <span id="inf-locality-badge" class="mcp-badge mcp-badge-ok">100% Local on this PC</span>
+          <span id="inf-locality-note" class="why"></span>
+        </label>
+        <div id="inf-remote-group" class="mcp-group" hidden>
+          <label class="row">
+            <span class="what">Server preset</span>
+            <select id="inf-preset">
+              <option value="ollama">Ollama (http://127.0.0.1:11434/v1)</option>
+              <option value="lm-studio">LM Studio (http://127.0.0.1:1234/v1)</option>
+              <option value="llama-server">llama-server (http://127.0.0.1:8080/v1)</option>
+              <option value="custom">Custom OpenAI-compatible server</option>
+            </select>
+          </label>
+          <label class="row">
+            <span class="what">Server URL</span>
+            <input
+              id="inf-baseUrl"
+              type="url"
+              maxlength="300"
+              placeholder="http://127.0.0.1:11434/v1 or http://192.168.1.50:11434/v1"
+              autocomplete="off"
+            />
+            <span class="why"
+              >Point at Ollama, LM Studio, or llama-server locally or on a more powerful PC on your
+              LAN. If prompts leave this machine, a badge is shown in the companion window.</span
+            >
+          </label>
+          <label class="row">
+            <span class="what">Model name</span>
+            <input
+              id="inf-model"
+              type="text"
+              maxlength="200"
+              placeholder="qwen3.5:9b"
+              autocomplete="off"
+            />
+            <select id="inf-discovered-models" hidden aria-label="Discovered models"></select>
+          </label>
+          <label class="row">
+            <span class="what">API key (optional)</span>
+            <input
+              id="inf-apiKey"
+              type="password"
+              maxlength="400"
+              placeholder="Leave blank for local Ollama / LM Studio"
+              autocomplete="off"
+            />
+            <span id="inf-apiKey-note" class="why"></span>
+          </label>
+          <div class="row">
+            <span class="what">Connection</span>
+            <div class="backup-actions">
+              <button id="inf-test" type="button" class="quiet">Test &amp; List Models</button>
+            </div>
+            <span id="inf-test-status" class="why" role="status" aria-live="polite"></span>
+          </div>
+        </div>
+        <label class="row" id="local-brain-row">
           <span class="what">Brain</span>
           <select id="brain"></select>
           <span class="why">Bigger answers better and takes more of the graphics card.</span>

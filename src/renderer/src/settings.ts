@@ -11,6 +11,8 @@ import { showStation, wireDevices } from "./settings/devices.ts";
 import { showMachines, wireFleet } from "./settings/fleet.ts";
 import { showMcpServers, wireMcpSettings } from "./settings/mcp.ts";
 import { showCharacterAndVision, wireCharacterAndVision } from "./settings/character.ts";
+import { refreshMemoryManager, wireMemoryManager } from "./settings/memory.ts";
+import { showInferenceBackend, wireInferenceBackend } from "./settings/inference.ts";
 import { wireTraces } from "./settings/traces.ts";
 import { showSystem, wireSystem } from "./settings/system.ts";
 
@@ -25,6 +27,7 @@ function show(view: SettingsView): void {
   showPosture(view);
   showOnboarding(view);
   showCharacterAndVision(view);
+  showInferenceBackend(view);
   showSystem(view);
 
   fill(
@@ -123,6 +126,7 @@ function show(view: SettingsView): void {
         ].join(" ");
   showStation(view, show);
   showMcpServers(view, show);
+  refreshMemoryManager(show);
   showMachines(view, show);
   showCalendars(view);
 
@@ -326,6 +330,8 @@ wireOnboarding(show, save);
 wireDevices(show);
 wireCharacterAndVision(show, save);
 wireMcpSettings(show);
+wireMemoryManager(show);
+wireInferenceBackend(save);
 wireFleet(show);
 wireTraces();
 wireSystem(show, save);

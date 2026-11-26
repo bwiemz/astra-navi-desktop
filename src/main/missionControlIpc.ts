@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import type { Brain } from "../core/brain.ts";
 import type { ConfigStore } from "../core/config.ts";
 import type { EpisodicGraph } from "../core/episodic.ts";
+import { explainWhyRemembered, inferMemorySource } from "../core/learned.ts";
 import type { MemoryKind, MemoryStore } from "../core/memory.ts";
 import type { ApprovalDesk } from "../core/missionApproval.ts";
 import { describeWake, type MissionBoard } from "../core/missionPlan.ts";
@@ -218,6 +219,8 @@ export function buildMissionControlSnapshot(
     updatedAt: mem.updatedAt,
     hits: mem.hits,
     pinned: Boolean(mem.pinned),
+    source: inferMemorySource(mem),
+    whyRemembered: explainWhyRemembered(mem),
     ...(mem.namespace ? { namespace: mem.namespace } : {}),
   }));
 

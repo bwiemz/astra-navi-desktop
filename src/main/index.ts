@@ -17,6 +17,7 @@ import { Brain } from "../core/brain.ts";
 import { ConfigStore } from "../core/config.ts";
 import { gameOnCard as cardGameOnCard, gpuUtilization } from "../core/cardWatch.ts";
 import { LocalEngine, type EngineStatus } from "../core/engine.ts";
+import { describeInferenceLocality } from "../core/openaiBackend.ts";
 import { createPlatformAdapter, type PlatformAdapter } from "../core/platform/adapter.ts";
 import { resolveNativeWinHandsBinary } from "../core/platform/windows.ts";
 import { detectEnvironment } from "../core/environment.ts";
@@ -296,6 +297,7 @@ function appState(showNotice: boolean): AppState {
     windowMode: config.value.windowMode,
     lowPowerStage: config.value.lowPowerStage,
     clickThrough,
+    inferenceBackend: describeInferenceLocality(config.value.inference),
   };
 }
 
@@ -784,6 +786,13 @@ const settings = createSettingsController({
     await loadModelBundle();
     sendToWindow("app:state", appState(false));
   },
+  onInferenceChanged: async () => {
+    interruptBrain();
+    await brain?.whenIdle();
+    await engine?.setInferenceBackend(config.value.inference);
+    sendToWindow("app:state", appState(false));
+    rebuildTrayMenu();
+  },
   detectGameOnCard: gameOnCard,
   sendToWindow,
   rebuildTrayMenu: () => rebuildTrayMenu(),
@@ -978,6 +987,7 @@ function startShipServices(workspace: string): void {
       text: `A reminder is due${late}: "${reminder.text}"`,
       plain: `Reminder${late}: ${reminder.text}`,
     });
+    sendToWindow("stage:reaction", { event: "reminder-fired", detail: reminder.text });
     void reach?.remindPhone(reminder.text);
   });
 
@@ -987,11 +997,13 @@ function startShipServices(workspace: string): void {
     store: store ?? undefined,
     adapter: platformAdapter ?? undefined,
     onStarted: (game) => {
+      sendToWindow("stage:reaction", { event: "game-started", detail: game });
       if (config.value.yieldToGames) {
         void voice.yieldForGame(game).catch(() => undefined);
       }
     },
     onEnded: (game, minutes) => {
+      sendToWindow("stage:reaction", { event: "game-ended", detail: game });
       void voice.resumeAfterGame().catch(() => undefined);
       initiative?.gameEnded(game, minutes);
       // What was held for the game goes on.
@@ -1050,6 +1062,10 @@ function startShipServices(workspace: string): void {
       outsideText: true, // the tail of what the program printed
       text: `The background job "${mission.title}" ${outcome}. The end of its output: ${mission.output.slice(-600) || "(nothing)"}`,
       plain: `The background job "${mission.title}" ${outcome}.`,
+    });
+    sendToWindow("stage:reaction", {
+      event: mission.state === "succeeded" ? "mission-finished" : "mission-failed",
+      detail: mission.title,
     });
   });
 
@@ -1497,6 +1513,7 @@ async function main(): Promise<void> {
     idleUnloadMs: config.value.idleUnloadMinutes * 60_000,
     lean: config.value.leanMemory,
     gameOnCard: config.value.yieldToGames ? gameOnCard : undefined,
+    inference: config.value.inference,
     onStatus: onEngineStatus,
     onDownloadUpdate: (dl) => settings.sendDownloadProgress(dl),
   });

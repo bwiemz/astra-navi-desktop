@@ -67,6 +67,19 @@ const ConfigSchema = z.object({
   keepTraces: z.boolean().default(false),
   /** The language she speaks and listens in. */
   language: z.enum(LANGUAGE_CODES).default("en"),
+  /**
+   * Optional OpenAI-compatible inference backend (Ollama, LM Studio, llama-server,
+   * or another workstation on the local network). Built-in local GGUF remains the default.
+   */
+  inference: z
+    .object({
+      provider: z.enum(["local", "openai-compatible"]).default("local"),
+      preset: z.enum(["ollama", "lm-studio", "llama-server", "custom"]).default("ollama"),
+      baseUrl: z.string().max(300).default(""),
+      model: z.string().max(200).default(""),
+      apiKey: z.string().max(400).default(""),
+    })
+    .prefault({}),
   voice: z
     .object({
       /**

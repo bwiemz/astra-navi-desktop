@@ -1,3 +1,4 @@
+import type { AvatarEventKind } from "./avatarMotion.ts";
 import type { PermissionRiskLevel } from "../core/riskRules.ts";
 import type { DroppedAttachment } from "../core/dropRouter.ts";
 import type { ModelFraming } from "./spatialStage.ts";
@@ -94,11 +95,34 @@ export type VoiceEvent =
   | { type: "stop" }
   | { type: "error"; message: string };
 
+export interface AvatarReactionEvent {
+  event: AvatarEventKind;
+  detail?: string;
+}
+
+export type PickedMotionClip =
+  | {
+      ok: true;
+      canceled: false;
+      name: string;
+      format: "vrma" | "vmd";
+      bytesBase64: string;
+    }
+  | { ok: false; canceled: boolean; error?: string };
+
 export interface DropFilesResult {
   avatarsLoaded: string[];
   attachments: DroppedAttachment[];
   calendarAdded: string[];
   notes: string[];
+}
+
+export interface InferenceLocalityView {
+  provider: "local" | "openai-compatible";
+  scope: "local-gguf" | "local-loopback" | "private-lan" | "remote-internet";
+  host: string | null;
+  leavesMachine: boolean;
+  label: string;
 }
 
 export interface AppState {
@@ -126,6 +150,8 @@ export interface AppState {
   lowPowerStage: boolean;
   /** Whether mouse clicks currently pass through the overlay window. */
   clickThrough: boolean;
+  /** Active inference locality so the UI clearly shows whenever inference leaves this machine. */
+  inferenceBackend?: InferenceLocalityView;
 }
 
 /** What she is taking in or held back from right now. Each is shown as a small badge when true. */
@@ -281,6 +307,8 @@ export interface AichanBridge {
   importModel(): void;
   /** Persists per-model zoom, pan, rim light, and outline thickness overrides. */
   saveModelFraming(modelHash: string, framing: ModelFraming): void;
+  /** Opens a local file picker for a `.vrma` (VRM) or `.vmd` (MMD) animation clip. */
+  pickMotionClip(): Promise<PickedMotionClip>;
   /** Toggles click-through lock on the overlay window. */
   setClickThrough(on: boolean): void;
   /** Toggles the Hands-Off kill switch immediately from the hover mini-toolbar. */
@@ -315,4 +343,6 @@ export interface AichanBridge {
    * `typedTaken` is how many typed messages the app had received from this window by then.
    */
   onDropped(listener: (typedTaken: number) => void): void;
+  /** Real-time desktop/companion event reactions driving avatar mood + gesture animations. */
+  onAvatarReaction(listener: (payload: AvatarReactionEvent) => void): void;
 }

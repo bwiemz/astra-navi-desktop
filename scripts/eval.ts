@@ -974,9 +974,10 @@ async function prepare(test: EvalCase): Promise<void> {
   for (const note of [...memory.all()]) await memory.forget(note.id);
   for (const note of test.notes ?? []) {
     if (note.kind === "topic" || note.kind === "skill") {
-      await memory.learn(note.kind, note.text, note.points ?? []);
+      const { memory: created } = await memory.learn(note.kind, note.text, note.points ?? []);
+      if (note.pinned) await memory.pin(created.id, true);
     } else {
-      await memory.save({ kind: note.kind, text: note.text });
+      await memory.save({ kind: note.kind, text: note.text, pinned: note.pinned });
     }
     // Notes are ordered by when they were written; a pause keeps the order given.
     await pause(2);

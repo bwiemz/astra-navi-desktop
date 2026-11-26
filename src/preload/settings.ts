@@ -1,4 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { MemoryKind } from "../core/memory.ts";
+import type { OpenAiProbeResult } from "../core/openaiBackend.ts";
 import type { QrMatrix } from "../core/qrCode.ts";
 import type { ShownTrace } from "../core/trace.ts";
 import type {
@@ -7,6 +9,7 @@ import type {
   HardwareRecommendationView,
   MachineFound,
   McpServerAddRequest,
+  MemoryManagerSnapshot,
   ModelDownloadStatusView,
   PolicyAuditSummaryView,
   ProfileBackupActionResult,
@@ -99,6 +102,25 @@ const bridge: SettingsBridge = {
     ipcRenderer.invoke("settings:download-mmproj") as Promise<
       { ok: true; view: SettingsView; path: string } | { ok: false; view: SettingsView; error: string }
     >,
+  listMemories: () => ipcRenderer.invoke("settings:memory-list") as Promise<MemoryManagerSnapshot>,
+  addMemory: (input: { kind: MemoryKind; text: string; pinned?: boolean }) =>
+    ipcRenderer.invoke("settings:memory-add", input) as Promise<
+      { ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }
+    >,
+  updateMemory: (input: { id: string; text: string; kind?: MemoryKind; points?: string[] }) =>
+    ipcRenderer.invoke("settings:memory-update", input) as Promise<
+      { ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }
+    >,
+  pinMemory: (id: string, pinned: boolean) =>
+    ipcRenderer.invoke("settings:memory-pin", { id, pinned }) as Promise<
+      { ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }
+    >,
+  forgetMemory: (id: string) =>
+    ipcRenderer.invoke("settings:memory-forget", id) as Promise<
+      { ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }
+    >,
+  testInferenceBackend: (input: { baseUrl: string; apiKey?: string }) =>
+    ipcRenderer.invoke("settings:test-inference", input) as Promise<OpenAiProbeResult>,
   hardwareProfile: (force?: boolean) =>
     ipcRenderer.invoke("settings:hardware-profile", Boolean(force)) as Promise<HardwareRecommendationView>,
   previewVoice: (name: string) =>

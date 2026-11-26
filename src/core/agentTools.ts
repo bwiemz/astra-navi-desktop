@@ -591,7 +591,12 @@ export function createTools(host: ToolHost): ChatSessionModelFunctions {
         TOOLS.remember,
         () => "Making a note",
         async (input) => {
-          const { memory, merged } = await host.memory.save({ kind: input.kind, text: input.text });
+          const { memory, merged } = await host.memory.save({
+            kind: input.kind,
+            text: input.text,
+            source: "explicit",
+            reason: "Saved during conversation when you asked her to remember this.",
+          });
           return `${merged ? "Already knew that; refreshed" : "Saved"} ${formatMemory(memory)}`;
         },
       ),

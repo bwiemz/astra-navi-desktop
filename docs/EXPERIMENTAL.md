@@ -196,6 +196,23 @@ All pre-release Android 15, Windows Authenticode signing pipeline, packaging, ex
   - Security-hardened Persona Card Importer (`src/core/personaCard.ts`): supports Character Card V3 (`ccv3`), V2 (`chara`), V1 JSON, native Astra JSON, and `.png` `tEXt` chunks (`8 MB` cap) while stripping ChatML/tool tags, control chars, BiDi overrides, and `[[mood]]` spoofing.
   - Brain-tier personality drift gate (`evals/characterGate.ts`, `scripts/eval.ts`): `--gate-character` (live eval gate) and `--check-character-gate <candidate> [<baseline>] [--min-character <n>] [--max-drop <n>]` (offline report comparison enforcing default `85%` floor and `<= 5 pt` max regression), verified with `tests/characterLayer.test.ts` (`9/9` tests).
 
+---
+
+## 12. Roadmap Items 5, 6 & 7 — Alive Avatar Motion, Editable Memory Ownership & OpenAI-Compatible Backend (`2026-11-26`)
+
+- **Item 5 — Alive Avatar Motion (VRMA + VMD Playback, Idle Loops, Event Reactions & Data-Only Emote Packs):**
+  - `src/shared/avatarMotion.ts`: Added 4 procedural idle-loop presets (`calm-breathe`, `curious-glance`, `playful-sway`, `focused-stand`), `IdleFlourishScheduler` for ambient awake-idle gestures, 9 coordinated desktop/companion `AVATAR_EVENT_REACTIONS` (`reminder-fired`, `mission-finished`, `mission-failed`, `wake-word`, `error-noticed`, `greeting`, `game-started`, `game-ended`, `approval-needed`), strict data-only `EmotePackManifestSchema` + `BUILT_IN_EMOTE_PACKS` (zero code, path-traversal-proof `.vrma`/`.vmd` references), and pure binary VMD/VRMA header validation (`inspectVmdHeader`, `detectMotionClipFormat`).
+  - `src/renderer/src/stage.ts`: Wired real **VRMA playback for VRM** (`VrmaStageBridge`) and real **VMD playback for MMD** (`babylon-mmd` `VmdLoader` + `mmdRuntimeModelAnimation` + `createRuntimeAnimation`/`setRuntimeAnimation`), idle-loop presets + flourishes, `triggerEventReaction()`, and `playEmote()`.
+  - `src/main/index.ts`, `src/main/desktopIpc.ts`, `src/preload/index.ts`, `src/renderer/index.html`, `src/renderer/src/main.ts`: Fired real `"stage:reaction"` IPC events for reminders, mission completions/failures, games starting/ending, wake-word detection, and approvals; added the companion `#emote-popover` with idle preset picker, built-in emote triggers, and `.vrma`/`.vmd` clip loader (`tests/avatarMotion.test.ts`: `6/6`).
+- **Item 6 — Editable Memory Ownership & Expanded Memory Evals:**
+  - `src/core/memory.ts`, `src/core/learned.ts`, `src/core/agentTools.ts`, `src/core/learner.ts`: Added memory provenance fields (`source`, `reason`, `sourceExcerpt`), prioritized pinned memories at the top of `MemoryStore.snapshot()`, added `explainWhyRemembered()` & `buildMemoryManagerSnapshot()`, and updated `describeLearned()` (removing legacy `"AI-chan"` heading).
+  - `src/renderer/src/settings/memory.ts`, `src/renderer/settings.html`, `src/main/settingsIpc.ts`, `src/renderer/src/mission-control/memory.ts`: Built an in-app editable Memory Manager inside **Settings → Memory** (and upgraded Workbench's Memory tab) with search/filter, inline add, **Pin / Unpin**, inline **Correct** (text + topic/skill points), **Forget**, and **"Why?"** provenance inspection.
+  - `evals/cases/memory.ts`, `evals/types.ts`, `scripts/eval.ts`: Added `NoteSeed.pinned` support and expanded `MEMORY_CASES` by 10 cases (`17 -> 27` cases covering pinned older facts, explicit `remember`/`forget`, superseding corrections, multi-constraint preferences, cross-turn corrections, missing-detail non-hallucination, natural provenance explanation, episodic fixes, and skill adaptation; `tests/memoryOwnership.test.ts`: `4/4`).
+- **Item 7 — Optional OpenAI-Compatible Inference Backend (Ollama, LM Studio, `llama-server`, LAN/Remote):**
+  - `src/core/openaiBackend.ts`, `src/core/config.ts`, `src/core/engine.ts`: Generalized SSE streaming + multi-step OpenAI `tool_calls` execution (`OpenAiCompatibleSession`, `probeOpenAiModels`, `openAiSideQuestion`) integrated seamlessly behind `LocalEngine` (keeping built-in local GGUF as default) with `classifyInferenceEndpoint()` blocking embedded credentials & cloud metadata hosts and distinguishing `local-gguf`, `local-loopback`, `private-lan`, and `remote-internet`.
+  - `src/renderer/src/settings/inference.ts`, `src/renderer/settings.html`, `src/renderer/index.html`, `src/renderer/src/main.ts`, `src/main/settingsIpc.ts`: Added **Settings → Mind → Inference backend** (presets for Ollama, LM Studio, `llama-server`, custom; **Test & List Models** discovery; write-only API key redacted from views & support bundles) plus a visible `#remote-inference-badge` in the companion window whenever inference leaves this computer (`tests/openaiBackend.test.ts`: `5/5`).
+
+
 
 
 

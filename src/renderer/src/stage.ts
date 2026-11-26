@@ -1,6 +1,7 @@
 import "babylon-mmd/esm/Loader/pmxLoader";
 import "babylon-mmd/esm/Loader/pmdLoader";
 import "babylon-mmd/esm/Loader/mmdOutlineRenderer";
+import "babylon-mmd/esm/Runtime/Animation/mmdRuntimeModelAnimation";
 
 import { FreeCamera } from "@babylonjs/core/Cameras/freeCamera";
 import { Engine } from "@babylonjs/core/Engines/engine";
@@ -18,6 +19,7 @@ import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { Scene } from "@babylonjs/core/scene";
 import { MmdStandardMaterialBuilder } from "babylon-mmd/esm/Loader/mmdStandardMaterialBuilder";
 import { SdefInjector } from "babylon-mmd/esm/Loader/sdefInjector";
+import { VmdLoader } from "babylon-mmd/esm/Loader/vmdLoader";
 import type { IMmdRuntimeLinkedBone } from "babylon-mmd/esm/Runtime/IMmdRuntimeLinkedBone";
 import type { MmdModel } from "babylon-mmd/esm/Runtime/mmdModel";
 import { MmdRuntime } from "babylon-mmd/esm/Runtime/mmdRuntime";
@@ -55,8 +57,21 @@ import {
   type VisemeWeights,
   type VowelViseme,
 } from "../../shared/visemes.ts";
+import {
+  detectMotionClipFormat,
+  evaluateIdleLoop,
+  IDLE_LOOP_PROFILES,
+  IdleFlourishScheduler,
+  inspectVmdHeader,
+  resolveEventReaction,
+  type AvatarEventKind,
+  type AvatarEventReaction,
+  type EmoteItem,
+  type IdleLoopPreset,
+} from "../../shared/avatarMotion.ts";
 import { loadVrmIntoScene, type LoadedVrmRig } from "./vrmLoader.ts";
 import { StageLayerManager, type StageLayer } from "./stageLayers.ts";
+import { VrmaStageBridge } from "./vrmaStageBridge.ts";
 
 export { GESTURES, evaluateGestureMotion, type Gesture, type GestureMotionSample };
 
@@ -195,6 +210,18 @@ export class Stage {
   private webcamStream: MediaStream | null = null;
   private webcamTimer: number | null = null;
   private readonly layers = new StageLayerManager();
+  private readonly vrmaBridge = new VrmaStageBridge();
+  private vrmaClipName: string | null = null;
+  private activeVmd: {
+    name: string;
+    handle: ReturnType<MmdModel["createRuntimeAnimation"]>;
+    loop: boolean;
+    frameTime30: number;
+    maxFrameTime30: number;
+  } | null = null;
+  private idlePreset: IdleLoopPreset = "calm-breathe";
+  private readonly idleFlourishes = new IdleFlourishScheduler(18);
+  private reactionRevertTimer: number | null = null;
 
   private mood: Mood = "neutral";
   private thinking = false;
@@ -319,8 +346,13 @@ export class Stage {
    */
   private readonly tick = (now: number): void => {
     this.frameRequest = this.visible ? requestAnimationFrame(this.tick) : 0;
+    const motionPlaying = this.activeVmd !== null || this.vrmaClipName !== null;
     const pace =
-      this.asleep && now > this.livelyUntil ? "asleep" : now < this.livelyUntil ? "lively" : "idle";
+      motionPlaying || now < this.livelyUntil
+        ? "lively"
+        : this.asleep
+          ? "asleep"
+          : "idle";
     // A little slack, or a frame that arrives a hair early would be skipped and the rate halved.
     const fpsTable = this.lowPower ? LOW_POWER_FPS : FRAMES_PER_SECOND;
     if (now - this.lastFrameAt < 1000 / fpsTable[pace] - 2) return;
@@ -653,6 +685,146 @@ export class Stage {
     this.livelyUntil = performance.now() + GESTURES[kind] * 1000 + LIVELY_FOR_MS;
   }
 
+  /** Returns the loaded rig format (`"vrm"`, `"mmd"`, or `null`). */
+  rigKind(): "mmd" | "vrm" | null {
+    return this.rig?.kind ?? null;
+  }
+
+  /** Selects the active procedural idle-loop personality preset. */
+  setIdleLoopPreset(preset: IdleLoopPreset): void {
+    this.idlePreset = preset;
+    this.idleFlourishes.reset(this.clock, preset);
+    this.stir();
+  }
+
+  getIdleLoopPreset(): IdleLoopPreset {
+    return this.idlePreset;
+  }
+
+  /** Plays a coordinated mood + gesture reaction for a desktop/companion event. */
+  triggerEventReaction(event: AvatarEventKind): AvatarEventReaction {
+    const reaction = resolveEventReaction(event);
+    if (this.reactionRevertTimer !== null) {
+      window.clearTimeout(this.reactionRevertTimer);
+      this.reactionRevertTimer = null;
+    }
+    this.setMood(reaction.mood);
+    this.play(reaction.gesture);
+    if (reaction.mood !== "neutral" && reaction.holdMoodMs > 0) {
+      this.reactionRevertTimer = window.setTimeout(() => {
+        this.reactionRevertTimer = null;
+        if (!this.thinking && this.talkLevel < 0.05) {
+          this.setMood("neutral");
+        }
+      }, reaction.holdMoodMs);
+    }
+    return reaction;
+  }
+
+  /** Plays an emote item from a built-in or data-only emote pack. */
+  playEmote(emote: EmoteItem): void {
+    if (emote.mood) this.setMood(emote.mood);
+    if (emote.gesture) this.play(emote.gesture);
+    this.stir();
+  }
+
+  /**
+   * Plays a `.vrma` (for VRM rigs) or `.vmd` (for MMD rigs) motion clip from raw bytes.
+   * Rejects mismatched formats cleanly without disturbing the current rig.
+   */
+  async playMotionBytes(
+    bytes: Uint8Array,
+    options: { name?: string; format?: "vrma" | "vmd"; loop?: boolean; fadeSec?: number } = {},
+  ): Promise<{ ok: true; kind: "vrma" | "vmd"; name: string } | { ok: false; reason: string }> {
+    const rig = this.rig;
+    if (!rig) {
+      return { ok: false, reason: "No 3D avatar is loaded yet." };
+    }
+    const name = options.name?.trim() || "motion";
+    const format = options.format ?? detectMotionClipFormat(bytes, name);
+    if (format === "unknown") {
+      return { ok: false, reason: "Unrecognized animation file. Expected a .vrma or .vmd clip." };
+    }
+
+    if (format === "vrma") {
+      if (rig.kind !== "vrm" || !rig.vrmRig) {
+        return {
+          ok: false,
+          reason: "VRMA animation files require a VRM avatar (.vrm). For MMD (.pmx/.pmd) avatars, load a .vmd file.",
+        };
+      }
+      this.stopMotionClip();
+      try {
+        const clip = this.vrmaBridge.loadVrmaBytes(bytes, {
+          loop: options.loop ?? false,
+          fadeSec: options.fadeSec ?? 0.25,
+        });
+        this.vrmaClipName = clip.name || name;
+        this.stir();
+        return { ok: true, kind: "vrma", name: this.vrmaClipName };
+      } catch (error) {
+        return {
+          ok: false,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    // VMD playback via babylon-mmd
+    if (rig.kind !== "mmd" || !rig.mmdModel) {
+      return {
+        ok: false,
+        reason: "VMD animation files require an MMD avatar (.pmx/.pmd). For VRM avatars, load a .vrma file.",
+      };
+    }
+    try {
+      inspectVmdHeader(bytes);
+      this.stopMotionClip();
+      const loader = new VmdLoader(this.scene);
+      const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      const animation = await loader.loadFromBufferAsync(name, buffer);
+      const handle = rig.mmdModel.createRuntimeAnimation(animation);
+      rig.mmdModel.setRuntimeAnimation(handle);
+      this.activeVmd = {
+        name,
+        handle,
+        loop: options.loop ?? false,
+        frameTime30: 0,
+        maxFrameTime30: Math.max(1, animation.endFrame),
+      };
+      void this.mmdRuntime.seekAnimation(0, true);
+      this.stir();
+      return { ok: true, kind: "vmd", name };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Stops any active `.vrma` or `.vmd` motion clip and returns smoothly to procedural idle. */
+  stopMotionClip(): void {
+    if (this.vrmaClipName !== null) {
+      this.vrmaBridge.clearClip(0.25);
+      this.vrmaClipName = null;
+    }
+    if (this.activeVmd !== null) {
+      const { handle } = this.activeVmd;
+      this.activeVmd = null;
+      const mmdModel = this.rig?.mmdModel;
+      if (mmdModel) {
+        try {
+          mmdModel.setRuntimeAnimation(null);
+          mmdModel.destroyRuntimeAnimation(handle);
+        } catch {
+          // Model may already be disposing.
+        }
+      }
+    }
+    this.stir();
+  }
+
   /** Applies paralinguistic posture hints from native S2S audio analysis. */
   setParalinguisticPosture(hint: {
     leanForward: number;
@@ -709,6 +881,7 @@ export class Stage {
 
   /** Removes the current model, if any. */
   clearModel(): void {
+    this.stopMotionClip();
     this.loadToken += 1;
     const rig = this.rig;
     this.rig = null;
@@ -1140,15 +1313,59 @@ export class Stage {
     }
     for (const [name, weight] of applied) rig.setMorphWeight(name, weight);
 
-    // --- body + procedural idle polish -------------------------------------
+    // --- body + motion clips (VMD / VRMA) + procedural idle polish ---------
+    if (this.activeVmd && rig.kind === "mmd" && rig.mmdModel) {
+      this.activeVmd.frameTime30 += dt * 30;
+      if (this.activeVmd.frameTime30 >= this.activeVmd.maxFrameTime30) {
+        if (this.activeVmd.loop) {
+          this.activeVmd.frameTime30 %= this.activeVmd.maxFrameTime30;
+        } else {
+          this.stopMotionClip();
+        }
+      }
+      if (this.activeVmd) {
+        void this.mmdRuntime.seekAnimation(this.activeVmd.frameTime30, true);
+        this.runStageLayers(dt);
+        rig.stepPhysics(dt);
+        return;
+      }
+    }
+
+    if (this.vrmaClipName !== null && rig.kind === "vrm" && rig.vrmRig) {
+      const vrmaPose = this.vrmaBridge.step(dt);
+      for (const [boneName, q] of Object.entries(vrmaPose.boneRotations)) {
+        rig.vrmRig.setBoneLocalRotation(boneName, new Quaternion(q[0], q[1], q[2], q[3]));
+      }
+      for (const [exprName, w] of Object.entries(vrmaPose.expressions)) {
+        rig.vrmRig.setExpression(exprName, Math.max(applied.get(exprName) ?? 0, w));
+      }
+      if (!vrmaPose.clipActive && vrmaPose.clipBlendWeight <= 0.001) {
+        this.vrmaClipName = null;
+      }
+      this.runStageLayers(dt);
+      rig.stepPhysics(dt);
+      return;
+    }
+
     const awake = 1 - this.sleep;
+    const idleProfile = IDLE_LOOP_PROFILES[this.idlePreset] ?? IDLE_LOOP_PROFILES["calm-breathe"];
     if (t >= this.nextSaccadeAt) {
-      this.nextSaccadeAt = t + 2.1 + Math.random() * 2.8;
+      const saccadeSpan = Math.max(
+        0.5,
+        idleProfile.saccadeIntervalMaxSec - idleProfile.saccadeIntervalMinSec,
+      );
+      this.nextSaccadeAt = t + idleProfile.saccadeIntervalMinSec + Math.random() * saccadeSpan;
       this.saccadeTarget = {
         x: (Math.random() - 0.5) * 0.32,
         y: (Math.random() - 0.5) * 0.18,
       };
     }
+    const ambientGesture = this.idleFlourishes.poll(
+      t,
+      this.idlePreset,
+      awake > 0.9 && !this.thinking && !this.listening && !this.gesture && this.talkLevel < 0.05,
+    );
+    if (ambientGesture) this.play(ambientGesture);
     this.saccade.x = approach(this.saccade.x, this.saccadeTarget.x * awake, 14, dt);
     this.saccade.y = approach(this.saccade.y, this.saccadeTarget.y * awake, 14, dt);
 
@@ -1176,14 +1393,15 @@ export class Stage {
       4,
       dt,
     );
-    const breath =
-      Math.sin(t * (1.7 - 0.8 * this.sleep)) *
-      (1 + 0.8 * this.sleep) *
-      this.breathingScale *
-      this.paralinguistic.energyScale;
-    const sway = Math.sin(t * 0.53) * awake * this.talkGestureScale;
-    const weightShift = Math.sin(t * 0.37 + 0.6) * 1.4 * awake;
-    const drift = Math.sin(t * 0.31 + 1.3) * awake;
+    const { breath, sway, weightShift, drift } = evaluateIdleLoop(
+      this.idlePreset,
+      t,
+      awake,
+      this.sleep,
+      this.breathingScale,
+      this.talkGestureScale,
+      this.paralinguistic.energyScale,
+    );
     const listenNod = this.attention * Math.sin(t * 3.1) * 1.6;
     const lean =
       -this.attention * 3 -
@@ -1335,6 +1553,10 @@ export class Stage {
   }
 
   dispose(): void {
+    if (this.reactionRevertTimer !== null) {
+      window.clearTimeout(this.reactionRevertTimer);
+      this.reactionRevertTimer = null;
+    }
     this.layers.dispose();
     this.stopWebcamPresence();
     this.disposeRoomScene();

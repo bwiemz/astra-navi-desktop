@@ -140,6 +140,7 @@
       <div id="framing-controls" class="framing-controls">
         <button id="auto-frame" type="button" class="framing-btn" title="Auto-Frame / Reset Camera">Auto-Frame</button>
         <button id="framing-tune-toggle" type="button" class="framing-btn" title="Tune Rim Light & Outline" aria-expanded="false">Tune</button>
+        <button id="emote-popover-toggle" type="button" class="framing-btn" title="Emotes, Idle Loops & VRMA/VMD Motion Clips" aria-expanded="false">Emotes</button>
       </div>
 
       <div id="framing-popover" class="framing-popover" hidden>
@@ -154,11 +155,41 @@
         <button id="framing-reset" type="button" class="framing-reset">Reset framing</button>
       </div>
 
+      <div id="emote-popover" class="framing-popover emote-popover" hidden>
+        <label class="framing-slider">
+          <span>Idle loop</span>
+          <select id="emote-idle-preset">
+            <option value="calm-breathe">Calm breathe</option>
+            <option value="curious-glance">Curious glance</option>
+            <option value="playful-sway">Playful sway</option>
+            <option value="focused-stand">Focused stand</option>
+          </select>
+        </label>
+        <div id="emote-grid" class="emote-grid"></div>
+        <div class="emote-motion-row">
+          <button id="emote-load-clip" type="button" class="framing-reset">Play .VRMA / .VMD…</button>
+          <button id="emote-stop-clip" type="button" class="framing-reset" hidden>Stop Clip</button>
+        </div>
+        <label class="emote-loop-toggle">
+          <input id="emote-loop-clip" type="checkbox" />
+          <span>Loop motion clip</span>
+        </label>
+        <p id="emote-status" class="emote-status" role="status" aria-live="polite"></p>
+      </div>
+
       <div id="status-pill" class="status-pill" data-kind="ready" role="status" aria-live="polite">
         <span class="status-dot" aria-hidden="true"></span>
         <span id="status-pill-label" class="status-pill-label">Ready</span>
         <button id="status-stop" type="button" class="status-stop" hidden>Stop</button>
       </div>
+      <div
+        id="remote-inference-badge"
+        class="remote-inference-badge"
+        data-scope="private-lan"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></div>
 
       <div id="stand-in" class="stand-in" hidden>
         <div id="first-run" class="first-run">

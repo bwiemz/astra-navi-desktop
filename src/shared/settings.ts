@@ -1,4 +1,12 @@
 import type { LanguageCode } from "../core/languages.ts";
+import type { MemoryManagerEntry, MemoryManagerSnapshot } from "../core/learned.ts";
+import type { MemoryKind } from "../core/memory.ts";
+import type {
+  InferenceProvider,
+  InferenceScope,
+  OpenAiProbeResult,
+  OpenAiServerPreset,
+} from "../core/openaiBackend.ts";
 import type { QrMatrix } from "../core/qrCode.ts";
 import type { ShownTrace } from "../core/trace.ts";
 import type { UpdateCheckResult } from "./edition.ts";
@@ -114,6 +122,8 @@ export interface SettingsView {
   character: CharacterSettingsView;
   /** Local `llama-server` + `mmproj` native vision sidecar configuration and readiness. */
   vision: VisionSidecarView;
+  /** Optional OpenAI-compatible inference server configuration (never includes raw API key). */
+  inference: InferenceSettingsView;
   /** The desktop has a password window she can have SSH ask with. */
   canAskPassword: boolean;
   /** Whether the first-run setup wizard has been completed. */
@@ -247,6 +257,19 @@ export interface VisionSidecarView {
   reason: string;
 }
 
+/** Optional OpenAI-compatible inference backend view shown in Settings (secret key redacted). */
+export interface InferenceSettingsView {
+  provider: InferenceProvider;
+  preset: OpenAiServerPreset;
+  baseUrl: string;
+  model: string;
+  hasApiKey: boolean;
+  scope: InferenceScope;
+  host: string | null;
+  leavesMachine: boolean;
+  label: string;
+}
+
 /** One kept backup on a remote machine, as the Settings rollback drawer shows it. */
 export interface RemoteBackupView {
   id: string;
@@ -349,6 +372,14 @@ export interface SettingsPatch {
     speakInThirdPerson: boolean;
     bio: string;
   }>;
+  inference?: Partial<{
+    provider: InferenceProvider;
+    preset: OpenAiServerPreset;
+    baseUrl: string;
+    model: string;
+    /** A new Bearer key, or an empty string `""` to clear the saved key. */
+    apiKey: string;
+  }>;
   tier10?: Partial<Tier10Settings>;
 }
 
@@ -445,6 +476,32 @@ export interface SettingsBridge {
   downloadVisionMmproj(): Promise<
     { ok: true; view: SettingsView; path: string } | { ok: false; view: SettingsView; error: string }
   >;
+  /** Lists all long-term memories with provenance ("why do you remember this?") and ownership stats. */
+  listMemories(): Promise<MemoryManagerSnapshot>;
+  /** Adds a new memory note directly from Settings. */
+  addMemory(input: {
+    kind: MemoryKind;
+    text: string;
+    pinned?: boolean;
+  }): Promise<{ ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }>;
+  /** Corrects/edits an existing memory note's text, kind, or topic/skill points. */
+  updateMemory(input: {
+    id: string;
+    text: string;
+    kind?: MemoryKind;
+    points?: string[];
+  }): Promise<{ ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }>;
+  /** Pins or unpins a memory so pinned notes stay at the top of her working prompt. */
+  pinMemory(
+    id: string,
+    pinned: boolean,
+  ): Promise<{ ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }>;
+  /** Forgets (deletes) one stored memory by ID. */
+  forgetMemory(
+    id: string,
+  ): Promise<{ ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }>;
+  /** Probes `/models` on an OpenAI-compatible endpoint to verify connectivity and discover models. */
+  testInferenceBackend(input: { baseUrl: string; apiKey?: string }): Promise<OpenAiProbeResult>;
   /** Probes local GPU/VRAM/RAM and recommends the optimal brain tier & quantization. */
   hardwareProfile(force?: boolean): Promise<HardwareRecommendationView>;
   /** Reads a bundled voice sample wav as a base64 data URI, or null if missing. */
@@ -587,6 +644,8 @@ export type ProfileBackupActionResult =
 export type ProfileRestoreActionResult =
   | { ok: true; canceled: false; path: string; result: ProfileRestoreResult }
   | { ok: false; canceled: boolean; error?: string };
+
+export type { MemoryManagerEntry, MemoryManagerSnapshot };
 
 export interface SupportBundleResultView {
   path: string;

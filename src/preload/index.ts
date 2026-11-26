@@ -2,10 +2,12 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AichanBridge,
   AppState,
+  AvatarReactionEvent,
   BrainEvent,
   DropFilesResult,
   ModelFraming,
   PastExchange,
+  PickedMotionClip,
   Presence,
   VoiceEvent,
 } from "../shared/ipc.ts";
@@ -22,6 +24,7 @@ const bridge: AichanBridge = {
   importModel: () => ipcRenderer.send("model:import"),
   saveModelFraming: (modelHash: string, framing: ModelFraming) =>
     ipcRenderer.send("stage:save-framing", modelHash, framing),
+  pickMotionClip: () => ipcRenderer.invoke("stage:pick-motion") as Promise<PickedMotionClip>,
   setClickThrough: (on: boolean) => ipcRenderer.send("window:click-through", on),
   setHandsOff: (off: boolean) => ipcRenderer.send("hands:off", off),
   handleDroppedFiles: (paths: string[]) =>
@@ -64,6 +67,9 @@ const bridge: AichanBridge = {
   },
   onDropped: (listener) => {
     ipcRenderer.on("chat:dropped", (_event, typedTaken: number) => listener(typedTaken));
+  },
+  onAvatarReaction: (listener) => {
+    ipcRenderer.on("stage:reaction", (_event, payload: AvatarReactionEvent) => listener(payload));
   },
   onListenRequest: (listener) => {
     ipcRenderer.on("ui:listen", (_event, on: boolean) => listener(on));

@@ -20,12 +20,19 @@ import type { LocalEngine } from "../core/engine.ts";
 import { benchmarkFirstLaunchHardware } from "../core/hardwareTuner.ts";
 import type { Initiative } from "../core/initiative.ts";
 import { LANGUAGE_CODES, LANGUAGES, type LanguageCode } from "../core/languages.ts";
+import { buildMemoryManagerSnapshot, type MemoryManagerSnapshot } from "../core/learned.ts";
 import { BRAIN_MODELS, findCatalogEntry, MOE_WORKSTATION_MODELS } from "../core/models.ts";
-import type { MemoryStore } from "../core/memory.ts";
+import { MEMORY_KINDS, type MemoryKind, type MemoryStore } from "../core/memory.ts";
 import type { McpHub } from "../core/mcpClient.ts";
 import type { MissionBoard } from "../core/missionPlan.ts";
 import type { NoticeWatch } from "../core/notices.ts";
-import { dataDir, ordersFile, resolveBundledRoot, stationDir } from "../core/paths.ts";
+import { dataDir, memoryFile, ordersFile, resolveBundledRoot, stationDir } from "../core/paths.ts";
+import {
+  classifyInferenceEndpoint,
+  describeInferenceLocality,
+  probeOpenAiModels,
+  type OpenAiProbeResult,
+} from "../core/openaiBackend.ts";
 import { importPersonaCardFile, sanitizePersonaText } from "../core/personaCard.ts";
 import {
   validateLoopbackVisionUrl,
@@ -116,6 +123,7 @@ export interface SettingsIpcDeps {
   loadCharacterBundle?(bundlePath: string): Promise<{ name: string }>;
   onCharacterChanged?(): void;
   onCharacterReset?(): Promise<void>;
+  onInferenceChanged?(): Promise<void>;
   detectGameOnCard?(): Promise<string | null>;
   sendToWindow(channel: string, payload?: unknown): void;
   rebuildTrayMenu(): void;
@@ -363,6 +371,21 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
           reason: st?.reason ?? "Local vision sidecar status unavailable.",
         };
       })(),
+      inference: (() => {
+        const inf = config.value.inference;
+        const loc = describeInferenceLocality(inf);
+        return {
+          provider: inf.provider,
+          preset: inf.preset,
+          baseUrl: inf.baseUrl,
+          model: inf.model,
+          hasApiKey: inf.apiKey.trim().length > 0,
+          scope: loc.scope,
+          host: loc.host,
+          leavesMachine: loc.leavesMachine,
+          label: loc.label,
+        };
+      })(),
       canAskPassword,
       onboardingComplete: config.value.onboardingComplete,
       advancedSettings: config.value.advancedSettings,
@@ -469,6 +492,23 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       if (!check.ok) throw new Error(check.reason);
     }
 
+    const nextInference = patch.inference
+      ? {
+          ...config.value.inference,
+          ...(patch.inference.provider !== undefined ? { provider: patch.inference.provider } : {}),
+          ...(patch.inference.preset !== undefined ? { preset: patch.inference.preset } : {}),
+          ...(patch.inference.baseUrl !== undefined
+            ? { baseUrl: patch.inference.baseUrl.trim() }
+            : {}),
+          ...(patch.inference.model !== undefined ? { model: patch.inference.model.trim() } : {}),
+          ...(patch.inference.apiKey !== undefined ? { apiKey: patch.inference.apiKey.trim() } : {}),
+        }
+      : undefined;
+    if (nextInference && nextInference.baseUrl !== "") {
+      const checked = classifyInferenceEndpoint(nextInference.baseUrl);
+      if (!checked.ok) throw new Error(checked.reason);
+    }
+
     const leanWas = config.value.leanMemory;
     // Plain values first, in one write.
     const voice = { ...config.value.voice };
@@ -547,6 +587,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
           }
         : {}),
       ...(nextCharacter !== undefined ? { character: nextCharacter } : {}),
+      ...(nextInference !== undefined ? { inference: nextInference } : {}),
       ...(patch.pingPhone !== undefined
         ? { devices: { ...config.value.devices, pingPhone: patch.pingPhone } }
         : {}),
@@ -680,6 +721,9 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     if (patch.character !== undefined) {
       deps.onCharacterChanged?.();
     }
+    if (patch.inference !== undefined) {
+      await deps.onInferenceChanged?.();
+    }
     if (
       patch.nativeVision !== undefined ||
       patch.llamaServerPath !== undefined ||
@@ -763,6 +807,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     const extraSecrets: string[] = [
       config.value.search.braveApiKey,
       config.value.search.searxngUrl,
+      config.value.inference.apiKey,
       stationAccount()?.username,
       ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
       ...config.value.mcp.servers.flatMap((s) => [
@@ -1227,6 +1272,128 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
             error: error instanceof Error ? error.message : String(error),
           };
         }
+      },
+    );
+    const memorySnapshotNow = (): MemoryManagerSnapshot =>
+      buildMemoryManagerSnapshot(deps.memoryStore()?.all() ?? [], memoryFile());
+    const validKind = (value: unknown): value is MemoryKind =>
+      typeof value === "string" && (MEMORY_KINDS as readonly string[]).includes(value);
+
+    ipcMain.handle("settings:memory-list", (event): MemoryManagerSnapshot => {
+      if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+      return memorySnapshotNow();
+    });
+    ipcMain.handle(
+      "settings:memory-add",
+      async (
+        event,
+        raw: unknown,
+      ): Promise<
+        { ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }
+      > => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const store = deps.memoryStore();
+        if (!store) return { ok: false, error: "Memory store is not initialized." };
+        const rec = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+        const kind = validKind(rec["kind"]) ? rec["kind"] : "fact";
+        const text = typeof rec["text"] === "string" ? rec["text"].trim() : "";
+        const pinned = rec["pinned"] === true;
+        if (!text) return { ok: false, error: "Type a note before adding it." };
+        try {
+          await store.save({
+            kind,
+            text,
+            pinned,
+            source: "user-edited",
+            reason: "Added directly by you in Settings → Memory.",
+          });
+          deps.onCharacterChanged?.();
+          return { ok: true, snapshot: memorySnapshotNow(), view: settingsView() };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      },
+    );
+    ipcMain.handle(
+      "settings:memory-update",
+      async (
+        event,
+        raw: unknown,
+      ): Promise<
+        { ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }
+      > => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const store = deps.memoryStore();
+        if (!store) return { ok: false, error: "Memory store is not initialized." };
+        const rec = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+        const id = typeof rec["id"] === "string" ? rec["id"].trim() : "";
+        const text = typeof rec["text"] === "string" ? rec["text"].trim() : "";
+        const kind = validKind(rec["kind"]) ? rec["kind"] : undefined;
+        const points = Array.isArray(rec["points"])
+          ? rec["points"].filter((item): item is string => typeof item === "string")
+          : undefined;
+        if (!id || !text) return { ok: false, error: "Memory ID and corrected text are required." };
+        try {
+          const updated = await store.update(id, text, { kind, points });
+          if (!updated) return { ok: false, error: `No memory found with ID "${id}".` };
+          deps.onCharacterChanged?.();
+          return { ok: true, snapshot: memorySnapshotNow(), view: settingsView() };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      },
+    );
+    ipcMain.handle(
+      "settings:memory-pin",
+      async (
+        event,
+        raw: unknown,
+      ): Promise<
+        { ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }
+      > => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const store = deps.memoryStore();
+        if (!store) return { ok: false, error: "Memory store is not initialized." };
+        const rec = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+        const id = typeof rec["id"] === "string" ? rec["id"].trim() : "";
+        const pinned = rec["pinned"] === true;
+        if (!id) return { ok: false, error: "Memory ID is required." };
+        const updated = await store.pin(id, pinned);
+        if (!updated) return { ok: false, error: `No memory found with ID "${id}".` };
+        deps.onCharacterChanged?.();
+        return { ok: true, snapshot: memorySnapshotNow(), view: settingsView() };
+      },
+    );
+    ipcMain.handle(
+      "settings:memory-forget",
+      async (
+        event,
+        id: unknown,
+      ): Promise<
+        { ok: true; snapshot: MemoryManagerSnapshot; view: SettingsView } | { ok: false; error: string }
+      > => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const store = deps.memoryStore();
+        if (!store) return { ok: false, error: "Memory store is not initialized." };
+        if (typeof id !== "string" || !id.trim()) return { ok: false, error: "Memory ID is required." };
+        const removed = await store.forget(id.trim());
+        if (!removed) return { ok: false, error: `No memory found with ID "${id}".` };
+        deps.onCharacterChanged?.();
+        return { ok: true, snapshot: memorySnapshotNow(), view: settingsView() };
+      },
+    );
+    ipcMain.handle(
+      "settings:test-inference",
+      async (event, raw: unknown): Promise<OpenAiProbeResult> => {
+        if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
+        const rec = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+        const baseUrl =
+          typeof rec["baseUrl"] === "string"
+            ? rec["baseUrl"].trim()
+            : config.value.inference.baseUrl;
+        const typedKey = typeof rec["apiKey"] === "string" ? rec["apiKey"].trim() : "";
+        const apiKey = typedKey || config.value.inference.apiKey;
+        return probeOpenAiModels({ baseUrl, apiKey });
       },
     );
     ipcMain.handle("settings:export-profile", async (event): Promise<ProfileBackupActionResult> => {

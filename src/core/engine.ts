@@ -25,6 +25,13 @@ import {
   downloadModelResumable,
   probeDiskSpace,
 } from "./modelBundle.ts";
+import {
+  classifyInferenceEndpoint,
+  describeInferenceLocality,
+  openAiSideQuestion,
+  OpenAiCompatibleSession,
+  type InferenceBackendConfig,
+} from "./openaiBackend.ts";
 import type { TurnHookPipeline } from "./turnHooks.ts";
 import {
   BRAIN_MODELS,
@@ -114,6 +121,10 @@ export interface EngineOptions {
   yieldAfterMs?: number;
   /** Optional feature-flagged turn hook pipeline (`turnHooks.ts`). */
   turnHooks?: TurnHookPipeline;
+  /** Optional OpenAI-compatible server backend (Ollama, LM Studio, llama-server, LAN PC). Default is local GGUF. */
+  inference?: InferenceBackendConfig;
+  /** Optional fetch implementation override for testing OpenAI-compatible backends. */
+  fetchImpl?: typeof fetch;
   onStatus(status: EngineStatus): void;
   onDownloadUpdate?(state: ModelDownloadState): void;
 }
@@ -360,6 +371,9 @@ export class LocalEngine {
   private llama: Llama | null = null;
   private loaded: Loaded | null = null;
   private loading: Promise<Loaded> | null = null;
+  /** Active OpenAI-compatible session when `options.inference.provider === "openai-compatible"`. */
+  private remoteSession: OpenAiCompatibleSession | null = null;
+  private remoteStale = false;
   /** The conversation so far, kept here while the model is not in memory. */
   private history: ChatHistoryItem[] = [];
   private idleTimer: NodeJS.Timeout | null = null;
@@ -697,6 +711,44 @@ export class LocalEngine {
   }
 
   /** Switches to another model. It is loaded (and downloaded if needed) on the next message. */
+  private activeRemoteConfig(): InferenceBackendConfig | null {
+    const inf = this.options.inference;
+    if (!inf || inf.provider !== "openai-compatible") return null;
+    if (!inf.model.trim()) return null;
+    const checked = classifyInferenceEndpoint(inf.baseUrl);
+    if (!checked.ok) return null;
+    return inf;
+  }
+
+  /** Returns locality metadata (`local-gguf`, `local-loopback`, `private-lan`, `remote-internet`). */
+  inferenceLocality(): ReturnType<typeof describeInferenceLocality> {
+    return describeInferenceLocality(
+      this.options.inference ?? {
+        provider: "local",
+        preset: "ollama",
+        baseUrl: "",
+        model: "",
+        apiKey: "",
+      },
+    );
+  }
+
+  /** Switches between built-in local GGUF and an optional OpenAI-compatible server without losing history. */
+  async setInferenceBackend(inference: InferenceBackendConfig): Promise<void> {
+    if (this.remoteSession && !this.remoteStale) {
+      this.history = this.remoteSession.getChatHistory().filter((item) => item.type !== "system");
+    }
+    this.remoteSession?.dispose();
+    this.remoteSession = null;
+    this.remoteStale = false;
+    this.options = { ...this.options, inference };
+    if (inference.provider === "openai-compatible") {
+      await this.unload();
+      const loc = this.inferenceLocality();
+      this.options.onStatus({ stage: "ready", label: loc.label });
+    }
+  }
+
   async setChoice(choice: BrainChoice): Promise<void> {
     if (choice === this.options.choice) return;
     // Set first: a message arriving while the old model is being let go must load the new one.
@@ -709,6 +761,7 @@ export class LocalEngine {
    * download of several gigabytes. Things she brings up by herself must never do that.
    */
   async isDownloaded(): Promise<boolean> {
+    if (this.activeRemoteConfig()) return true;
     if (this.loaded) return true;
     try {
       // Without asking the graphics card: "auto" then checks for the small model, which
@@ -732,6 +785,15 @@ export class LocalEngine {
     onDisk: boolean;
     loaded: boolean;
   }> {
+    const remote = this.activeRemoteConfig();
+    if (remote) {
+      return {
+        label: this.inferenceLocality().label,
+        fileName: null,
+        onDisk: true,
+        loaded: true,
+      };
+    }
     if (this.loaded) {
       return {
         label: this.loaded.label,
@@ -779,6 +841,9 @@ export class LocalEngine {
 
   /** The conversation without its system prompt. */
   getHistory(): ChatHistoryItem[] {
+    if (this.remoteSession && !this.remoteStale) {
+      return this.remoteSession.getChatHistory().filter((item) => item.type !== "system");
+    }
     const items =
       this.loaded && !this.loaded.stale ? this.loaded.session.getChatHistory() : this.history;
     return items.filter((item) => item.type !== "system");
@@ -786,6 +851,10 @@ export class LocalEngine {
 
   setHistory(items: ChatHistoryItem[]): void {
     this.history = items.filter((item) => item.type !== "system");
+    if (this.remoteSession && !this.remoteStale) {
+      const system = this.remoteSession.getChatHistory().filter((item) => item.type === "system");
+      this.remoteSession.setChatHistory([...system, ...this.history]);
+    }
     if (this.loaded && !this.loaded.stale) {
       const system = this.loaded.session.getChatHistory().filter((item) => item.type === "system");
       this.loaded.session.setChatHistory([...system, ...this.history]);
@@ -793,11 +862,33 @@ export class LocalEngine {
   }
 
   /**
-   * Returns a chat session, loading (and if necessary downloading) the model first.
+   * Returns a chat session, loading (and if necessary downloading) the model first,
+   * or routing through the configured OpenAI-compatible server when selected.
    * @param systemPrompt Used when a session has to be created; an existing one keeps its own.
    */
-  async session(systemPrompt: string): Promise<LlamaChatSession> {
+  async session(systemPrompt: string): Promise<LlamaChatSession | OpenAiCompatibleSession> {
     if (this.disposed) throw new Error("The engine has been shut down.");
+    const remote = this.activeRemoteConfig();
+    if (remote) {
+      this.cancelIdleUnload();
+      this.resting = false;
+      if (!this.remoteSession || this.remoteStale) {
+        this.remoteSession = new OpenAiCompatibleSession(
+          remote,
+          systemPrompt,
+          this.options.fetchImpl,
+        );
+        this.remoteStale = false;
+        if (this.history.length > 0) {
+          this.remoteSession.setChatHistory([
+            { type: "system", text: systemPrompt },
+            ...this.history,
+          ]);
+        }
+        this.options.onStatus({ stage: "ready", label: this.inferenceLocality().label });
+      }
+      return this.remoteSession;
+    }
     this.cancelIdleUnload();
     this.resting = false;
     // Being put away right now: wait, then load afresh, instead of taking a session
@@ -834,6 +925,11 @@ export class LocalEngine {
    */
   renew(): void {
     this.history = [];
+    if (this.remoteSession) {
+      this.remoteSession.dispose();
+      this.remoteSession = null;
+      this.remoteStale = true;
+    }
     if (!this.loaded || this.loaded.stale) return;
     this.loaded.session.dispose();
     this.loaded.stale = true;
@@ -845,6 +941,10 @@ export class LocalEngine {
    * takes a second or two; nothing is reloaded.
    */
   refresh(): void {
+    if (this.remoteSession && !this.remoteStale) {
+      this.history = this.remoteSession.getChatHistory().filter((item) => item.type !== "system");
+      this.remoteStale = true;
+    }
     if (!this.loaded || this.loaded.stale) return;
     this.history = this.loaded.session.getChatHistory().filter((item) => item.type !== "system");
     this.loaded.session.dispose();
@@ -857,6 +957,7 @@ export class LocalEngine {
    * not in memory.
    */
   meter(): { input: number; output: number; held: number; size: number; kept: number } | null {
+    if (this.remoteSession) return this.remoteSession.meter();
     if (!this.loaded) return null;
     const { tokenMeter, contextTokens, contextSize, checkpointsMemoryUsage } = this.loaded.sequence;
     return {
@@ -984,9 +1085,9 @@ export class LocalEngine {
     return loaded.bias;
   }
 
-  /** True while the model is in memory, so using it costs no loading time. */
+  /** True while the model is in memory (or an OpenAI-compatible server is configured). */
   isLoaded(): boolean {
-    return this.loaded !== null;
+    return this.loaded !== null || this.remoteSession !== null;
   }
 
   /**
@@ -1001,6 +1102,16 @@ export class LocalEngine {
     text: string,
     signal?: AbortSignal,
   ): Promise<string | null> {
+    const remote = this.activeRemoteConfig();
+    if (remote) {
+      if (this.disposed || this.answering) return null;
+      this.answering = true;
+      try {
+        return await openAiSideQuestion(remote, instructions, text, signal, this.options.fetchImpl);
+      } finally {
+        this.answering = false;
+      }
+    }
     const { loaded } = this;
     // Not while the model is being put away: work begun now would lose it half-way.
     if (!loaded || this.disposed || this.answering || this.unloading) return null;
@@ -1219,6 +1330,12 @@ export class LocalEngine {
     const works = [...this.sideWorks];
     for (const work of works) work.stop.abort();
     await Promise.all(works.map((work) => work.done));
+    if (this.remoteSession && !this.remoteStale) {
+      this.history = this.remoteSession.getChatHistory().filter((item) => item.type !== "system");
+    }
+    this.remoteSession?.dispose();
+    this.remoteSession = null;
+    this.remoteStale = false;
     const loaded = this.loaded;
     if (!loaded) return;
     if (!loaded.stale) {

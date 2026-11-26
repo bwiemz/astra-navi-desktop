@@ -1,4 +1,4 @@
-import type { MemoryKind } from "../core/memory.ts";
+import type { MemoryKind, MemorySource } from "../core/memory.ts";
 import type { DurableMission, MissionStep, MissionThreadEntry } from "../core/missionPlan.ts";
 import type { ReplayReport } from "../core/replay.ts";
 import type { RuleAuditFinding, RuleAuditSeverity } from "../core/ruleAudit.ts";
@@ -61,6 +61,8 @@ export interface MemoryInspectorItem {
   updatedAt: string;
   hits: number;
   pinned: boolean;
+  source?: MemorySource;
+  whyRemembered?: string;
   namespace?: string;
 }
 

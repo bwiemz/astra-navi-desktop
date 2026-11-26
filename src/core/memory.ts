@@ -24,6 +24,9 @@ export type MemoryKind = (typeof MEMORY_KINDS)[number];
 /** The kinds she may save directly with her remember tool. */
 export const NOTE_KINDS = ["profile", "preference", "project", "fact", "episode"] as const;
 
+export const MEMORY_SOURCES = ["explicit", "learned", "user-edited", "imported"] as const;
+export type MemorySource = (typeof MEMORY_SOURCES)[number];
+
 const MemorySchema = z.object({
   id: z.string(),
   kind: z.enum(MEMORY_KINDS),
@@ -36,8 +39,14 @@ const MemorySchema = z.object({
   updatedAt: z.string(),
   /** How often this came up: found in a search, discussed again, or done again. */
   hits: z.number().default(0),
-  /** Pinned notes stay prioritized in Mission Control's inspector and recall views. */
+  /** Pinned notes stay prioritized in prompts, Settings Memory Manager, and recall views. */
   pinned: z.boolean().optional(),
+  /** Provenance: how this memory entered storage. */
+  source: z.enum(MEMORY_SOURCES).optional(),
+  /** Plain-English explanation for "why do you remember this?". */
+  reason: z.string().max(240).optional(),
+  /** Optional short sanitized excerpt from the conversation where it originated. */
+  sourceExcerpt: z.string().max(240).optional(),
   /** Optional household vault namespace isolating one family member's notes from another's. */
   namespace: z.string().optional(),
 });
@@ -103,6 +112,10 @@ export interface SaveInput {
   text: string;
   tags?: string[];
   namespace?: string;
+  pinned?: boolean;
+  source?: MemorySource;
+  reason?: string;
+  sourceExcerpt?: string;
 }
 
 /**
@@ -169,11 +182,19 @@ export class MemoryStore {
     );
     if (existing) {
       existing.tags = [...new Set([...existing.tags, ...tags])];
+      if (input.pinned !== undefined) existing.pinned = input.pinned;
+      if (input.source && !existing.source) existing.source = input.source;
+      if (input.reason && !existing.reason) existing.reason = oneLine(input.reason).slice(0, 240);
+      if (input.sourceExcerpt && !existing.sourceExcerpt) {
+        existing.sourceExcerpt = oneLine(input.sourceExcerpt).slice(0, 240);
+      }
       existing.updatedAt = now;
       await this.persist();
       return { memory: existing, merged: true };
     }
 
+    const cleanReason = input.reason ? oneLine(input.reason).slice(0, 240) : "";
+    const cleanExcerpt = input.sourceExcerpt ? oneLine(input.sourceExcerpt).slice(0, 240) : "";
     const memory: Memory = {
       id: randomBytes(4).toString("hex"),
       kind: input.kind,
@@ -183,6 +204,10 @@ export class MemoryStore {
       createdAt: now,
       updatedAt: now,
       hits: 0,
+      ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+      ...(input.source ? { source: input.source } : {}),
+      ...(cleanReason ? { reason: cleanReason } : {}),
+      ...(cleanExcerpt ? { sourceExcerpt: cleanExcerpt } : {}),
       ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
     };
     this.memories.push(memory);
@@ -201,7 +226,13 @@ export class MemoryStore {
     kind: "topic" | "skill",
     title: string,
     points: readonly string[],
-    options: { existingId?: string; replace?: boolean } = {},
+    options: {
+      existingId?: string;
+      replace?: boolean;
+      source?: MemorySource;
+      reason?: string;
+      sourceExcerpt?: string;
+    } = {},
   ): Promise<{ memory: Memory; created: boolean }> {
     const cleanTitle = oneLine(title).slice(0, 120);
     const cleanPoints = points
@@ -209,6 +240,8 @@ export class MemoryStore {
       .filter(Boolean);
     if (cleanTitle.length === 0) throw new Error("A topic or task needs a name.");
     const now = new Date().toISOString();
+    const cleanReason = options.reason ? oneLine(options.reason).slice(0, 240) : "";
+    const cleanExcerpt = options.sourceExcerpt ? oneLine(options.sourceExcerpt).slice(0, 240) : "";
 
     const existing =
       (options.existingId
@@ -224,6 +257,9 @@ export class MemoryStore {
         // The newest points are kept when a topic outgrows its space.
         existing.points = [...existing.points, ...fresh].slice(-MAX_POINTS);
       }
+      if (options.source && !existing.source) existing.source = options.source;
+      if (cleanReason && !existing.reason) existing.reason = cleanReason;
+      if (cleanExcerpt) existing.sourceExcerpt = cleanExcerpt;
       existing.hits += 1;
       existing.updatedAt = now;
       await this.persist();
@@ -239,18 +275,39 @@ export class MemoryStore {
       createdAt: now,
       updatedAt: now,
       hits: 1,
+      ...(options.source ? { source: options.source } : {}),
+      ...(cleanReason ? { reason: cleanReason } : {}),
+      ...(cleanExcerpt ? { sourceExcerpt: cleanExcerpt } : {}),
     };
     this.memories.push(memory);
     await this.persist();
     return { memory, created: true };
   }
 
-  async update(id: string, text: string): Promise<Memory | null> {
+  async update(
+    id: string,
+    text: string,
+    options: { kind?: MemoryKind; points?: readonly string[]; reason?: string } = {},
+  ): Promise<Memory | null> {
     const memory = this.memories.find((m) => m.id === id);
     if (!memory) return null;
     const trimmed = oneLine(text);
     if (trimmed.length === 0) throw new Error("A memory needs some text.");
     memory.text = trimmed;
+    if (options.kind) memory.kind = options.kind;
+    if (options.points) {
+      memory.points = options.points
+        .map((point) => oneLine(point).slice(0, MAX_POINT_CHARS))
+        .filter(Boolean)
+        .slice(0, MAX_POINTS);
+    }
+    memory.source = "user-edited";
+    if (options.reason !== undefined) {
+      const clean = oneLine(options.reason).slice(0, 240);
+      memory.reason = clean || undefined;
+    } else if (!memory.reason) {
+      memory.reason = "Edited directly by you in Memory Manager.";
+    }
     memory.updatedAt = new Date().toISOString();
     await this.persist();
     return memory;
@@ -349,32 +406,44 @@ export class MemoryStore {
     const byUse = (a: Memory, b: Memory): number => b.hits - a.hits || byRecent(a, b);
     const of = (kind: MemoryKind): Memory[] => list.filter((m) => m.kind === kind);
 
-    const always = list.filter((m) => ALWAYS_LOADED.includes(m.kind)).sort(byRecent);
+    const pinned = list.filter((m) => m.pinned === true).sort(byRecent);
+    const pinnedIds = new Set(pinned.map((m) => m.id));
+    const always = list
+      .filter((m) => !pinnedIds.has(m.id) && ALWAYS_LOADED.includes(m.kind))
+      .sort(byRecent);
     const recent = list
-      .filter((m) => !ALWAYS_LOADED.includes(m.kind) && m.kind !== "topic" && m.kind !== "skill")
+      .filter(
+        (m) =>
+          !pinnedIds.has(m.id) &&
+          !ALWAYS_LOADED.includes(m.kind) &&
+          m.kind !== "topic" &&
+          m.kind !== "skill",
+      )
       .sort(byRecent)
       .slice(0, 12);
 
     const lines: string[] = [];
     let used = 0;
-    for (const memory of [...always, ...recent]) {
-      const line = `- [${memory.id}] (${memory.kind}) ${memory.text}`;
+    for (const memory of [...pinned, ...always, ...recent]) {
+      const pointsSuffix =
+        memory.pinned && memory.points.length > 0 ? ` — ${memory.points.join("; ")}` : "";
+      const line = `- [${memory.id}] (${memory.kind}${memory.pinned ? ", pinned" : ""}) ${memory.text}${pointsSuffix}`;
       if (used + line.length > maxChars) break;
       lines.push(line);
       used += line.length + 1;
     }
     // Topics and skills are listed by name only; their details are brought in when they come up.
-    const topics = of("topic").sort(byUse).slice(0, 10);
+    const topics = of("topic").filter((m) => !pinnedIds.has(m.id)).sort(byUse).slice(0, 10);
     if (topics.length > 0) {
       lines.push(`What you two talk about most: ${topics.map((m) => m.text).join("; ")}`);
     }
-    const skills = of("skill").sort(byUse).slice(0, 10);
+    const skills = of("skill").filter((m) => !pinnedIds.has(m.id)).sort(byUse).slice(0, 10);
     if (skills.length > 0) {
       lines.push(
         `What Captain most often asks you to do: ${skills.map((m) => `${m.text} (${m.hits}x)`).join("; ")}`,
       );
     }
-    const shown = always.length + recent.length + topics.length + skills.length;
+    const shown = pinned.length + always.length + recent.length + topics.length + skills.length;
     const hidden = list.length - Math.min(shown, list.length);
     if (hidden > 0) lines.push(`(${hidden} more memories are stored; find them with recall.)`);
     return lines.length > 0

@@ -377,6 +377,9 @@ export class Learner {
           kind: fact.kind,
           text,
           tags: ["learned"],
+          source: "learned",
+          reason: "Picked up automatically after a quiet pause in conversation.",
+          sourceExcerpt: said.slice(0, 200),
         });
         if (!merged) learned.facts.push(memory);
       }
@@ -394,6 +397,9 @@ export class Learner {
         if (topic.title.trim().length < 3 || (points.length === 0 && !existingId)) continue;
         const { memory } = await this.deps.memory.learn("topic", topic.title, points, {
           existingId,
+          source: "learned",
+          reason: "Summarized automatically as a recurring topic after a quiet pause.",
+          sourceExcerpt: said.slice(0, 200),
         });
         learned.topics.push(memory);
       }
@@ -404,6 +410,9 @@ export class Learner {
         const { memory } = await this.deps.memory.learn("skill", task.title, steps, {
           existingId: await this.sameAs(task.title, "skill"),
           replace: true,
+          source: "learned",
+          reason: "Recorded automatically from tool steps that succeeded in conversation.",
+          sourceExcerpt: said.slice(0, 200),
         });
         learned.skills.push(memory);
       }

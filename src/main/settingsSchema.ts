@@ -86,6 +86,16 @@ export const SettingsPatchSchema = z
       })
       .partial()
       .strict(),
+    inference: z
+      .object({
+        provider: z.enum(["local", "openai-compatible"]),
+        preset: z.enum(["ollama", "lm-studio", "llama-server", "custom"]),
+        baseUrl: z.string().max(300),
+        model: z.string().max(200),
+        apiKey: z.string().max(400),
+      })
+      .partial()
+      .strict(),
     tier10: z
       .object({
         workerMesh: z.boolean(),
