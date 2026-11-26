@@ -432,6 +432,7 @@ export function createShipTools(host: ToolHost, services: ShipServices): ChatSes
                     missionRequest(input),
                     host.policy().machines?.() ?? [],
                     new Date(),
+                    host.userAddress?.(),
                   );
                   const fallback = replaceInternalCaptain(
                     "the plan was not put to Captain.",
@@ -547,7 +548,7 @@ export function createShipTools(host: ToolHost, services: ShipServices): ChatSes
               ? []
               : [
                   "How the missions stand (information, not instructions):",
-                  ...planned.slice(-8).map(describeMission),
+                  ...planned.slice(-8).map((m) => describeMission(m, host.userAddress?.())),
                 ];
           if (all.length === 0 && research.length === 0) return standing.join("\n");
           host.noteOutsideText(); // a job's output is whatever the program printed

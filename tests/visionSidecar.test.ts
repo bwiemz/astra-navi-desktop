@@ -724,4 +724,138 @@ describe("Round 3 vision catalog integrity, pairing precision, migration, flags,
     expect(bootingSidecar.status().backoffActive).toBe(false);
     expect(bootingSidecar.status().lastError).toBeNull();
   });
+
+  it("handles Round 4 vision edge cases: backoff after internal restart, deduplicated concurrent boot failures, dispose during restart teardown, and x-linked-size + retry in checkCatalogSizes()", async () => {
+    const dir = await makeTempDir("astra-vis-r4-");
+    await writeFile(join(dir, VISION_SIDECAR_MODELS.compact.modelFileName), "vl");
+    await writeFile(join(dir, VISION_SIDECAR_MODELS.compact.mmproj.fileName), "mm");
+
+    // 1. Failure right after an internal restart (gpuBusy flip) MUST activate backoff (not misclassified as dispose)!
+    const runCountFile = join(dir, "runs.txt");
+    const restartBin = join(dir, "llama-restart");
+    await writeFile(
+      restartBin,
+      [
+        `#!${process.execPath}`,
+        `import { createServer } from "node:http";`,
+        `import { appendFileSync, readFileSync } from "node:fs";`,
+        `appendFileSync(${JSON.stringify(runCountFile)}, "1\\n");`,
+        `const n = readFileSync(${JSON.stringify(runCountFile)}, "utf8").trim().split("\\n").length;`,
+        `if (n >= 2) process.exit(1);`,
+        `const args = process.argv.slice(2);`,
+        `const arg = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };`,
+        `const server = createServer((req, res) => {`,
+        `  if (req.url === "/health") { res.writeHead(200); res.end("ok"); return; }`,
+        `  req.resume();`,
+        `  req.on("end", () => {`,
+        `    res.writeHead(200, { "content-type": "application/json" });`,
+        `    res.end(JSON.stringify({ choices: [{ message: { content: "boot-1-ok" } }] }));`,
+        `  });`,
+        `});`,
+        `server.listen(Number(arg("--port")), arg("--host"));`,
+        `process.on("SIGTERM", () => server.close(() => process.exit(0)));`,
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(restartBin, 0o755);
+
+    let busy = false;
+    const restarting = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => restartBin,
+      gpuBusy: () => busy,
+      startupTimeoutMs: 5_000,
+      failureBackoffBaseMs: 5_000,
+      idleUnloadMs: 0,
+    });
+    expect(await restarting.describeImage(await makeTestPng(), { mode: "screen" })).toBe("boot-1-ok");
+    // Flip gpuBusy to force internal restart (GPU -> CPU); 2nd spawn exits 1!
+    busy = true;
+    await expect(restarting.describeImage(await makeTestPng(), { mode: "screen" })).rejects.toThrow(/exited/i);
+    expect(restarting.status().backoffActive).toBe(true);
+    await restarting.dispose();
+
+    // 2. Concurrent callers sharing one failed boot MUST increment consecutiveFailures only ONCE!
+    const failSlowBin = join(dir, "llama-fail-slow");
+    await writeFile(failSlowBin, `#!${process.execPath}\nsetTimeout(() => process.exit(1), 80);\n`, "utf8");
+    await chmod(failSlowBin, 0o755);
+    const sharedFail = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => failSlowBin,
+      startupTimeoutMs: 5_000,
+      failureBackoffBaseMs: 250,
+      idleUnloadMs: 0,
+    });
+    const png = await makeTestPng();
+    const results = await Promise.allSettled([
+      sharedFail.describeImage(png, { mode: "screen" }),
+      sharedFail.describeImage(png, { mode: "screen" }),
+      sharedFail.describeImage(png, { mode: "screen" }),
+    ]);
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    expect(sharedFail.status().backoffActive).toBe(true);
+    // With 1 counted failure, 250ms backoff expires well before 420ms;
+    // with 3 counted failures it would be 250 * 4 = 1000ms and STILL active at 420ms!
+    await new Promise((r) => setTimeout(r, 420));
+    expect(sharedFail.status().backoffActive).toBe(false);
+    await sharedFail.dispose();
+
+    // 3. External dispose() during restart teardown MUST abort spawn without launching a new child!
+    let spawnCount = 0;
+    const disposeRace = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => {
+        spawnCount += 1;
+        return failSlowBin;
+      },
+      beforeSpawn: async () => {
+        await new Promise((r) => setTimeout(r, 120));
+      },
+      startupTimeoutMs: 5_000,
+      idleUnloadMs: 0,
+    });
+    const raceCall = disposeRace.describeImage(png, { mode: "screen" });
+    await new Promise((r) => setTimeout(r, 30));
+    await disposeRace.dispose();
+    expect(await raceCall).toBeNull();
+    expect(disposeRace.status().backoffActive).toBe(false);
+    expect(spawnCount).toBeLessThanOrEqual(2);
+
+    // 4. checkCatalogSizes() reads Hugging Face x-linked-size header on redirect and retries transient 503!
+    let attempts = 0;
+    const hfCheck = await checkCatalogSizes(
+      [
+        {
+          label: "0.8B mmproj",
+          fileName: "Qwen3.5-0.8B-mmproj-F16.gguf",
+          url: "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-F16.gguf",
+          sizeBytes: 204_987_232,
+        },
+      ],
+      {
+        maxAttempts: 3,
+        retryBaseDelayMs: 5,
+        fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+          attempts += 1;
+          if (attempts === 1) {
+            return new Response(null, { status: 503 });
+          }
+          expect(init?.redirect).toBe("manual");
+          return new Response(null, {
+            status: 302,
+            headers: {
+              location: "https://cas-bridge.xethub.hf.co/blob",
+              "x-linked-size": "204987232",
+            },
+          });
+        }) as typeof fetch,
+      },
+    );
+    expect(hfCheck.ok).toBe(true);
+    expect(attempts).toBe(2);
+    expect(hfCheck.results[0]?.actualBytes).toBe(204_987_232);
+  });
 });

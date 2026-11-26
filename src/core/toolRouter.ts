@@ -312,12 +312,18 @@ function namesAMachine(message: string, machines: readonly string[]): boolean {
 }
 
 const MCP_STOP_WORDS = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "by", "call", "can", "do", "does",
-  "external", "for", "from", "get", "has", "have", "how", "i", "in", "info",
-  "information", "instructions", "into", "is", "it", "its", "mcp", "me", "metadata",
-  "my", "not", "of", "on", "only", "or", "output", "please", "run", "server", "set",
-  "that", "the", "their", "this", "to", "tool", "tools", "use", "what", "when",
-  "where", "which", "who", "will", "with", "you", "your",
+  "a", "about", "add", "all", "an", "and", "any", "are", "as", "at", "be", "by", "call", "can",
+  "check", "close", "content", "contents", "copy", "create", "data", "delete", "dir", "directory",
+  "do", "does", "down", "edit", "external", "fetch", "file", "files", "find", "first", "folder",
+  "folders", "for", "from", "get", "give", "has", "have", "help", "here", "how", "i", "in", "info",
+  "information", "instructions", "into", "is", "it", "item", "items", "its", "just", "know",
+  "last", "like", "line", "lines", "list", "load", "look", "make", "mcp", "me", "metadata", "more",
+  "move", "my", "name", "names", "need", "new", "next", "not", "now", "of", "old", "on", "one",
+  "only", "open", "or", "out", "output", "over", "path", "please", "print", "query", "read",
+  "remove", "rename", "run", "save", "search", "see", "send", "server", "set", "show", "some",
+  "status", "tell", "text", "that", "the", "their", "there", "this", "to", "tool", "tools", "two",
+  "type", "up", "update", "use", "value", "values", "want", "what", "when", "where", "which",
+  "who", "will", "with", "write", "you", "your",
 ]);
 
 /** Maximum MCP tools offered by lexical/description routing on a single turn. */
@@ -481,9 +487,13 @@ export class ToolRouter {
     }
     if (namesAMachine(text, options.machines ?? [])) add(TOOLS.remote, "names a machine");
     for (const tool of options.recent ?? []) add(tool, "used just now");
-    if (mcpTools.length > 0 && text.trim().length > 0) {
-      const queryTokens = [...new Set(splitIdentifierWords(text))];
-      const rawLower = text.toLowerCase();
+    if (mcpTools.length > 0 && message.trim().length > 0) {
+      // Match MCP tools against the current user message only (not `options.before`), so an
+      // unused MCP keyword from the previous turn never bleeds into an unrelated next turn
+      // and triggers `mcpSchemasOffered` prompt fatigue. Actually-used MCP tools still carry
+      // forward for one follow-up turn via `options.recent`.
+      const queryTokens = [...new Set(splitIdentifierWords(message))];
+      const rawLower = message.toLowerCase();
       const scoredMcp = mcpTools
         .map((tool) => {
           const { score, reason } = scoreMcpToolMatch(
@@ -494,7 +504,7 @@ export class ToolRouter {
           );
           return { tool, score, reason };
         })
-        .filter((entry) => entry.score >= 2)
+        .filter((entry) => entry.score >= 3)
         .sort((a, b) => b.score - a.score || a.tool.localeCompare(b.tool))
         .slice(0, MAX_ROUTED_MCP_TOOLS);
       for (const entry of scoredMcp) {

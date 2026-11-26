@@ -5,6 +5,7 @@ import { isReservedCalendarName, MAX_CALENDARS, whyNotThisCalendar } from "./age
 import { MACHINE_HOST, MACHINE_NAME, MACHINE_USER } from "./fleet.ts";
 import { LANGUAGE_CODES } from "./languages.ts";
 import { MAX_MCP_SERVERS, McpServerConfigSchema } from "./mcpClient.ts";
+import { extractSafeLegacyFirstWordAlias } from "./wakeName.ts";
 
 const CalendarSchema = z.object({
   name: z
@@ -271,6 +272,8 @@ const ConfigSchema = z.object({
       source: z.enum(["default", "custom", "bundle", "card"]).default("default"),
       /** Name of the active imported persona card or character bundle. */
       sourceName: z.string().max(80).default(""),
+      /** One-time migration marker so existing multi-word custom names preserve first-word wake alias once. */
+      wakeAliasMigrated: z.boolean().optional(),
     })
     .prefault({}),
   /** Desktop presentation mode: transparent always-on-top overlay or solid opaque docked window. */
@@ -385,8 +388,28 @@ export class ConfigStore {
       // A file written by an older version may be readable by other accounts.
       await chmod(this.file, 0o600).catch(() => undefined);
       const parsed = ConfigSchema.safeParse(JSON.parse(raw));
-      if (parsed.success) this.current = parsed.data;
-      else console.warn(`[config] ignoring invalid config file: ${parsed.error.message}`);
+      if (parsed.success) {
+        this.current = parsed.data;
+        // One-time migration: preserve first-word wake alias for existing users with multi-word
+        // custom character names (e.g. "Lyra Vance" -> adds "Lyra" to voice.otherNames once).
+        if (this.current.character.wakeAliasMigrated !== true) {
+          const legacyFirst = extractSafeLegacyFirstWordAlias(this.current.character.displayName);
+          if (legacyFirst) {
+            const existing = this.current.voice.otherNames;
+            const hasAlready = existing.some(
+              (name) => name.trim().toLowerCase() === legacyFirst.toLowerCase(),
+            );
+            const nextOtherNames =
+              !hasAlready && existing.length < 5 ? [...existing, legacyFirst] : existing;
+            await this.update({
+              voice: { ...this.current.voice, otherNames: nextOtherNames },
+              character: { ...this.current.character, wakeAliasMigrated: true },
+            });
+          }
+        }
+      } else {
+        console.warn(`[config] ignoring invalid config file: ${parsed.error.message}`);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         console.warn(`[config] could not read ${this.file}:`, error);

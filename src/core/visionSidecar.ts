@@ -300,6 +300,7 @@ export class LlamaVisionSidecar implements VisionDescriber {
   private consecutiveFailures = 0;
   private backoffUntilMs = 0;
   private lastError: string | null = null;
+  private readonly recordedErrors = new WeakSet<object>();
 
   constructor(options: LlamaVisionSidecarOptions) {
     this.opts = options;
@@ -314,6 +315,11 @@ export class LlamaVisionSidecar implements VisionDescriber {
   }
 
   private recordFailure(err: unknown): void {
+    // Deduplicate when concurrent callers share the same failed startup promise.
+    if (typeof err === "object" && err !== null) {
+      if (this.recordedErrors.has(err)) return;
+      this.recordedErrors.add(err);
+    }
     this.consecutiveFailures += 1;
     const baseMs = Math.max(50, this.opts.failureBackoffBaseMs ?? DEFAULT_FAILURE_BACKOFF_BASE_MS);
     const maxMs = Math.max(baseMs, this.opts.failureBackoffMaxMs ?? DEFAULT_FAILURE_BACKOFF_MAX_MS);
@@ -663,6 +669,22 @@ export class LlamaVisionSidecar implements VisionDescriber {
     });
   }
 
+  /** Stops the current child process during an internal restart WITHOUT bumping `disposeGeneration`. */
+  private async stopCurrentChild(): Promise<void> {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    const child = this.child;
+    this.child = null;
+    this.runningBaseUrl = null;
+    this.runningApiKey = null;
+    this.runningKey = null;
+    if (child) {
+      await this.terminateChild(child);
+    }
+  }
+
   private async ensureReady(
     signal?: AbortSignal,
   ): Promise<{ baseUrl: string; apiKey: string | null } | null> {
@@ -695,7 +717,9 @@ export class LlamaVisionSidecar implements VisionDescriber {
     if (this.starting) return this.starting;
 
     const boot = (async (): Promise<{ baseUrl: string; apiKey: string | null } | null> => {
-      if (this.child) await this.dispose();
+      // Capture disposeGeneration BEFORE stopping the previous child so an external dispose()
+      // arriving during restart teardown is never lost, and an internal restart never looks like
+      // a deliberate shutdown to `describeImage()`.
       const gen = this.disposeGeneration;
       const bootAbort = new AbortController();
       this.bootAbort = bootAbort;
@@ -705,6 +729,9 @@ export class LlamaVisionSidecar implements VisionDescriber {
         : bootAbort.signal;
 
       try {
+        if (this.child) await this.stopCurrentChild();
+        if (isDisposed() || signal?.aborted) return null;
+
         await this.opts.beforeSpawn?.().catch(() => undefined);
         if (isDisposed() || signal?.aborted) return null;
 

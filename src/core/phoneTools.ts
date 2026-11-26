@@ -126,7 +126,7 @@ export function createPhoneTools(
               break;
           }
 
-          const picked = pickPhone(phones, input.phone);
+          const picked = pickPhone(phones, input.phone, host.userAddress?.());
           if ("problem" in picked) return picked.problem;
           const { phone } = picked;
           switch (input.action) {

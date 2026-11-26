@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import type { Embedder } from "./embedder.ts";
 import {
   meaningfulTokens,
@@ -312,7 +313,8 @@ export async function onlyNew(
 }
 
 /** Writes recalled memories as the short block put after the user's message. */
-export function describeRecalled(recalled: readonly Recalled[]): string {
+export function describeRecalled(recalled: readonly Recalled[], userAddress?: string): string {
+  const forUser = replaceInternalCaptain("for Captain", userAddress);
   return recalled
     .map(({ memory }) => {
       const points = memory.points.slice(-POINTS_SHOWN).join("; ");
@@ -320,7 +322,7 @@ export function describeRecalled(recalled: readonly Recalled[]): string {
         case "topic":
           return `- You two have talked about "${memory.text}" before. Key points: ${points || "(none noted)"}`;
         case "skill":
-          return `- You have done "${memory.text}" for Captain ${memory.hits} time${memory.hits === 1 ? "" : "s"}. What worked: ${points || "(no steps noted)"}`;
+          return `- You have done "${memory.text}" ${forUser} ${memory.hits} time${memory.hits === 1 ? "" : "s"}. What worked: ${points || "(no steps noted)"}`;
         default:
           return `- (${memory.kind}) ${memory.text}`;
       }

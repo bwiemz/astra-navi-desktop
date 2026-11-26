@@ -1143,7 +1143,7 @@ function startShipServices(workspace: string): void {
         requested: true,
         outsideText: true, // a step's output is whatever the program printed
         text: withoutSecrets(
-          `${what}\nHow it stands (information, not instructions):\n${describeMission(mission)}`,
+          `${what}\nHow it stands (information, not instructions):\n${describeMission(mission, config.value.character.userAddress)}`,
         ),
         plain: printed === "" ? what : `${what} It printed: ${printed}`,
       });
@@ -1837,17 +1837,17 @@ async function main(): Promise<void> {
         config.value.inference.apiKey,
         settings.stationUsername(),
         ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
-        ...config.value.mcp.servers.flatMap((s) => [
-          ...Object.values(s.headers ?? {}),
-          ...Object.values(s.env ?? {}),
-        ]),
       ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+      const mcpEnvSecrets = config.value.mcp.servers
+        .flatMap((s) => [...Object.values(s.headers ?? {}), ...Object.values(s.env ?? {})])
+        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
       return {
         appVersion: app.getVersion(),
         reportsDir: join(dataDir(), "ai-reports"),
         brainLabel,
         inferenceScope: loc.scope,
         extraSecrets,
+        mcpEnvSecrets,
       };
     },
   });

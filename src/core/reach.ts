@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { BrainEvent } from "../shared/ipc.ts";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import type { ConfigStore } from "./config.ts";
 import { reportFrontWindow } from "./desktop.ts";
 import type { DesktopServices } from "./desktopTools.ts";
@@ -241,7 +242,8 @@ export class Reach {
       read: (signal) => deps.sight.readFrontWindow(signal),
       ownApps: deps.ownApps,
       skip: () => deps.config.value.sight.watchSkip,
-      onNotice: (notice) => deps.onNotice(describeNotice(notice)),
+      onNotice: (notice) =>
+        deps.onNotice(describeNotice(notice, deps.config.value.character.userAddress)),
     });
     this.watch = watch;
     try {
@@ -472,8 +474,9 @@ export function builtPhoneApp(file: string | undefined): { file: string; version
 }
 
 /** How something she noticed on screen is put to her, to tell in her own words. */
-export function describeNotice(notice: WatchNotice): string {
-  return `While keeping watch on the screen you noticed a small window in ${programName(notice.app)} that looks like trouble. It reads: "${notice.line}". Tell Captain you saw it and offer to help. You cannot check or fix anything in this reply, so do not say you are doing so, and do not assume what caused it.`;
+export function describeNotice(notice: WatchNotice, userAddress?: string): string {
+  const tell = replaceInternalCaptain("Tell Captain you saw it and offer to help.", userAddress);
+  return `While keeping watch on the screen you noticed a small window in ${programName(notice.app)} that looks like trouble. It reads: "${notice.line}". ${tell} You cannot check or fix anything in this reply, so do not say you are doing so, and do not assume what caused it.`;
 }
 
 /** What a device on the station is shown of an event in her brain. */

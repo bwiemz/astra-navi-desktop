@@ -86,6 +86,7 @@ export function createReports(deps: ReportsDeps): Reports {
         unread: deps.agenda()?.lastLook()?.unread ?? null,
         headsUpMinutes: deps.config.value.agenda.headsUpMinutes,
       },
+      userAddress: deps.config.value.character.userAddress,
       gameMode: {
         quiet: deps.config.value.quietInGames,
         playing: deps.gameWatch()?.current()?.game ?? null,

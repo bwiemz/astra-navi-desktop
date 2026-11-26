@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { win32 as win32Path } from "node:path";
 import { z } from "zod";
+import { MOODS } from "../shared/ipc.ts";
 import { isPrivateIpv4, type PolicyContext, type Verdict } from "./permissions.ts";
 import { isPrivateLanHost } from "./workerMesh.ts";
 
@@ -73,12 +74,15 @@ const FORBIDDEN_ENV_KEYS = new Set([
 
 const SAFE_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+const MOOD_TAG_RE = new RegExp(`\\[\\[(${MOODS.join("|")})\\]\\]`, "gi");
+
 /**
  * Strips non-whitespace control chars, invisible Unicode tag characters (`U+E0000–U+E007F`),
- * BiDi overrides/directional marks, and `[[...]]` mood markers from MCP tool *outputs* and
- * *resources* while preserving legitimate zero-width joiners (`U+200D` ZWJ for compound emoji
- * like 👩‍💻 and `U+200C` ZWNJ for Persian/Arabic/Indic text) so read-then-write round trips
- * keep file contents intact.
+ * true BiDi overrides/isolates (`U+202A–U+202E`, `U+2066–U+2069`, `U+061C`), and known
+ * companion mood tags (`[[happy]]`, etc.) from MCP tool *outputs* and *resources* while
+ * preserving legitimate TOML tables (`[[servers]]`), nested arrays (`[[1, 2]]`),
+ * LRM/RLM (`U+200E`/`U+200F`), and zero-width joiners (`U+200D` ZWJ for compound emoji
+ * like 👩‍💻 and `U+200C` ZWNJ for Persian/Arabic/Indic text).
  */
 export function sanitizeUntrustedOutput(raw: string): string {
   const parts: string[] = [];
@@ -88,8 +92,6 @@ export function sanitizeUntrustedOutput(raw: string): string {
       (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d) ||
       cp === 0x7f ||
       cp === 0x061c ||
-      cp === 0x200e ||
-      cp === 0x200f ||
       (cp >= 0x202a && cp <= 0x202e) ||
       (cp >= 0x2066 && cp <= 0x2069) ||
       (cp >= 0xe0000 && cp <= 0xe007f)
@@ -98,7 +100,7 @@ export function sanitizeUntrustedOutput(raw: string): string {
     }
     parts.push(ch);
   }
-  return parts.join("").replaceAll("[[", "[").replaceAll("]]", "]");
+  return parts.join("").replace(MOOD_TAG_RE, "[$1]");
 }
 
 /** Strips control, zero-width, Unicode tag, BiDi override characters, and `[[...]]` mood markers for schema metadata. */
@@ -173,23 +175,40 @@ export function resolveStdioCommand(
   options: {
     platform?: NodeJS.Platform;
     envPath?: string;
+    env?: Record<string, string | undefined>;
     nodeExecPath?: string;
     fileExists?: (path: string) => boolean;
   } = {},
-): { command: string; args: string[]; useElectronAsNode?: boolean } {
+): { command: string; args: string[]; useElectronAsNode?: boolean; prependPathDir?: string } {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32") {
     return { command, args: [...args] };
   }
   const pathLib = win32Path;
   const exists = options.fileExists ?? existsSync;
-  const envPath = options.envPath ?? process.env["PATH"] ?? "";
+  const envSource = options.env ?? process.env;
+  const envPath = options.envPath ?? envSource["PATH"] ?? "";
   const nodeExec = options.nodeExecPath ?? process.execPath;
   const trimmed = command.trim();
   const baseLower = pathLib.basename(trimmed).toLowerCase();
   const extLower = pathLib.extname(trimmed).toLowerCase();
   const pathDirs = envPath.split(";").map((d) => d.trim()).filter(Boolean);
-  const nodeDirs = [pathLib.dirname(nodeExec), ...pathDirs];
+  const standardWinDirs = [
+    envSource["ProgramFiles"] ? pathLib.join(envSource["ProgramFiles"], "nodejs") : "",
+    envSource["NVM_SYMLINK"] ?? "",
+    envSource["VOLTA_HOME"] ? pathLib.join(envSource["VOLTA_HOME"], "bin") : "",
+    envSource["LOCALAPPDATA"] ? pathLib.join(envSource["LOCALAPPDATA"], "Volta", "bin") : "",
+  ].filter(Boolean);
+  const searchDirs = [...new Set([...pathDirs, ...standardWinDirs])];
+  const nodeDirs = [pathLib.dirname(nodeExec), ...searchDirs];
+
+  const findNativeExe = (exeName: string): string | null => {
+    for (const dir of searchDirs) {
+      const cand = pathLib.join(dir, exeName);
+      if (exists(cand)) return cand;
+    }
+    return null;
+  };
 
   const findNodeCliScript = (scriptName: "npx-cli.js" | "npm-cli.js"): string | null => {
     const candidates: string[] = [];
@@ -206,13 +225,15 @@ export function resolveStdioCommand(
     return null;
   };
 
-  const findNodeExe = (): { command: string; useElectronAsNode: boolean } => {
+  const findNodeExe = (): { command: string; useElectronAsNode: boolean; prependPathDir?: string } => {
     if (pathLib.basename(nodeExec).toLowerCase() === "node.exe" && exists(nodeExec)) {
       return { command: nodeExec, useElectronAsNode: false };
     }
-    for (const dir of pathDirs) {
+    for (const dir of searchDirs) {
       const cand = pathLib.join(dir, "node.exe");
-      if (exists(cand)) return { command: cand, useElectronAsNode: false };
+      if (exists(cand)) {
+        return { command: cand, useElectronAsNode: false, prependPathDir: dir };
+      }
     }
     return {
       command: nodeExec,
@@ -228,10 +249,20 @@ export function resolveStdioCommand(
         command: node.command,
         args: [cli, ...args],
         ...(node.useElectronAsNode ? { useElectronAsNode: true } : {}),
+        ...(node.prependPathDir ? { prependPathDir: node.prependPathDir } : {}),
+      };
+    }
+    // Volta and similar Node managers ship a native `npx.exe` shim directly on PATH (no npx-cli.js).
+    const nativeNpx = findNativeExe("npx.exe");
+    if (nativeNpx) {
+      return {
+        command: nativeNpx,
+        args: [...args],
+        prependPathDir: pathLib.dirname(nativeNpx),
       };
     }
     throw new Error(
-      `Windows cannot run "${trimmed}" directly without a shell and npx-cli.js was not found on PATH. Install Node.js (with npm) or configure "node" with the server script path, or use "uvx".`,
+      `Windows cannot run "${trimmed}" directly without a shell and neither npx-cli.js nor npx.exe was found on PATH. Install Node.js (with npm) or Volta, or configure "node" with the server script path, or use "uvx".`,
     );
   }
   if (baseLower === "npm" || baseLower === "npm.cmd") {
@@ -242,10 +273,19 @@ export function resolveStdioCommand(
         command: node.command,
         args: [cli, ...args],
         ...(node.useElectronAsNode ? { useElectronAsNode: true } : {}),
+        ...(node.prependPathDir ? { prependPathDir: node.prependPathDir } : {}),
+      };
+    }
+    const nativeNpm = findNativeExe("npm.exe");
+    if (nativeNpm) {
+      return {
+        command: nativeNpm,
+        args: [...args],
+        prependPathDir: pathLib.dirname(nativeNpm),
       };
     }
     throw new Error(
-      `Windows cannot run "${trimmed}" directly without a shell and npm-cli.js was not found on PATH.`,
+      `Windows cannot run "${trimmed}" directly without a shell and neither npm-cli.js nor npm.exe was found on PATH.`,
     );
   }
   if (extLower === ".cmd" || extLower === ".bat") {
@@ -511,9 +551,16 @@ export class StdioMcpTransport implements McpTransport {
     }
     const resolved = resolveStdioCommand(rawCommand, this.cfg.args ?? []);
     const cleanEnv = assertSafeEnvOverrides(this.cfg.env);
-    const spawnEnv = resolved.useElectronAsNode
-      ? { ...cleanEnv, ELECTRON_RUN_AS_NODE: "1" }
-      : cleanEnv;
+    const spawnEnv: Record<string, string> = {
+      ...cleanEnv,
+      ...(resolved.useElectronAsNode ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+    };
+    if (resolved.prependPathDir) {
+      const existingPath = spawnEnv["PATH"] ?? "";
+      spawnEnv["PATH"] = existingPath
+        ? `${resolved.prependPathDir};${existingPath}`
+        : resolved.prependPathDir;
+    }
     this.closedByCaller = false;
     this.stdoutBuf = "";
     let stderrTail = "";
@@ -1189,7 +1236,6 @@ export class McpHub {
   }
 
   registerServer(config: McpServerConfigInput, customTransport?: McpTransport): McpClient {
-    this.closed = false;
     const client = new McpClient(config, customTransport);
     const id = client.config.id;
     this.clearReconnectTimer(id);
@@ -1201,9 +1247,11 @@ export class McpHub {
       this.lastErrors.set(id, reason);
       this.scheduleReconnect(id);
     });
-    this.clients.set(id, client);
-    this.configSnapshots.set(id, JSON.stringify(client.config));
-    this.lastErrors.delete(id);
+    if (!this.closed) {
+      this.clients.set(id, client);
+      this.configSnapshots.set(id, JSON.stringify(client.config));
+      this.lastErrors.delete(id);
+    }
     return client;
   }
 
@@ -1269,11 +1317,10 @@ export class McpHub {
     serverId: string,
     options: { fromAutoReconnect?: boolean } = {},
   ): Promise<{ ok: boolean; tools: readonly McpToolDescriptor[]; error?: string }> {
-    if (options.fromAutoReconnect && this.closed) {
+    if (this.closed) {
       return { ok: false, tools: [], error: "MCP hub is closed." };
     }
     if (!options.fromAutoReconnect) {
-      this.closed = false;
       this.reconnectAttempts.delete(serverId);
     }
     this.clearReconnectTimer(serverId);
@@ -1290,11 +1337,16 @@ export class McpHub {
     if (client.isConnected) {
       await client.close().catch(() => undefined);
     }
-    if (this.closed) {
+    if (this.closed || this.clients.get(serverId) !== client) {
+      await client.close().catch(() => undefined);
       return { ok: false, tools: [], error: "MCP hub is closed." };
     }
     try {
       await client.initialize();
+      if (this.closed || this.clients.get(serverId) !== client) {
+        await client.close().catch(() => undefined);
+        return { ok: false, tools: [], error: "MCP hub closed during connect." };
+      }
       await client.listTools();
       if (this.closed || this.clients.get(serverId) !== client) {
         await client.close().catch(() => undefined);
@@ -1313,14 +1365,18 @@ export class McpHub {
   }
 
   async connectAll(): Promise<{ connected: string[]; errors: Record<string, string> }> {
-    this.closed = false;
     const connected: string[] = [];
     const errors: Record<string, string> = {};
+    if (this.closed) return { connected, errors };
     for (const [id, client] of this.clients) {
       if (this.closed) break;
       if (client.config.enabled === false) continue;
       try {
         await client.initialize();
+        if (this.closed) {
+          await client.close().catch(() => undefined);
+          break;
+        }
         await client.listTools();
         if (this.closed) {
           await client.close().catch(() => undefined);
@@ -1344,7 +1400,9 @@ export class McpHub {
   async syncServers(
     configs: readonly McpServerConfigInput[],
   ): Promise<{ connected: string[]; errors: Record<string, string> }> {
-    this.closed = false;
+    const connected: string[] = [];
+    const errors: Record<string, string> = {};
+    if (this.closed) return { connected, errors };
     const desired = new Map<string, McpServerConfig>();
     for (const raw of configs.slice(0, MAX_MCP_SERVERS)) {
       const parsed = McpServerConfigSchema.safeParse(raw);
@@ -1353,6 +1411,7 @@ export class McpHub {
 
     // Close servers removed from config, disabled, or whose configuration changed.
     for (const [id, client] of [...this.clients.entries()]) {
+      if (this.closed) return { connected, errors };
       const next = desired.get(id);
       if (!next || next.enabled === false) {
         await this.unregisterServer(id);
@@ -1366,9 +1425,8 @@ export class McpHub {
       }
     }
 
-    const connected: string[] = [];
-    const errors: Record<string, string> = {};
     for (const [id, cfg] of desired) {
+      if (this.closed) break;
       if (cfg.enabled === false) continue;
       const existing = this.clients.get(id);
       if (existing && existing.isConnected) {
@@ -1378,7 +1436,13 @@ export class McpHub {
       if (!existing) {
         this.registerServer(cfg);
       }
+      if (this.closed) break;
       const res = await this.connectServer(id);
+      if (this.closed) {
+        const client = this.clients.get(id);
+        if (client) await client.close().catch(() => undefined);
+        break;
+      }
       if (res.ok) connected.push(id);
       else if (res.error) errors[id] = res.error;
     }

@@ -30,7 +30,10 @@ export interface SupportBundleInput {
     stationOpen: boolean;
     enabledTier10Flags: readonly string[];
   };
+  /** Strict secrets (API keys, hostnames, usernames, machine names): redacted whole-token even if short or numeric. */
   extraSecretLiterals?: readonly string[];
+  /** MCP server env/header values: skips benign config literals (`true`, `info`, `debug`, etc.) while still redacting secrets. */
+  mcpEnvLiterals?: readonly string[];
 }
 
 export interface RedactedSupportBundle {
@@ -119,20 +122,25 @@ function escapeRegexLiteral(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function shouldRedactExtraSecret(secret: string): boolean {
-  if (secret.length < 6) return false;
-  if (/^\d+(?:\.\d+)?$/.test(secret)) return false;
+function shouldRedactMcpEnvLiteral(secret: string): boolean {
+  if (secret.length < 2) return false;
   if (COMMON_NON_SECRET_LITERALS.has(secret.toLowerCase())) return false;
+  // Common small numeric MCP env values (PORT=11434, TIMEOUT=30, RETRIES=3) aren't secrets;
+  // long numeric pins/tokens (>= 6 digits) and ALL strict extraSecrets are still redacted.
+  if (/^\d{1,5}$/.test(secret)) return false;
   return true;
 }
 
 /**
  * Scrubs API keys, tokens, URLs with embedded credentials/queries, private keys,
- * SSH public/host fingerprints, email addresses, IP addresses, and OS user paths.
+ * SSH public/host fingerprints, email addresses, IP addresses, OS user paths,
+ * strict secrets (hostnames, usernames, machine names — even short or numeric),
+ * and MCP env/header values (excluding common benign config words like `true`/`info`).
  */
 export function redactSupportText(
   text: string,
   extraSecrets: readonly string[] = [],
+  mcpEnvSecrets: readonly string[] = [],
 ): { text: string; count: number } {
   let out = withoutSecrets(text);
   let count = out === text ? 0 : 1;
@@ -145,11 +153,11 @@ export function redactSupportText(
     }
   };
 
-  for (const rawSecret of extraSecrets) {
-    const secret = rawSecret.trim();
-    if (!shouldRedactExtraSecret(secret) || !out.includes(secret)) continue;
-    // Short/alphanumeric secrets (6–15 chars) match whole tokens only so an MCP env value
-    // never corrupts surrounding English words; longer or punctuated tokens match anywhere.
+  const redactLiteral = (secret: string): void => {
+    if (!out.includes(secret)) return;
+    // Alphanumeric tokens < 16 chars use whole-token boundaries so short hostnames/usernames
+    // ("pve", "nas", "admin", "kenji", "84726193") are ALWAYS scrubbed without mangling
+    // unrelated English words ("improves", "information").
     if (secret.length < 16 && /^[A-Za-z0-9_]+$/.test(secret)) {
       replaceCount(
         new RegExp(`(?<![A-Za-z0-9_])${escapeRegexLiteral(secret)}(?![A-Za-z0-9_])`, "g"),
@@ -159,6 +167,18 @@ export function redactSupportText(
       out = out.split(secret).join("[redacted]");
       count += 1;
     }
+  };
+
+  for (const rawSecret of extraSecrets) {
+    const secret = rawSecret.trim();
+    if (secret.length < 2) continue;
+    redactLiteral(secret);
+  }
+
+  for (const rawEnv of mcpEnvSecrets) {
+    const secret = rawEnv.trim();
+    if (!shouldRedactMcpEnvLiteral(secret)) continue;
+    redactLiteral(secret);
   }
 
   const currentHome = homedir();
@@ -203,7 +223,7 @@ export function redactSupportText(
 export function buildRedactedSupportBundle(input: SupportBundleInput): RedactedSupportBundle {
   let redactionsApplied = 0;
   const scrub = (value: string): string => {
-    const res = redactSupportText(value, input.extraSecretLiterals);
+    const res = redactSupportText(value, input.extraSecretLiterals, input.mcpEnvLiterals);
     redactionsApplied += res.count;
     return res.text;
   };

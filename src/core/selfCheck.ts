@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readdir, rm, stat, statfs } from "node:fs/promises";
 import { join } from "node:path";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { BRAIN_MODELS } from "./models.ts";
 import { resolveBundledRoot } from "./paths.ts";
 import { resolveNativeWinHandsBinary } from "./platform/windows.ts";
@@ -241,6 +242,8 @@ export interface SelfCheckInputs {
   platform?: NodeJS.Platform;
   /** Whether the native `win-hands.exe` helper is available on Windows. */
   hasNativeWinHands?: boolean;
+  /** Optional custom user form of address so self-check text avoids "Captain" when customized. */
+  userAddress?: string;
 }
 
 /** Where her agenda stands. Only counts and names: never where a calendar is. */
@@ -254,15 +257,19 @@ export interface AgendaReading {
 }
 
 /** The self-check line about her agenda, in plain words. */
-export function describeAgendaReading(reading: AgendaReading): { ok: boolean; detail: string } {
+export function describeAgendaReading(
+  reading: AgendaReading,
+  userAddress?: string,
+): { ok: boolean; detail: string } {
   const headsUp =
     reading.headsUpMinutes > 0
       ? `She says so ${reading.headsUpMinutes} minutes before something starts.`
       : "The heads-up before something starts is off.";
   if (reading.calendars === 0) {
+    const none = replaceInternalCaptain("Reading none of Captain's calendars", userAddress);
     return {
       ok: true,
-      detail: `Reading none of Captain's calendars (one can be added in Settings); keeping her own list. ${headsUp}`,
+      detail: `${none} (one can be added in Settings); keeping her own list. ${headsUp}`,
     };
   }
   const count = `${reading.calendars} calendar${reading.calendars === 1 ? "" : "s"}`;
@@ -472,7 +479,7 @@ export async function selfCheck(inputs: SelfCheckInputs): Promise<SelfCheckResul
         system: "Watch",
         ok: true,
         detail: reach.watching
-          ? `Keeping an eye on the screen${reach.front ? ` (Captain is in ${reach.front})` : ""}. Nothing seen is written to disk.`
+          ? `Keeping an eye on the screen${reach.front ? ` (${replaceInternalCaptain("Captain is in", inputs.userAddress)} ${reach.front})` : ""}. Nothing seen is written to disk.`
           : "Not watching the screen. She looks only when asked.",
       },
       {
@@ -495,7 +502,7 @@ export async function selfCheck(inputs: SelfCheckInputs): Promise<SelfCheckResul
     lines.push({ system: "Notifications", ...describeNoticeReading(inputs.notices) });
   }
   if (inputs.agenda) {
-    lines.push({ system: "Agenda", ...describeAgendaReading(inputs.agenda) });
+    lines.push({ system: "Agenda", ...describeAgendaReading(inputs.agenda, inputs.userAddress) });
   }
   if (inputs.memoryInUse !== null) {
     lines.push({

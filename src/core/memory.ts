@@ -103,23 +103,6 @@ function oneLine(text: string): string {
   return text.replace(/[<>]/g, "").replace(/\s+/g, " ").trim();
 }
 
-const LEGACY_CAPTAIN_SUBJECT_RE =
-  /^Captain\s+(?=(?:is|was|are|were|has|had|likes|loves|prefers|uses|works|lives|wants|needs|asked|mentioned|plays|runs|speaks|studies|owns|keeps|goes|does|doesn't|can|will|would|started|finished|built|made|hates|enjoys|avoids|dislikes)\b)/;
-
-/**
- * Non-destructively adapts legacy auto-saved notes phrased as `"Captain prefers…"` or
- * `"Captain's main PC…"` to neutral `"The user…"` wording when `userAddress` has been
- * customized, while leaving proper nouns (such as `"Captain America"` or `"Captain Toad"`)
- * untouched and preserving the stored note on disk if the user switches back to `"Captain"`.
- */
-export function adaptLegacyCaptainNote(text: string, userAddress?: string): string {
-  if (userAddress === undefined || userAddress.trim() === "Captain") return text;
-  let out = text.replace(/^Captain's\b/, "The user's");
-  out = out.replace(LEGACY_CAPTAIN_SUBJECT_RE, "The user ");
-  // Adapt lowercase-noun possessives ("on Captain's desk") without touching title-cased titles ("Captain's Log").
-  out = out.replace(/\bCaptain's(?=\s+[a-z])/g, "the user's");
-  return out;
-}
 /** Everything about a memory that a search should match on. */
 export function searchableText(memory: Memory): string {
   return [memory.text, ...memory.points, ...memory.tags].join(" ");
@@ -455,12 +438,9 @@ export class MemoryStore {
     const lines: string[] = [];
     let used = 0;
     for (const memory of [...pinned, ...always, ...recent]) {
-      const shownText = adaptLegacyCaptainNote(memory.text, userAddress);
       const pointsSuffix =
-        memory.pinned && memory.points.length > 0
-          ? ` — ${memory.points.map((p) => adaptLegacyCaptainNote(p, userAddress)).join("; ")}`
-          : "";
-      const line = `- [${memory.id}] (${memory.kind}${memory.pinned ? ", pinned" : ""}) ${shownText}${pointsSuffix}`;
+        memory.pinned && memory.points.length > 0 ? ` — ${memory.points.join("; ")}` : "";
+      const line = `- [${memory.id}] (${memory.kind}${memory.pinned ? ", pinned" : ""}) ${memory.text}${pointsSuffix}`;
       if (used + line.length > maxChars) break;
       lines.push(line);
       used += line.length + 1;
@@ -468,9 +448,7 @@ export class MemoryStore {
     // Topics and skills are listed by name only; their details are brought in when they come up.
     const topics = of("topic").filter((m) => !pinnedIds.has(m.id)).sort(byUse).slice(0, 10);
     if (topics.length > 0) {
-      lines.push(
-        `What you two talk about most: ${topics.map((m) => adaptLegacyCaptainNote(m.text, userAddress)).join("; ")}`,
-      );
+      lines.push(`What you two talk about most: ${topics.map((m) => m.text).join("; ")}`);
     }
     const skills = of("skill").filter((m) => !pinnedIds.has(m.id)).sort(byUse).slice(0, 10);
     if (skills.length > 0) {
@@ -479,7 +457,7 @@ export class MemoryStore {
         userAddress,
       );
       lines.push(
-        `${skillsHeading} ${skills.map((m) => `${adaptLegacyCaptainNote(m.text, userAddress)} (${m.hits}x)`).join("; ")}`,
+        `${skillsHeading} ${skills.map((m) => `${m.text} (${m.hits}x)`).join("; ")}`,
       );
     }
     const shown = pinned.length + always.length + recent.length + topics.length + skills.length;

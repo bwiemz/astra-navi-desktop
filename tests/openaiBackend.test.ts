@@ -658,24 +658,30 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
   });
 
   it("avoids over-redacting common words/substrings, preserves running research on unrelated inference edits, snapshots AI report at open time, and checks real Python voice deps on Windows", async () => {
-    // 1. Over-redaction tuning: common words ("info", "true", "debug"), ports ("11434"),
-    //    and short values (<6 chars) must NOT mangle prose; real secrets ARE redacted cleanly.
+    // 1. Redaction separates strict secrets (hostnames, usernames, machine names, keys — NO <6 or digit exemption!)
+    //    from soft MCP env values (common words like "info", "true", "debug" skipped so prose isn't mangled).
     const sample =
-      "More information available (debug=true on localhost:11434); myalpha99x stays, standalone alpha99 and token super-secret-key-98765 go.";
-    const scrubbed = redactSupportText(sample, [
-      "info",
-      "true",
-      "debug",
-      "localhost",
-      "11434",
-      "alpha99",
-      "super-secret-key-98765",
-    ]);
+      "More information available (debug=true on localhost:11434) at gymnasium for administrator; " +
+      "myalpha99x stays, but host pve, box nas, user admin, user kenji, pin 84726193, alpha99, " +
+      "mcp token ha-secret-token-7788, and super-secret-key-98765 must all be scrubbed.";
+    const scrubbed = redactSupportText(
+      sample,
+      ["pve", "nas", "admin", "kenji", "84726193", "alpha99", "super-secret-key-98765"],
+      ["info", "true", "debug", "localhost", "11434", "ha-secret-token-7788"],
+    );
     expect(scrubbed.text).toContain("More information available");
     expect(scrubbed.text).toContain("debug=true");
     expect(scrubbed.text).toContain("localhost:11434");
+    expect(scrubbed.text).toContain("gymnasium");
+    expect(scrubbed.text).toContain("administrator");
     expect(scrubbed.text).toContain("myalpha99x");
-    expect(scrubbed.text).not.toContain(" alpha99 ");
+    expect(scrubbed.text).not.toMatch(/\bpve\b/);
+    expect(scrubbed.text).not.toMatch(/\bnas\b/);
+    expect(scrubbed.text).not.toMatch(/\badmin\b/);
+    expect(scrubbed.text).not.toContain("kenji");
+    expect(scrubbed.text).not.toContain("84726193");
+    expect(scrubbed.text).not.toContain(" alpha99");
+    expect(scrubbed.text).not.toContain("ha-secret-token-7788");
     expect(scrubbed.text).not.toContain("super-secret-key-98765");
 
     // 2. Unrelated inference edits while provider stays unchanged must NOT cancel running research workers!
@@ -714,13 +720,53 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
     await worker?.close();
     await engine.dispose();
 
-    // 3. Report dialog snapshots #reply & #heard at dialog OPEN time (not save time).
+    // 3. Report dialog snapshots #reply & #heard at dialog OPEN time and resets on clearLive() and reply-start!
     const rendererMain = await readFile(join(process.cwd(), "src/renderer/src/main.ts"), "utf8");
     const dialogFn = rendererMain.slice(rendererMain.indexOf("function wireAiReportDialog()"));
     expect(dialogFn).toContain("snapshotReply = document.getElementById(\"reply\")");
     expect(dialogFn).toContain("replyExcerpt: snapshotReply");
+    expect(rendererMain).toContain("resetAiReportDialog = (): void =>");
+    const clearLiveIdx = rendererMain.indexOf("function clearLive()");
+    expect(rendererMain.slice(clearLiveIdx, clearLiveIdx + 250)).toContain("resetAiReportDialog()");
+    const replyStartIdx = rendererMain.indexOf('case "reply-start":');
+    expect(rendererMain.slice(replyStartIdx, replyStartIdx + 250)).toContain("resetAiReportDialog()");
 
-    // 4. Windows clean-install verification checks actual voice-server/server.py imports (numpy, torch, qwen_tts).
+    // 4. decide() keeps the full reply up to 12,000 chars (catching middle claims) with max_tokens=256.
+    let seenMidBody: { max_tokens?: number; messages?: { role: string; content: string }[] } | null = null;
+    const midSession = new OpenAiCompatibleSession(
+      {
+        provider: "openai-compatible",
+        preset: "ollama",
+        baseUrl: "http://gpu-box:11434/v1",
+        model: "qwen3.5:9b",
+        apiKey: "",
+      },
+      "You are Astra.",
+      (async (_u: string | URL | Request, init?: RequestInit) => {
+        seenMidBody = JSON.parse(String(init?.body ?? "{}")) as typeof seenMidBody;
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: '{"claimed": 0.92}' } }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch,
+    );
+    const midReply = `${"Opening paragraph. ".repeat(200)} I have just restarted nginx on your server. ${"Closing advice. ".repeat(200)}`;
+    midSession.setChatHistory([
+      { type: "system", text: "You are Astra." },
+      { type: "user", text: "Restart nginx" },
+      { type: "model", response: [midReply] },
+    ]);
+    await midSession.decide(CLAIM_CHECK);
+    const capturedMid = seenMidBody as unknown as {
+      max_tokens?: number;
+      messages?: { role: string; content: string }[];
+    } | null;
+    expect(capturedMid?.max_tokens).toBe(256);
+    expect(capturedMid?.messages?.find((m) => m.role === "user")?.content).toContain(
+      "I have just restarted nginx on your server.",
+    );
+
+    // 5. Windows clean-install verification checks actual voice-server/server.py imports (numpy, torch, qwen_tts).
     const winScript = await readFile(join(process.cwd(), "scripts/verify-clean-windows.ps1"), "utf8");
     expect(winScript).toContain("import numpy, torch, qwen_tts");
     expect(winScript).not.toContain("import fastapi, uvicorn");

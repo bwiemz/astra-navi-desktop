@@ -15,6 +15,16 @@ export interface CheckCatalogSizesOptions {
   /** Maximum allowed relative drift between declared `sizeBytes` and remote `Content-Length` (default 0.5%). */
   maxDiffRatio?: number;
   timeoutMs?: number;
+  /** Maximum retry attempts per asset for transient 429/5xx/network errors (default 3). */
+  maxAttempts?: number;
+  /** Base backoff delay between retries in ms (default 300ms). */
+  retryBaseDelayMs?: number;
+}
+
+function parsePositiveHeaderInt(header: string | null): number | null {
+  if (!header) return null;
+  const parsed = Number(header.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function parseContentRangeTotal(header: string | null): number | null {
@@ -25,23 +35,57 @@ function parseContentRangeTotal(header: string | null): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-async function probeRemoteSize(
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+async function probeRemoteSizeOnce(
   url: string,
   fetchImpl: typeof fetch,
   timeoutMs: number,
-): Promise<{ status: number; actualBytes: number | null }> {
+): Promise<{ status: number; actualBytes: number | null; retryable: boolean }> {
+  // First try manual-redirect HEAD so Hugging Face's `x-linked-size` header answers in 1 hop
+  // without chasing CDN/LFS redirects.
+  const manualRes = await fetchImpl(url, {
+    method: "HEAD",
+    redirect: "manual",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const linkedSize = parsePositiveHeaderInt(manualRes.headers.get("x-linked-size"));
+  if (linkedSize !== null && (manualRes.ok || (manualRes.status >= 300 && manualRes.status < 400))) {
+    return { status: manualRes.status, actualBytes: linkedSize, retryable: false };
+  }
+  if (manualRes.ok) {
+    const directLen = parsePositiveHeaderInt(manualRes.headers.get("content-length"));
+    if (directLen !== null) {
+      return { status: manualRes.status, actualBytes: directLen, retryable: false };
+    }
+  } else if (manualRes.status < 300 || manualRes.status >= 400) {
+    return {
+      status: manualRes.status,
+      actualBytes: null,
+      retryable: isRetryableStatus(manualRes.status),
+    };
+  }
+
+  // Follow redirects for hosts that only supply Content-Length on the final target.
   const headRes = await fetchImpl(url, {
     method: "HEAD",
     redirect: "follow",
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!headRes.ok) {
-    return { status: headRes.status, actualBytes: null };
+    return {
+      status: headRes.status,
+      actualBytes: null,
+      retryable: isRetryableStatus(headRes.status),
+    };
   }
-  const lenHeader = headRes.headers.get("content-length");
-  const headLen = lenHeader ? Number(lenHeader) : NaN;
-  if (Number.isFinite(headLen) && headLen > 0) {
-    return { status: headRes.status, actualBytes: headLen };
+  const headLen =
+    parsePositiveHeaderInt(headRes.headers.get("x-linked-size")) ??
+    parsePositiveHeaderInt(headRes.headers.get("content-length"));
+  if (headLen !== null) {
+    return { status: headRes.status, actualBytes: headLen, retryable: false };
   }
 
   // Fallback for mirrors that omit Content-Length on HEAD: request 1 byte with Range.
@@ -53,21 +97,52 @@ async function probeRemoteSize(
   });
   await rangeRes.body?.cancel().catch(() => undefined);
   if (!rangeRes.ok && rangeRes.status !== 206) {
-    return { status: rangeRes.status, actualBytes: null };
+    return {
+      status: rangeRes.status,
+      actualBytes: null,
+      retryable: isRetryableStatus(rangeRes.status),
+    };
   }
   const total =
     parseContentRangeTotal(rangeRes.headers.get("content-range")) ??
-    (() => {
-      const len = Number(rangeRes.headers.get("content-length") ?? "");
-      return Number.isFinite(len) && len > 0 ? len : null;
-    })();
-  return { status: rangeRes.status, actualBytes: total };
+    parsePositiveHeaderInt(rangeRes.headers.get("content-length"));
+  return { status: rangeRes.status, actualBytes: total, retryable: total === null };
+}
+
+async function probeRemoteSize(
+  url: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+  maxAttempts: number,
+  retryBaseDelayMs: number,
+): Promise<{ status: number | null; actualBytes: number | null; lastError?: string }> {
+  let lastStatus: number | null = null;
+  let lastError: string | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const res = await probeRemoteSizeOnce(url, fetchImpl, timeoutMs);
+      lastStatus = res.status;
+      if (res.actualBytes !== null || !res.retryable || attempt === maxAttempts) {
+        return { status: res.status, actualBytes: res.actualBytes };
+      }
+      lastError = `HTTP ${res.status}`;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      if (attempt === maxAttempts) {
+        return { status: lastStatus, actualBytes: null, lastError };
+      }
+    }
+    if (retryBaseDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, retryBaseDelayMs * 2 ** (attempt - 1)));
+    }
+  }
+  return { status: lastStatus, actualBytes: null, lastError };
 }
 
 /**
  * Verifies every declared model and `mmproj` `sizeBytes` against the remote server's
- * actual file size so download integrity checks (`modelBundle.ts` 98% minimum) never
- * reject valid weights in production.
+ * actual file size (using Hugging Face `x-linked-size` / `Content-Length` with retries)
+ * so download integrity checks (`modelBundle.ts` 98% minimum) never reject valid weights.
  */
 export async function checkCatalogSizes(
   assets: readonly CatalogDownloadAsset[] = listCatalogDownloadAssets(),
@@ -76,45 +151,42 @@ export async function checkCatalogSizes(
   const fetchImpl = options.fetchImpl ?? fetch;
   const maxDiffRatio = options.maxDiffRatio ?? 0.005;
   const timeoutMs = options.timeoutMs ?? 20_000;
+  const maxAttempts = Math.max(1, options.maxAttempts ?? 3);
+  const retryBaseDelayMs = Math.max(0, options.retryBaseDelayMs ?? 300);
 
   const results = await Promise.all(
     assets.map(async (asset): Promise<CatalogSizeCheckResult> => {
-      try {
-        const { status, actualBytes } = await probeRemoteSize(asset.url, fetchImpl, timeoutMs);
-        if (actualBytes === null) {
-          return {
-            asset,
-            ok: false,
-            actualBytes: null,
-            status,
-            diffRatio: null,
-            error: `HTTP ${status} or missing Content-Length`,
-          };
-        }
-        const diffRatio = Math.abs(actualBytes - asset.sizeBytes) / actualBytes;
-        const ok = diffRatio <= maxDiffRatio;
-        return {
-          asset,
-          ok,
-          actualBytes,
-          status,
-          diffRatio,
-          ...(ok
-            ? {}
-            : {
-                error: `Declared ${asset.sizeBytes.toLocaleString("en-US")} bytes vs actual ${actualBytes.toLocaleString("en-US")} bytes (${(diffRatio * 100).toFixed(2)}% drift; max ${(maxDiffRatio * 100).toFixed(2)}%)`,
-              }),
-        };
-      } catch (err) {
+      const { status, actualBytes, lastError } = await probeRemoteSize(
+        asset.url,
+        fetchImpl,
+        timeoutMs,
+        maxAttempts,
+        retryBaseDelayMs,
+      );
+      if (actualBytes === null) {
         return {
           asset,
           ok: false,
           actualBytes: null,
-          status: null,
+          status,
           diffRatio: null,
-          error: err instanceof Error ? err.message : String(err),
+          error: lastError ?? `HTTP ${status ?? "unknown"} or missing Content-Length`,
         };
       }
+      const diffRatio = Math.abs(actualBytes - asset.sizeBytes) / actualBytes;
+      const ok = diffRatio <= maxDiffRatio;
+      return {
+        asset,
+        ok,
+        actualBytes,
+        status,
+        diffRatio,
+        ...(ok
+          ? {}
+          : {
+              error: `Declared ${asset.sizeBytes.toLocaleString("en-US")} bytes vs actual ${actualBytes.toLocaleString("en-US")} bytes (${(diffRatio * 100).toFixed(2)}% drift; max ${(maxDiffRatio * 100).toFixed(2)}%)`,
+            }),
+      };
     }),
   );
 

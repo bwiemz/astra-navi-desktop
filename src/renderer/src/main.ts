@@ -856,8 +856,11 @@ function finishEntry(): void {
   liveIsLogged = true;
 }
 
+let resetAiReportDialog: () => void = () => undefined;
+
 /** Clears what is live. In the panel a finished reply is already in the list above. */
 function clearLive(): void {
+  resetAiReportDialog();
   setReply("");
   setHeard(null);
   clearSteps();
@@ -1267,6 +1270,7 @@ function onBrainEvent(event: BrainEvent): void {
       }
       break;
     case "reply-start":
+      resetAiReportDialog();
       setReply("");
       break;
     case "text":
@@ -1720,6 +1724,15 @@ function wireAiReportDialog(): void {
   let lastIssueUrl = "";
   let snapshotReply = "";
   let snapshotHeard = "";
+  resetAiReportDialog = (): void => {
+    dialogEl.hidden = true;
+    snapshotReply = "";
+    snapshotHeard = "";
+    lastIssueUrl = "";
+    detailsEl.value = "";
+    if (statusEl) statusEl.textContent = "";
+    if (githubBtn) githubBtn.hidden = true;
+  };
   openBtn.addEventListener("click", () => {
     dialogEl.hidden = !dialogEl.hidden;
     if (!dialogEl.hidden) {

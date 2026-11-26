@@ -37,6 +37,7 @@ export interface AiOutputReportInput {
   brainLabel: string;
   inferenceScope: string;
   extraSecrets?: readonly string[];
+  mcpEnvSecrets?: readonly string[];
 }
 
 export interface AiOutputReportRecord {
@@ -75,8 +76,13 @@ export function safeBrainLabel(raw: string): string {
   return trimmed;
 }
 
-function scrub(text: string, maxChars: number, extraSecrets?: readonly string[]): string {
-  const clean = redactSupportText(text, extraSecrets ?? []).text;
+function scrub(
+  text: string,
+  maxChars: number,
+  extraSecrets?: readonly string[],
+  mcpEnvSecrets?: readonly string[],
+): string {
+  const clean = redactSupportText(text, extraSecrets ?? [], mcpEnvSecrets ?? []).text;
   return clean.replace(/\s+/g, " ").trim().slice(0, maxChars);
 }
 
@@ -87,11 +93,11 @@ export function buildAiOutputReport(input: AiOutputReportInput): AiOutputReportR
     : "other";
   const replyExcerpt =
     input.includeExcerpt && input.replyExcerpt?.trim()
-      ? scrub(input.replyExcerpt, 1200, input.extraSecrets)
+      ? scrub(input.replyExcerpt, 1200, input.extraSecrets, input.mcpEnvSecrets)
       : null;
   const userPromptExcerpt =
     input.includeExcerpt && input.userPromptExcerpt?.trim()
-      ? scrub(input.userPromptExcerpt, 600, input.extraSecrets)
+      ? scrub(input.userPromptExcerpt, 600, input.extraSecrets, input.mcpEnvSecrets)
       : null;
 
   return {
@@ -100,11 +106,21 @@ export function buildAiOutputReport(input: AiOutputReportInput): AiOutputReportR
     privacyNotice:
       "Saved locally only by Astra Navi Desktop. Never transmitted unless you choose to file a report.",
     appVersion: input.appVersion,
-    brainLabel: scrub(safeBrainLabel(input.brainLabel || "Unknown"), 120, input.extraSecrets),
-    inferenceScope: scrub(input.inferenceScope || "local-gguf", 64, input.extraSecrets),
+    brainLabel: scrub(
+      safeBrainLabel(input.brainLabel || "Unknown"),
+      120,
+      input.extraSecrets,
+      input.mcpEnvSecrets,
+    ),
+    inferenceScope: scrub(
+      input.inferenceScope || "local-gguf",
+      64,
+      input.extraSecrets,
+      input.mcpEnvSecrets,
+    ),
     category,
     categoryLabel: AI_REPORT_CATEGORY_LABELS[category],
-    note: scrub(input.note || "", 1200, input.extraSecrets),
+    note: scrub(input.note || "", 1200, input.extraSecrets, input.mcpEnvSecrets),
     replyExcerpt,
     userPromptExcerpt,
   };

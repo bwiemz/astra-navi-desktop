@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { describeCron, nextCronTime, parseCron } from "./cron.ts";
 import { shown } from "./fleetRules.ts";
 import { withoutSecrets } from "./secrets.ts";
@@ -239,6 +240,7 @@ export function planMission(
   request: MissionRequest,
   machines: readonly MissionMachine[],
   now: Date,
+  userAddress?: string,
 ): { mission: DurableMission } | { problem: string } {
   const title = tidy(request.title, 100);
   if (title === "") return { problem: "Give the mission a short title." };
@@ -269,8 +271,12 @@ export function planMission(
       const called = machines.filter((entry) => entry.name.toLowerCase() === wanted);
       const machine = called[0];
       if (called.length > 1) {
+        const renameHint = replaceInternalCaptain(
+          "Captain has to give one of them another name in Settings first.",
+          userAddress,
+        );
         return {
-          problem: `Step ${index + 1}: ${called.length} machines are called "${tidy(planned.where, 60)}", so it is not clear which is meant. Captain has to give one of them another name in Settings first.`,
+          problem: `Step ${index + 1}: ${called.length} machines are called "${tidy(planned.where, 60)}", so it is not clear which is meant. ${renameHint}`,
         };
       }
       if (!machine) {
@@ -1572,7 +1578,7 @@ export function failedStep(mission: DurableMission): MissionStep | null {
  * work carries the end of what it printed, marked as that: text from a program, to be
  * reported and never followed.
  */
-export function describeMission(mission: DurableMission): string {
+export function describeMission(mission: DurableMission, userAddress?: string): string {
   const done = mission.steps.filter((step) => step.state === "done").length;
   const state: Record<MissionState, string> = {
     planned:
@@ -1581,7 +1587,7 @@ export function describeMission(mission: DurableMission): string {
         : mission.notBefore
           ? `waiting to begin (not before ${mission.notBefore})`
           : "waiting",
-    awaiting_approval: "waiting for Captain's yes or no",
+    awaiting_approval: replaceInternalCaptain("waiting for Captain's yes or no", userAddress),
     running: "running",
     blocked: "stopped",
     completed: "done",

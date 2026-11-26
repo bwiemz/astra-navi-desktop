@@ -896,11 +896,10 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       config.value.inference.apiKey,
       stationAccount()?.username,
       ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
-      ...config.value.mcp.servers.flatMap((s) => [
-        ...Object.values(s.headers ?? {}),
-        ...Object.values(s.env ?? {}),
-      ]),
     ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+    const mcpEnvSecrets = config.value.mcp.servers
+      .flatMap((s) => [...Object.values(s.headers ?? {}), ...Object.values(s.env ?? {})])
+      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 
     const enabledTier10Flags = Object.entries(config.value.tier10)
       .filter(([, enabled]) => enabled)
@@ -934,6 +933,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         enabledTier10Flags,
       },
       extraSecretLiterals: extraSecrets,
+      mcpEnvLiterals: mcpEnvSecrets,
     });
 
     const json = formatSupportBundleJson(bundle);

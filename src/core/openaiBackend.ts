@@ -669,10 +669,15 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     const falseRule =
       typeof criteria["false"] === "string" ? criteria["false"] : "Only talked, asked, or declined.";
 
+    // Preserve the full reply up to 12K chars so claims in the middle of long responses are never
+    // dropped; only extreme replies (>12K) are sampled across start, middle, and end.
     const replyExcerpt =
-      lastReply.length <= 4000
+      lastReply.length <= 12_000
         ? lastReply
-        : `${lastReply.slice(0, 1800)}\n...\n${lastReply.slice(-2000)}`;
+        : (() => {
+            const midStart = Math.max(4000, Math.floor((lastReply.length - 4000) / 2));
+            return `${lastReply.slice(0, 4000)}\n...\n${lastReply.slice(midStart, midStart + 4000)}\n...\n${lastReply.slice(-4000)}`;
+          })();
 
     const res = await this.fetchImpl(`${this.locality.apiBaseUrl}/chat/completions`, {
       method: "POST",
@@ -697,7 +702,7 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
           },
         ],
         temperature: 0,
-        max_tokens: 512,
+        max_tokens: 256,
         stream: false,
       }),
       signal: extra?.signal,

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 
 /**
  * Reaching the user's phone, through KDE Connect. The phone has to be paired with this
@@ -137,11 +138,14 @@ export async function listPhones(run: PhoneRunner = defaultRun): Promise<Phone[]
 export function pickPhone(
   phones: readonly Phone[],
   wanted: string | undefined,
+  userAddress?: string,
 ): { phone: Phone } | { problem: string } {
   if (phones.length === 0) {
     return {
-      problem:
+      problem: replaceInternalCaptain(
         "No phone is paired with this computer. Captain pairs one in KDE Connect (System Settings, KDE Connect) with the KDE Connect app on the phone.",
+        userAddress,
+      ),
     };
   }
   const names = (list: readonly Phone[]): string => list.map((phone) => phone.name).join(", ");

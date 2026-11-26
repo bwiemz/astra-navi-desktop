@@ -61,6 +61,7 @@ export interface DesktopIpcDeps {
     brainLabel: string;
     inferenceScope: string;
     extraSecrets?: readonly string[];
+    mcpEnvSecrets?: readonly string[];
   };
 }
 
@@ -250,6 +251,7 @@ export function registerDesktopIpc(deps: DesktopIpcDeps): void {
         brainLabel: ctx.brainLabel,
         inferenceScope: ctx.inferenceScope,
         extraSecrets: ctx.extraSecrets,
+        mcpEnvSecrets: ctx.mcpEnvSecrets,
       });
       const filePath = await saveAiOutputReport(ctx.reportsDir, report);
       const issueUrl = buildGithubReportIssueUrl(report);

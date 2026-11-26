@@ -7,14 +7,18 @@ import {
   formatCharacterGateReport,
 } from "../evals/characterGate.ts";
 import type { CaseResult, Report } from "../evals/types.ts";
-import { Brain } from "../src/core/brain.ts";
+import { Brain, withoutUnsavedResults } from "../src/core/brain.ts";
 import { headsUp } from "../src/core/agendaWatch.ts";
 import { describeRemembered } from "../src/core/archive.ts";
 import { compact } from "../src/core/compaction.ts";
 import { checkReply } from "../src/core/followThrough.ts";
 import { Learner } from "../src/core/learner.ts";
-import { Recall } from "../src/core/recall.ts";
+import { describeMission, planMission } from "../src/core/missionPlan.ts";
+import { pickPhone } from "../src/core/phone.ts";
+import { describeNotice as describeWatchNotice } from "../src/core/reach.ts";
+import { describeRecalled, Recall } from "../src/core/recall.ts";
 import { describeRoutine } from "../src/core/routines.ts";
+import { describeAgendaReading, selfCheck } from "../src/core/selfCheck.ts";
 import { afterWakeName } from "../src/core/wakeName.ts";
 import { ScreenWatch } from "../src/core/watch.ts";
 import type { ChatHistoryItem, ChatSessionModelFunctions } from "node-llama-cpp";
@@ -34,7 +38,7 @@ import type { LocalEngine } from "../src/core/engine.ts";
 import type { EnvironmentFacts } from "../src/core/environment.ts";
 import { Fleet } from "../src/core/fleet.ts";
 import { Initiative } from "../src/core/initiative.ts";
-import { adaptLegacyCaptainNote, MemoryStore } from "../src/core/memory.ts";
+import { MemoryStore } from "../src/core/memory.ts";
 import { forbidden } from "../src/core/operateRules.ts";
 import { buildSystemPrompt, EVERY_ABILITY, formLine } from "../src/core/persona.ts";
 import { buildResearchInstructions } from "../src/core/research.ts";
@@ -787,20 +791,181 @@ describe("Character Layer security: literal slot substitution & Brain integratio
     expect(deliveredText).toContain('The user is back from the game "Captain Toad"');
     expect(deliveredText).not.toContain("Captain is back");
 
-    // 5. Legacy "Captain..." memory notes adapt non-destructively in snapshot without touching "Captain America".
-    expect(adaptLegacyCaptainNote("Captain prefers dark mode", "Alex")).toBe("The user prefers dark mode");
-    expect(adaptLegacyCaptainNote("Captain's workstation runs Arch", "Alex")).toBe("The user's workstation runs Arch");
-    expect(adaptLegacyCaptainNote("Likes Captain America movies", "Alex")).toBe("Likes Captain America movies");
-
+    // 5. Saved memory notes stay verbatim (never mutating "Captain is our golden retriever"),
+    //    while the <memories> prompt header explains that older notes may call the user "Captain".
     const memDir = await makeTempDir("astra-mem-cap-");
     const memStore = new MemoryStore(join(memDir, "memory.json"));
+    await memStore.save({ kind: "fact", text: "Captain is our golden retriever" });
     await memStore.save({ kind: "preference", text: "Captain prefers green tea" });
-    await memStore.save({ kind: "fact", text: "Watches Captain America" });
     await memStore.learn("skill", "Restart Plex", ["Run systemctl restart plex"]);
     const snap = memStore.snapshot(6000, undefined, "Alex");
-    expect(snap).toContain("The user prefers green tea");
-    expect(snap).toContain("Watches Captain America");
+    expect(snap).toContain("Captain is our golden retriever");
+    expect(snap).toContain("Captain prefers green tea");
     expect(snap).toContain("What the user most often asks you to do:");
-    expect(snap).not.toContain("Captain prefers");
+
+    const customMemPrompt = buildSystemPrompt(testEnv, snap, "en", 1, EVERY_ABILITY, {
+      userAddress: "Alex",
+    });
+    expect(customMemPrompt).toContain('older notes may call the user "Captain"');
+    const defaultMemPrompt = buildSystemPrompt(testEnv, snap, "en", 1, EVERY_ABILITY);
+    expect(defaultMemPrompt).not.toContain('older notes may call');
+  });
+
+  it("handles Round 4 CJK 1-char wake safety, one-time legacy wake migration, and the remaining 6 Captain sites", async () => {
+    // 1. 1-char CJK alias "星" MUST NOT cut built-in "星航" or hijack ordinary words like "星期"!
+    expect(afterWakeName("星航，打开笔记", ["星"], "星")).toBe("打开笔记");
+    expect(afterWakeName("星期天去哪", ["星"], "星")).toBeNull();
+    expect(afterWakeName("星、天気は？", ["星"], "星")).toBe("天気は？");
+    expect(afterWakeName("星", ["星"], "星")).toBe("");
+
+    // 2. ConfigStore.load() performs a one-time wake-alias migration for existing multi-word custom
+    //    names ("Lyra Vance" -> adds "Lyra" once), skips stop-words ("The Navigator"), and respects user removal!
+    const dir = await makeTempDir("astra-wake-mig-");
+    const cfgPath = join(dir, "config.json");
+    await writeFile(
+      cfgPath,
+      JSON.stringify({
+        character: { displayName: "Lyra Vance", userAddress: "Alex", source: "custom" },
+        voice: { otherNames: [] },
+      }),
+      "utf8",
+    );
+    const store1 = new ConfigStore(cfgPath);
+    await store1.load();
+    expect(store1.value.voice.otherNames).toContain("Lyra");
+    expect(store1.value.character.wakeAliasMigrated).toBe(true);
+
+    // If the user explicitly removes "Lyra", a later reload must NOT re-add it!
+    await store1.update({ voice: { ...store1.value.voice, otherNames: [] } });
+    const store2 = new ConfigStore(cfgPath);
+    await store2.load();
+    expect(store2.value.voice.otherNames).toEqual([]);
+
+    // Stop-word leading name ("The Navigator") must NOT get "The" added.
+    const stopPath = join(dir, "stop-config.json");
+    await writeFile(
+      stopPath,
+      JSON.stringify({
+        character: { displayName: "The Navigator", userAddress: "Alex", source: "custom" },
+        voice: { otherNames: [] },
+      }),
+      "utf8",
+    );
+    const stopStore = new ConfigStore(stopPath);
+    await stopStore.load();
+    expect(stopStore.value.voice.otherNames).toEqual([]);
+
+    // 3. Remaining 6 Captain sites adapt static wording while keeping user/machine/app names intact!
+    const recalledText = describeRecalled(
+      [
+        {
+          memory: {
+            id: "s1",
+            kind: "skill",
+            text: "Walk Captain the retriever",
+            points: ["Bring leash"],
+            tags: [],
+            hits: 3,
+            createdAt: "2026-11-01T00:00:00Z",
+            updatedAt: "2026-11-01T00:00:00Z",
+          },
+          score: 0.9,
+        },
+      ],
+      "Alex",
+    );
+    expect(recalledText).toContain('done "Walk Captain the retriever" for the user 3 times');
+
+    const watchNotice = describeWatchNotice(
+      { app: "CaptainIDE", title: "CaptainIDE — Build", line: "Captain build failed" },
+      "Alex",
+    );
+    expect(watchNotice).toContain("Tell the user you saw it");
+    expect(watchNotice).toContain("Captain build failed");
+    expect(watchNotice).not.toContain("Tell Captain");
+
+    const phoneRes = pickPhone([], undefined, "Alex");
+    expect("problem" in phoneRes && phoneRes.problem).toContain("The user pairs one");
+    expect("problem" in phoneRes && phoneRes.problem).not.toContain("Captain");
+
+    const dupPlan = planMission(
+      { title: "Sync", steps: [{ title: "Run", command: "uptime", where: "Captain-NAS" }] },
+      [
+        { id: "m1", name: "Captain-NAS" },
+        { id: "m2", name: "Captain-NAS" },
+      ],
+      new Date(),
+      "Alex",
+    );
+    expect("problem" in dupPlan && dupPlan.problem).toContain('"Captain-NAS"');
+    expect("problem" in dupPlan && dupPlan.problem).toContain("The user has to give one of them");
+    expect("problem" in dupPlan && dupPlan.problem).not.toContain("Captain has to");
+
+    const planned = planMission(
+      { title: "Check", steps: [{ title: "Disk", command: "df -h", where: "here" }] },
+      [],
+      new Date(),
+      "Alex",
+    );
+    expect("mission" in planned).toBe(true);
+    if ("mission" in planned) {
+      const desc = describeMission({ ...planned.mission, state: "awaiting_approval" }, "Alex");
+      expect(desc).toContain("waiting for the user's yes or no");
+      expect(desc).not.toContain("Captain's");
+    }
+
+    const agendaLine = describeAgendaReading(
+      { calendars: 0, unread: null, headsUpMinutes: 10 },
+      "Alex",
+    );
+    expect(agendaLine.detail).toContain("Reading none of the user's calendars");
+    expect(agendaLine.detail).not.toContain("Captain");
+
+    const check = await selfCheck({
+      dataDir: dir,
+      modelsDir: dir,
+      brain: { label: "test", fileName: null, onDisk: true, loaded: true },
+      voice: { label: "test", ready: true },
+      listening: false,
+      handsOff: false,
+      notes: { total: 0, topics: 0, skills: 0 },
+      pastExchanges: 0,
+      waitingToWriteUp: 0,
+      actionsRecorded: 0,
+      searchEngine: null,
+      memoryInUse: null,
+      canReachTheWeb: async () => false,
+      reach: {
+        hands: null,
+        watching: true,
+        front: "CaptainToad.exe",
+        hearing: false,
+        station: { running: false, addresses: [], devices: 0 },
+      },
+      agenda: { calendars: 0, unread: null, headsUpMinutes: 0 },
+      userAddress: "Alex",
+    });
+    const watchLine = check.lines.find((l) => l.system === "Watch");
+    expect(watchLine?.detail).toContain("(The user is in CaptainToad.exe)");
+    expect(watchLine?.detail).not.toContain("Captain is in");
+
+    const strippedHistory = withoutUnsavedResults(
+      [
+        {
+          type: "model",
+          response: [
+            {
+              type: "functionCall",
+              name: "notifications",
+              params: {},
+              result: "Private notice",
+            },
+          ],
+        },
+      ],
+      "Alex",
+    );
+    expect(JSON.stringify(strippedHistory)).not.toContain("Captain");
+    expect(JSON.stringify(strippedHistory)).toContain("the user");
   });
 });
