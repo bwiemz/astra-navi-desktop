@@ -253,6 +253,10 @@ export interface VisionSidecarView {
   mmprojReady: boolean;
   mmprojFileName: string | null;
   mmprojSizeBytes: number | null;
+  /** True when currently using a legacy brain projector and a lighter dedicated vision pair is available. */
+  upgradeAvailable?: boolean;
+  upgradeLabel?: string | null;
+  upgradeBytes?: number | null;
   binaryFound: boolean;
   reason: string;
 }

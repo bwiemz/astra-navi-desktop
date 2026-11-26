@@ -313,8 +313,14 @@ export function createHandsTools(
             targetWindow: target,
             actualForeground: target,
             ownApps,
+            userAddress: host.userAddress?.(),
           });
-          if (!preflight.allowed) throw new Error(preflight.reason ?? forbidden(target, step.action, ownApps) ?? "Desktop action refused.");
+          if (!preflight.allowed)
+            throw new Error(
+              preflight.reason ??
+                forbidden(target, step.action, ownApps, host.userAddress?.()) ??
+                "Desktop action refused.",
+            );
           const where = { pid: target.pid, title: target.title };
           const control = { name: step.name, which: step.which };
 

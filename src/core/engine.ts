@@ -789,6 +789,16 @@ export class LocalEngine {
 
   /** Switches between built-in local GGUF and an optional OpenAI-compatible server without losing history. */
   async setInferenceBackend(inference: InferenceBackendConfig): Promise<void> {
+    const prev = this.options.inference;
+    const prevProvider = prev?.provider ?? "local";
+    const sameEffectiveBackend =
+      prevProvider === inference.provider &&
+      (inference.provider === "local" ||
+        (prev?.baseUrl === inference.baseUrl &&
+          prev?.model === inference.model &&
+          prev?.apiKey === inference.apiKey));
+    this.options = { ...this.options, inference };
+    if (sameEffectiveBackend) return;
     // Stop any running remote/local research workers immediately so switching back to local
     // never lets an existing remote job keep sending prompts or tool results off-machine.
     await this.stopSideWorks();
@@ -798,7 +808,6 @@ export class LocalEngine {
     this.remoteSession?.dispose();
     this.remoteSession = null;
     this.remoteStale = false;
-    this.options = { ...this.options, inference };
     if (inference.provider === "openai-compatible") {
       await this.unload();
       const loc = this.inferenceLocality();

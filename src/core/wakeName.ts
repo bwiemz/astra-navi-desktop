@@ -16,6 +16,26 @@ const NAME_FORMS: readonly RegExp[] = [
   /^\s*(?:嘿|喂|哎)?[，,\s]*(?:阿斯特拉|星航)(?:领航员)?[，。！？!?,.\s]*/i,
 ];
 
+const CJK_CHAR_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+const BUILTIN_DEFAULT_NAMES = new Set([
+  "astra",
+  "astra navi",
+  "astra-navi",
+  "astro navi",
+  "astro-navi",
+  "アストラ",
+  "アストラナビ",
+  "阿斯特拉",
+  "星航",
+]);
+
+/** True when a wake alias is long enough to match safely (≥2 chars, or ≥1 CJK character). */
+export function isValidWakeAlias(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (trimmed.length >= 2) return true;
+  return trimmed.length === 1 && CJK_CHAR_RE.test(trimmed);
+}
+
 /** Builds wake-name candidates from an active custom character name plus user-configured aliases. */
 export function wakeAliasesWithCharacter(
   otherNames: readonly string[] = [],
@@ -25,22 +45,21 @@ export function wakeAliasesWithCharacter(
   const out: string[] = [];
   const push = (raw: string | undefined): void => {
     const trimmed = (raw ?? "").trim();
-    if (trimmed.length < 2) return;
+    if (!isValidWakeAlias(trimmed)) return;
     const key = trimmed.toLowerCase();
+    // Skip duplicating built-in Astra/Astra Navi forms ahead of NAME_FORMS, which already match
+    // the longer "Astra Navi" form before bare "Astra".
+    if (BUILTIN_DEFAULT_NAMES.has(key)) return;
     if (seen.has(key)) return;
     seen.add(key);
     out.push(trimmed);
   };
-  const custom = (characterName ?? "").trim();
-  if (custom && custom.toLowerCase() !== "astra" && custom.toLowerCase() !== "astra navi") {
-    push(custom);
-    // Also recognize the first word of a multi-word character name (e.g. "Lyra Vance" -> "Lyra").
-    const firstWord = custom.split(/\s+/)[0];
-    if (firstWord && firstWord.length >= 2 && firstWord.toLowerCase() !== custom.toLowerCase()) {
-      push(firstWord);
-    }
-  }
+  // Never synthesize an automatic first-word alias (e.g. "The Navigator" -> "The" or
+  // "Hey Jude" -> "Hey"), which triggers on normal speech; users can add short aliases in otherNames.
+  push(characterName);
   for (const name of otherNames) push(name);
+  // Match longer/more specific aliases first so "Lyra Vance" takes precedence over "Lyra".
+  out.sort((a, b) => b.length - a.length);
   return out;
 }
 

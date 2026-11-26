@@ -425,6 +425,9 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
               ? st.modelLabel
               : (st?.mmprojDownload?.fileName ?? null),
           mmprojSizeBytes: st?.downloadTotalBytes ?? st?.mmprojDownload?.sizeBytes ?? null,
+          upgradeAvailable: st?.upgradeAvailable ?? false,
+          upgradeLabel: st?.upgradeLabel ?? null,
+          upgradeBytes: st?.upgradeBytes ?? null,
           binaryFound: st?.binaryPath !== null && st?.binaryPath !== undefined,
           reason: st?.reason ?? "Local vision sidecar status unavailable.",
         };
@@ -550,6 +553,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       if (!check.ok) throw new Error(check.reason);
     }
 
+    const prevInference = config.value.inference;
     const nextInference = patch.inference
       ? (() => {
           const nextBaseUrl =
@@ -576,6 +580,15 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       const checked = classifyInferenceEndpoint(nextInference.baseUrl);
       if (!checked.ok) throw new Error(checked.reason);
     }
+    // Only restart/switch the active inference backend (and cancel running research jobs) when the
+    // active provider or live OpenAI connection target actually changed—never on unrelated preset/URL edits while local.
+    const inferenceActuallyChanged =
+      nextInference !== undefined &&
+      (nextInference.provider !== prevInference.provider ||
+        (nextInference.provider === "openai-compatible" &&
+          (nextInference.baseUrl !== prevInference.baseUrl ||
+            nextInference.model !== prevInference.model ||
+            nextInference.apiKey !== prevInference.apiKey)));
 
     const leanWas = config.value.leanMemory;
     // Plain values first, in one write.
@@ -587,7 +600,11 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     if (patch.otherNames !== undefined) {
       voice.otherNames = patch.otherNames
         .map((name) => name.trim())
-        .filter((name) => name.length >= 2);
+        .filter(
+          (name) =>
+            name.length >= 2 ||
+            (name.length === 1 && /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(name)),
+        );
     }
     const sightChanged =
       patch.lookWithoutAsking !== undefined ||
@@ -789,7 +806,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     if (patch.character !== undefined) {
       deps.onCharacterChanged?.();
     }
-    if (patch.inference !== undefined) {
+    if (inferenceActuallyChanged) {
       await deps.onInferenceChanged?.();
     }
     if (

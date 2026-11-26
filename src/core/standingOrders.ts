@@ -209,12 +209,20 @@ export function makeOrder(
   request: OrderRequest,
   machines: readonly OrderMachine[],
   now: Date,
+  userAddress?: string,
 ): { order: StandingOrder } | { problem: string } {
   const title = withoutUnseen(request.title, { instead: " ", ownWriting: true })
     .replace(/[^\S ]/gu, " ")
     .trim()
     .replace(/\s+/g, " ");
-  if (title === "") return { problem: "Say in a few words what Captain wants to be told (title)." };
+  if (title === "") {
+    return {
+      problem: replaceInternalCaptain(
+        "Say in a few words what Captain wants to be told (title).",
+        userAddress,
+      ),
+    };
+  }
   const tellWhen = request.tellWhen.trim().toLowerCase();
   if (!TELL_WHEN.includes(tellWhen as TellWhen)) {
     return { problem: `tell_me_when must be one of: ${TELL_WHEN.join(", ")}.` };

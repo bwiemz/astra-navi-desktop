@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineChatSessionFunction } from "node-llama-cpp";
@@ -16,6 +16,7 @@ import {
   probeOpenAiModels,
   type InferenceBackendConfig,
 } from "../src/core/openaiBackend.ts";
+import { redactSupportText } from "../src/core/supportBundle.ts";
 
 const tempDirs: string[] = [];
 
@@ -654,5 +655,74 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
     expect(worker?.signal.aborted).toBe(true);
     expect(closedOnAbort).toBe(true);
     await engine.dispose();
+  });
+
+  it("avoids over-redacting common words/substrings, preserves running research on unrelated inference edits, snapshots AI report at open time, and checks real Python voice deps on Windows", async () => {
+    // 1. Over-redaction tuning: common words ("info", "true", "debug"), ports ("11434"),
+    //    and short values (<6 chars) must NOT mangle prose; real secrets ARE redacted cleanly.
+    const sample =
+      "More information available (debug=true on localhost:11434); myalpha99x stays, standalone alpha99 and token super-secret-key-98765 go.";
+    const scrubbed = redactSupportText(sample, [
+      "info",
+      "true",
+      "debug",
+      "localhost",
+      "11434",
+      "alpha99",
+      "super-secret-key-98765",
+    ]);
+    expect(scrubbed.text).toContain("More information available");
+    expect(scrubbed.text).toContain("debug=true");
+    expect(scrubbed.text).toContain("localhost:11434");
+    expect(scrubbed.text).toContain("myalpha99x");
+    expect(scrubbed.text).not.toContain(" alpha99 ");
+    expect(scrubbed.text).not.toContain("super-secret-key-98765");
+
+    // 2. Unrelated inference edits while provider stays unchanged must NOT cancel running research workers!
+    const modelsDir = await makeTempDir("astra-oai-noop-");
+    const mockFetch = (async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const engine = new LocalEngine({
+      modelsDir,
+      choice: "standard",
+      contextSize: 8192,
+      idleUnloadMs: 0,
+      inference: {
+        provider: "openai-compatible",
+        preset: "ollama",
+        baseUrl: "http://gpu-box:11434/v1",
+        model: "qwen3.5:9b",
+        apiKey: "",
+      },
+      fetchImpl: mockFetch,
+      onStatus: () => undefined,
+    });
+    const worker = await engine.openWorker("Research assistant");
+    expect(worker).not.toBeNull();
+    // Changing only `preset` while provider/baseUrl/model/apiKey stay identical must NOT abort!
+    await engine.setInferenceBackend({
+      provider: "openai-compatible",
+      preset: "lm-studio",
+      baseUrl: "http://gpu-box:11434/v1",
+      model: "qwen3.5:9b",
+      apiKey: "",
+    });
+    expect(worker?.signal.aborted).toBe(false);
+    await worker?.close();
+    await engine.dispose();
+
+    // 3. Report dialog snapshots #reply & #heard at dialog OPEN time (not save time).
+    const rendererMain = await readFile(join(process.cwd(), "src/renderer/src/main.ts"), "utf8");
+    const dialogFn = rendererMain.slice(rendererMain.indexOf("function wireAiReportDialog()"));
+    expect(dialogFn).toContain("snapshotReply = document.getElementById(\"reply\")");
+    expect(dialogFn).toContain("replyExcerpt: snapshotReply");
+
+    // 4. Windows clean-install verification checks actual voice-server/server.py imports (numpy, torch, qwen_tts).
+    const winScript = await readFile(join(process.cwd(), "scripts/verify-clean-windows.ps1"), "utf8");
+    expect(winScript).toContain("import numpy, torch, qwen_tts");
+    expect(winScript).not.toContain("import fastapi, uvicorn");
   });
 });

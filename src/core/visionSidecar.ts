@@ -57,6 +57,10 @@ export interface VisionSidecarStatus {
   mmprojDownload: BrainMmprojAsset | null;
   /** Combined download bytes needed when using the dedicated small vision model + projector. */
   downloadTotalBytes: number | null;
+  /** True when currently running on a legacy brain projector and a lighter dedicated vision pair is available. */
+  upgradeAvailable: boolean;
+  upgradeLabel: string | null;
+  upgradeBytes: number | null;
   running: boolean;
   backoffActive: boolean;
   lastError: string | null;
@@ -98,12 +102,19 @@ export interface LlamaVisionSidecarOptions {
 }
 
 const MAX_STDERR_TAIL_CHARS = 4096;
-/** Compact overhead margin for a dedicated 0.8B/2B vision sidecar with 2048-token context. */
-const DEDICATED_VISION_VRAM_HEADROOM_BYTES = Math.round(0.45 * 1024 ** 3);
+/** Compact overhead margin for a dedicated 0.8B/2B vision sidecar with 4096-token context. */
+const DEDICATED_VISION_VRAM_HEADROOM_BYTES = Math.round(0.55 * 1024 ** 3);
 const BRAIN_COPY_VRAM_HEADROOM_BYTES = Math.round(1.5 * 1024 ** 3);
 const DEFAULT_FAILURE_BACKOFF_BASE_MS = 15_000;
 const DEFAULT_FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
 const DEFAULT_KILL_TIMEOUT_MS = 2_000;
+
+class SidecarDisposedError extends Error {
+  constructor() {
+    super("Vision sidecar disposed.");
+    this.name = "SidecarDisposedError";
+  }
+}
 
 function hasUnsafeBinaryChars(cmd: string): boolean {
   for (let i = 0; i < cmd.length; i += 1) {
@@ -283,8 +294,9 @@ export class LlamaVisionSidecar implements VisionDescriber {
   private runningApiKey: string | null = null;
   private runningKey: string | null = null;
   private starting: Promise<{ baseUrl: string; apiKey: string | null } | null> | null = null;
+  private bootAbort: AbortController | null = null;
+  private disposeGeneration = 0;
   private idleTimer: NodeJS.Timeout | null = null;
-  private stderrTail = "";
   private consecutiveFailures = 0;
   private backoffUntilMs = 0;
   private lastError: string | null = null;
@@ -319,6 +331,10 @@ export class LlamaVisionSidecar implements VisionDescriber {
       this.opts.totalVramBytes?.() ?? null,
     );
     const backoffActive = Date.now() < this.backoffUntilMs;
+    const upgrade = pair.recommendedUpgrade;
+    const upgradeAvailable = upgrade !== null && upgrade.missingBytes > 0;
+    const upgradeLabel = upgradeAvailable ? upgrade.label : null;
+    const upgradeBytes = upgradeAvailable ? upgrade.missingBytes : null;
     const downloadTotalBytes =
       pair.source === "dedicated"
         ? (pair.modelReady ? 0 : (pair.modelDownload?.sizeBytes ?? 0)) +
@@ -345,6 +361,9 @@ export class LlamaVisionSidecar implements VisionDescriber {
           mmprojReady: pair.mmprojReady,
           mmprojDownload: pair.mmprojDownload,
           downloadTotalBytes,
+          upgradeAvailable: false,
+          upgradeLabel: null,
+          upgradeBytes: null,
           running: false,
           backoffActive,
           lastError: this.lastError,
@@ -365,6 +384,9 @@ export class LlamaVisionSidecar implements VisionDescriber {
         mmprojReady: pair.mmprojReady,
         mmprojDownload: pair.mmprojDownload,
         downloadTotalBytes,
+        upgradeAvailable: false,
+        upgradeLabel: null,
+        upgradeBytes: null,
         running: true,
         backoffActive,
         lastError: this.lastError,
@@ -379,7 +401,9 @@ export class LlamaVisionSidecar implements VisionDescriber {
     let reason =
       pair.source === "dedicated"
         ? `Ready (${pair.modelLabel}; starts on demand alongside your brain).`
-        : "Ready (starts on demand when she looks at the screen).";
+        : upgradeAvailable && upgradeLabel
+          ? `Ready (using brain projector; switch to ${upgradeLabel} for faster low-VRAM screen inspection).`
+          : "Ready (starts on demand when she looks at the screen).";
     if (!enabled) reason = "Switched off in Settings (using Florence-2 + OCR).";
     else if (!binaryPath) reason = "llama-server not found on PATH (falling back to Florence-2 + OCR).";
     else if (!pair.ready || !pair.mmprojPath) {
@@ -409,6 +433,9 @@ export class LlamaVisionSidecar implements VisionDescriber {
       mmprojReady: pair.mmprojReady,
       mmprojDownload: pair.mmprojDownload,
       downloadTotalBytes: downloadTotalBytes && downloadTotalBytes > 0 ? downloadTotalBytes : null,
+      upgradeAvailable,
+      upgradeLabel,
+      upgradeBytes,
       running: this.child !== null && this.runningBaseUrl !== null,
       backoffActive,
       lastError: this.lastError,
@@ -416,7 +443,7 @@ export class LlamaVisionSidecar implements VisionDescriber {
     };
   }
 
-  /** Downloads the lightweight dedicated vision model + `mmproj` (or brain `mmproj`) into `modelsDir`. */
+  /** Downloads the lightweight dedicated vision model + `mmproj` (or migrates from a legacy brain projector). */
   async ensureMmprojDownloaded(
     onProgress?: (progress: { received: number; total: number }) => void,
     signal?: AbortSignal,
@@ -426,6 +453,48 @@ export class LlamaVisionSidecar implements VisionDescriber {
       this.opts.modelsDir,
       this.opts.totalVramBytes?.() ?? null,
     );
+    // If the user is currently on a legacy brain projector, clicking Download migrates them
+    // cleanly to the dedicated compact vision pair.
+    if (pair.source === "brain" && pair.recommendedUpgrade) {
+      const up = pair.recommendedUpgrade;
+      const needModel = !up.modelReady;
+      const needMmproj = !up.mmprojReady;
+      const modelTotal = needModel ? up.modelDownload.sizeBytes : 0;
+      const mmprojTotal = needMmproj ? up.mmprojDownload.sizeBytes : 0;
+      const combinedTotal = modelTotal + mmprojTotal;
+
+      if (needModel) {
+        await mkdir(dirname(up.modelPath), { recursive: true });
+        await downloadModelResumable({
+          url: up.modelDownload.url,
+          destPath: up.modelPath,
+          expectedSizeBytes: up.modelDownload.sizeBytes,
+          signal,
+          onProgress: onProgress
+            ? (p) => onProgress({ received: p.received, total: combinedTotal || p.total })
+            : undefined,
+        });
+      }
+      if (needMmproj) {
+        await mkdir(dirname(up.mmprojPath), { recursive: true });
+        await downloadModelResumable({
+          url: up.mmprojDownload.url,
+          destPath: up.mmprojPath,
+          expectedSizeBytes: up.mmprojDownload.sizeBytes,
+          signal,
+          onProgress: onProgress
+            ? (p) =>
+                onProgress({
+                  received: modelTotal + p.received,
+                  total: combinedTotal || p.total,
+                })
+            : undefined,
+        });
+      }
+      await this.dispose();
+      this.resetBackoff();
+      return { ok: true, path: up.mmprojPath };
+    }
     if (pair.ready && pair.mmprojPath) {
       this.resetBackoff();
       return { ok: true, path: pair.mmprojPath };
@@ -515,18 +584,23 @@ export class LlamaVisionSidecar implements VisionDescriber {
     baseUrl: string,
     apiKey: string | null,
     getSpawnError: () => Error | null,
+    getStderrTail: () => string,
+    isActiveChild: () => boolean,
+    isDisposed: () => boolean,
     signal?: AbortSignal,
   ): Promise<void> {
     const deadline = Date.now() + (this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
     const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
     while (Date.now() < deadline) {
+      if (isDisposed()) throw new SidecarDisposedError();
       if (signal?.aborted) throw new Error("Vision sidecar startup aborted.");
       const spawnErr = getSpawnError();
       if (spawnErr) {
         throw new Error(`Failed to spawn llama-server: ${spawnErr.message}`);
       }
-      if (!this.child) {
-        const tail = sanitizeVisionOutput(this.stderrTail).slice(-300);
+      if (!isActiveChild()) {
+        if (isDisposed()) throw new SidecarDisposedError();
+        const tail = sanitizeVisionOutput(getStderrTail()).slice(-300);
         throw new Error(
           `llama-server exited before becoming ready.${tail ? ` (${tail})` : ""}`,
         );
@@ -536,13 +610,57 @@ export class LlamaVisionSidecar implements VisionDescriber {
           headers,
           signal: AbortSignal.timeout(1500),
         });
-        if (res.ok) return;
-      } catch {
+        if (res.ok) {
+          if (isDisposed()) throw new SidecarDisposedError();
+          return;
+        }
+      } catch (err) {
+        if (err instanceof SidecarDisposedError) throw err;
         // Still booting.
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
+    if (isDisposed()) throw new SidecarDisposedError();
     throw new Error("Timed out waiting for local llama-server vision sidecar.");
+  }
+
+  private terminateChild(child: ChildProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+    const killTimeoutMs = Math.max(100, this.opts.killTimeoutMs ?? DEFAULT_KILL_TIMEOUT_MS);
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(escalateTimer);
+        clearTimeout(hardTimer);
+        child.off("exit", done);
+        child.off("close", done);
+        resolve();
+      };
+      child.once("exit", done);
+      child.once("close", done);
+
+      const escalateTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            done();
+          }
+        }
+      }, killTimeoutMs);
+      escalateTimer.unref?.();
+
+      const hardTimer = setTimeout(done, killTimeoutMs + 1000);
+      hardTimer.unref?.();
+
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        done();
+      }
+    });
   }
 
   private async ensureReady(
@@ -578,69 +696,120 @@ export class LlamaVisionSidecar implements VisionDescriber {
 
     const boot = (async (): Promise<{ baseUrl: string; apiKey: string | null } | null> => {
       if (this.child) await this.dispose();
-      await this.opts.beforeSpawn?.().catch(() => undefined);
-      const gpuLayers = await this.chooseGpuLayers(st.modelPath, mmprojPath, st.modelSource);
-      const key = `${binaryPath}\0${st.modelPath}\0${mmprojPath}\0${gpuLayers}`;
-      const port = await allocateLoopbackPort();
-      const apiKey = randomBytes(24).toString("hex");
-      const baseUrl = `http://127.0.0.1:${port}`;
-      const args = [
-        "--model",
-        st.modelPath,
-        "--mmproj",
-        mmprojPath,
-        "--host",
-        "127.0.0.1",
-        "--port",
-        String(port),
-        "--api-key",
-        apiKey,
-        "--ctx-size",
-        st.modelSource === "dedicated" ? "2048" : "4096",
-        "-ngl",
-        gpuLayers,
-      ];
-      this.stderrTail = "";
-      let spawnError: Error | null = null;
-      const child = spawn(binaryPath, args, {
-        stdio: ["ignore", "ignore", "pipe"],
-        shell: false,
-        windowsHide: true,
-      });
-      this.child = child;
-      this.runningBaseUrl = baseUrl;
-      this.runningApiKey = apiKey;
-      this.runningKey = key;
-      // Continuously drain stderr into a bounded tail buffer so llama-server never stalls on a full OS pipe.
-      child.stderr?.setEncoding("utf8");
-      child.stderr?.on("data", (chunk: string) => {
-        this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_TAIL_CHARS);
-      });
-      // Always catch spawn errors (e.g. ENOENT / EACCES) so a bad binary path never crashes Electron.
-      child.on("error", (err: Error) => {
-        spawnError = err;
-        if (this.child === child) {
-          this.child = null;
-          this.runningBaseUrl = null;
-          this.runningApiKey = null;
-          this.runningKey = null;
-        }
-      });
-      child.once("exit", () => {
-        if (this.child === child) {
-          this.child = null;
-          this.runningBaseUrl = null;
-          this.runningApiKey = null;
-          this.runningKey = null;
-        }
-      });
+      const gen = this.disposeGeneration;
+      const bootAbort = new AbortController();
+      this.bootAbort = bootAbort;
+      const isDisposed = (): boolean => this.disposeGeneration !== gen || bootAbort.signal.aborted;
+      const effectiveSignal = signal
+        ? AbortSignal.any([signal, bootAbort.signal])
+        : bootAbort.signal;
+
       try {
-        await this.waitForHealth(baseUrl, apiKey, () => spawnError, signal);
-        this.scheduleIdleUnload();
-        return { baseUrl, apiKey };
-      } catch (err) {
-        await this.dispose();
-        throw err;
+        await this.opts.beforeSpawn?.().catch(() => undefined);
+        if (isDisposed() || signal?.aborted) return null;
+
+        const gpuLayers = await this.chooseGpuLayers(st.modelPath, mmprojPath, st.modelSource);
+        if (isDisposed() || signal?.aborted) return null;
+
+        const key = `${binaryPath}\0${st.modelPath}\0${mmprojPath}\0${gpuLayers}`;
+        const port = await allocateLoopbackPort();
+        if (isDisposed() || signal?.aborted) return null;
+
+        const apiKey = randomBytes(24).toString("hex");
+        const baseUrl = `http://127.0.0.1:${port}`;
+        const args = [
+          "--model",
+          st.modelPath,
+          "--mmproj",
+          mmprojPath,
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(port),
+          "--api-key",
+          apiKey,
+          "--ctx-size",
+          "4096",
+          "-ngl",
+          gpuLayers,
+          ...(gpuLayers === "0" ? ["--no-mmproj-offload"] : []),
+        ];
+        // Per-spawn local stderr tail so concurrent/restarted processes never clobber each other's diagnostics.
+        let stderrTail = "";
+        let spawnError: Error | null = null;
+        const child = spawn(binaryPath, args, {
+          stdio: ["ignore", "ignore", "pipe"],
+          shell: false,
+          windowsHide: true,
+        });
+        if (isDisposed() || signal?.aborted) {
+          await this.terminateChild(child);
+          return null;
+        }
+        this.child = child;
+        this.runningBaseUrl = baseUrl;
+        this.runningApiKey = apiKey;
+        this.runningKey = key;
+        // Continuously drain stderr into a bounded per-process tail buffer so llama-server never stalls on a full OS pipe.
+        child.stderr?.setEncoding("utf8");
+        child.stderr?.on("data", (chunk: string) => {
+          stderrTail = (stderrTail + chunk).slice(-MAX_STDERR_TAIL_CHARS);
+        });
+        // Always catch spawn errors (e.g. ENOENT / EACCES) so a bad binary path never crashes Electron.
+        child.on("error", (err: Error) => {
+          spawnError = err;
+          if (this.child === child) {
+            this.child = null;
+            this.runningBaseUrl = null;
+            this.runningApiKey = null;
+            this.runningKey = null;
+          }
+        });
+        child.once("exit", () => {
+          if (this.child === child) {
+            this.child = null;
+            this.runningBaseUrl = null;
+            this.runningApiKey = null;
+            this.runningKey = null;
+          }
+        });
+        try {
+          await this.waitForHealth(
+            baseUrl,
+            apiKey,
+            () => spawnError,
+            () => stderrTail,
+            () => this.child === child,
+            isDisposed,
+            effectiveSignal,
+          );
+          if (isDisposed()) {
+            if (this.child === child) {
+              this.child = null;
+              this.runningBaseUrl = null;
+              this.runningApiKey = null;
+              this.runningKey = null;
+            }
+            await this.terminateChild(child);
+            return null;
+          }
+          this.scheduleIdleUnload();
+          return { baseUrl, apiKey };
+        } catch (err) {
+          if (this.child === child) {
+            this.child = null;
+            this.runningBaseUrl = null;
+            this.runningApiKey = null;
+            this.runningKey = null;
+          }
+          await this.terminateChild(child);
+          if (err instanceof SidecarDisposedError || isDisposed()) {
+            return null;
+          }
+          throw err;
+        }
+      } finally {
+        if (this.bootAbort === bootAbort) this.bootAbort = null;
       }
     })();
 
@@ -658,6 +827,7 @@ export class LlamaVisionSidecar implements VisionDescriber {
       return null;
     }
 
+    const genAtStart = this.disposeGeneration;
     try {
       const conn = await this.ensureReady(options.signal);
       if (!conn) return null;
@@ -713,6 +883,10 @@ export class LlamaVisionSidecar implements VisionDescriber {
       const cleaned = sanitizeVisionOutput(text);
       return cleaned.length > 0 ? cleaned : null;
     } catch (err) {
+      // Deliberate shutdown (`dispose()`) or caller-initiated abort must NEVER count as a backoff failure.
+      if (this.disposeGeneration !== genAtStart || err instanceof SidecarDisposedError) {
+        return null;
+      }
       if (!options.signal?.aborted) {
         this.recordFailure(err);
       }
@@ -721,52 +895,19 @@ export class LlamaVisionSidecar implements VisionDescriber {
   }
 
   async dispose(): Promise<void> {
+    this.disposeGeneration += 1;
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
       this.idleTimer = null;
     }
+    this.bootAbort?.abort();
     const child = this.child;
     this.child = null;
     this.runningBaseUrl = null;
     this.runningApiKey = null;
     this.runningKey = null;
-    if (!child) return;
-    if (child.exitCode !== null || child.signalCode !== null) return;
-
-    const killTimeoutMs = Math.max(100, this.opts.killTimeoutMs ?? DEFAULT_KILL_TIMEOUT_MS);
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      const done = (): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(escalateTimer);
-        clearTimeout(hardTimer);
-        child.off("exit", done);
-        child.off("close", done);
-        resolve();
-      };
-      child.once("exit", done);
-      child.once("close", done);
-
-      const escalateTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            done();
-          }
-        }
-      }, killTimeoutMs);
-      escalateTimer.unref?.();
-
-      const hardTimer = setTimeout(done, killTimeoutMs + 1000);
-      hardTimer.unref?.();
-
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        done();
-      }
-    });
+    if (child) {
+      await this.terminateChild(child);
+    }
   }
 }

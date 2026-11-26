@@ -91,7 +91,7 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     label: "Small (Qwen3.5 4B)",
     fileName: "Qwen3.5-4B-Q4_K_M.gguf",
     url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
-    sizeBytes: 2_740_000_000,
+    sizeBytes: 2_740_937_888,
     vramGb: 4,
     architecture: "dense",
     quantization: "Q4_K_M",
@@ -109,7 +109,7 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     label: "Standard (Qwen3.5 9B)",
     fileName: "Qwen3.5-9B-Q4_K_M.gguf",
     url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf",
-    sizeBytes: 5_680_000_000,
+    sizeBytes: 5_680_522_464,
     vramGb: 7,
     architecture: "dense",
     quantization: "Q4_K_M",
@@ -127,7 +127,7 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     label: "Large (Qwen3.8 27B)",
     fileName: "Qwen3.8-27B-UD-Q4_K_M.gguf",
     url: "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_M.gguf",
-    sizeBytes: 16_560_000_000,
+    sizeBytes: 16_564_259_744,
     vramGb: 19,
     architecture: "dense",
     quantization: "Q4_K_M",
@@ -433,11 +433,11 @@ export const VISION_SIDECAR_MODELS: Record<"compact" | "standard", DedicatedVisi
     modelFileName: "Qwen3.5-0.8B-Q4_K_M.gguf",
     modelUrl:
       "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
-    modelSizeBytes: 533_000_000,
+    modelSizeBytes: 532_517_120,
     mmproj: {
       fileName: "Qwen3.5-0.8B-mmproj-F16.gguf",
       url: "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-F16.gguf",
-      sizeBytes: 620_000_000,
+      sizeBytes: 204_987_232,
     },
     vramGb: 1.5,
   },
@@ -447,11 +447,11 @@ export const VISION_SIDECAR_MODELS: Record<"compact" | "standard", DedicatedVisi
     modelFileName: "Qwen3.5-2B-Q4_K_M.gguf",
     modelUrl:
       "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
-    modelSizeBytes: 1_280_000_000,
+    modelSizeBytes: 1_280_835_840,
     mmproj: {
       fileName: "Qwen3.5-2B-mmproj-F16.gguf",
       url: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-F16.gguf",
-      sizeBytes: 650_000_000,
+      sizeBytes: 668_227_264,
     },
     vramGb: 2.3,
   },
@@ -461,6 +461,17 @@ export function pickDedicatedVisionModel(totalVramBytes: number | null): Dedicat
   const vramGb = (totalVramBytes ?? 0) / 1024 ** 3;
   // On 10+ GB cards, Qwen3.5-2B sits comfortably beside a loaded 9B brain; on 8 GB or unknown, use 0.8B.
   return vramGb >= 10 ? VISION_SIDECAR_MODELS.standard : VISION_SIDECAR_MODELS.compact;
+}
+
+export interface DedicatedVisionUpgrade {
+  label: string;
+  modelPath: string;
+  modelDownload: { fileName: string; url: string; sizeBytes: number };
+  modelReady: boolean;
+  mmprojPath: string;
+  mmprojDownload: BrainMmprojAsset;
+  mmprojReady: boolean;
+  missingBytes: number;
 }
 
 export interface ResolvedVisionSidecarPair {
@@ -473,6 +484,29 @@ export interface ResolvedVisionSidecarPair {
   mmprojDownload: BrainMmprojAsset | null;
   mmprojReady: boolean;
   ready: boolean;
+  /** Present when running on a legacy brain projector so Settings can offer one-click switch to the compact dedicated vision model. */
+  recommendedUpgrade: DedicatedVisionUpgrade | null;
+}
+
+/**
+ * Extracts a normalized model-family + parameter-size identity stem from a `.gguf` filename
+ * so sibling `mmproj` pairing matches the exact model (e.g. `Qwen3.5-4B-Q4_K_M.gguf` <->
+ * `Qwen3.5-4B-mmproj-F16.gguf`, `custom-vl.gguf` <-> `custom-mmproj-f16.gguf`) without falsely
+ * pairing `Qwen3-14B.gguf` with `Qwen3.5-4B-mmproj-F16.gguf`.
+ */
+export function extractModelIdentityStem(fileName: string): string {
+  let stem = basename(fileName).replace(/\.gguf$/i, "").toLowerCase();
+  // Support projector-first naming such as `mmproj-my-model-f16.gguf`.
+  stem = stem.replace(/^mmproj[-_]/, "");
+  // Iteratively strip trailing mmproj, quantization, precision, and chat/vl suffixes.
+  const trailingRe =
+    /(?:[-_.]mmproj(?:[-_.][a-z0-9_]+)?|[-_.](?:ud[-_.])?(?:i?q[0-9](?:_[a-z0-9]+)*|bf16|fp16|f16|f32|fp8|mxfp4|instruct|chat|base|vl|vision|gguf))$/;
+  let prev = "";
+  while (stem !== prev) {
+    prev = stem;
+    stem = stem.replace(trailingRe, "");
+  }
+  return stem;
 }
 
 /**
@@ -506,29 +540,29 @@ export function resolveVisionMmproj(
       downloaded: false,
     };
   }
-  // Custom GGUF path: only pair a sibling `*mmproj*.gguf` whose stem matches the custom GGUF's
-  // prefix, OR a lone generic `mmproj*.gguf` inside a dedicated single-model directory.
-  // Never blindly fall back to an unrelated projector (e.g. a text-only model next to Qwen 4B mmproj).
+  // Custom GGUF path: only pair a sibling `*mmproj*.gguf` whose normalized model identity stem
+  // matches the custom GGUF exactly, OR a lone generic `mmproj*.gguf` inside a dedicated
+  // single-model directory. Never pair across different model versions or sizes (e.g. Qwen3-14B
+  // next to Qwen3.5-4B-mmproj-F16.gguf).
   const folder = dirname(resolved.path);
   try {
     if (existsSync(folder)) {
       const allGguf = readdirSync(folder).filter((name) => name.toLowerCase().endsWith(".gguf"));
       const entries = allGguf.filter((name) => /mmproj/i.test(name));
       const nonMmproj = allGguf.filter((name) => !/mmproj/i.test(name));
-      const baseStem = basename(resolved.path, ".gguf").toLowerCase();
-      const prefix = baseStem.split(/[-_.]/)[0] ?? "";
-      const prefixMatch =
-        prefix.length >= 3
-          ? entries.find((name) => name.toLowerCase().startsWith(prefix))
+      const baseIdentity = extractModelIdentityStem(resolved.path);
+      const exactIdentityMatch =
+        baseIdentity.length >= 3
+          ? entries.find((name) => extractModelIdentityStem(name) === baseIdentity)
           : undefined;
       const dedicatedGenericMatch =
-        !prefixMatch &&
+        !exactIdentityMatch &&
         nonMmproj.length === 1 &&
         entries.length === 1 &&
         /^mmproj/i.test(entries[0] ?? "")
           ? entries[0]
           : undefined;
-      const sibling = prefixMatch ?? dedicatedGenericMatch;
+      const sibling = exactIdentityMatch ?? dedicatedGenericMatch;
       if (sibling) {
         return {
           modelLabel: resolved.label,
@@ -555,7 +589,8 @@ export function resolveVisionMmproj(
  * Resolves the model + `mmproj` pair for the local `llama-server` vision sidecar:
  * 1) Prefers an installed dedicated small vision model (`Qwen3.5-2B` / `0.8B`) so mid-turn
  *    `look_at_screen` stays fast on GPU while the main brain remains loaded.
- * 2) Falls back to the active brain + its matching `mmproj` if both are already on disk.
+ * 2) Falls back to the active brain + its matching `mmproj` if both are already on disk,
+ *    while exposing `recommendedUpgrade` so Settings offers one-click migration to the compact pair.
  * 3) Otherwise recommends downloading the dedicated small vision model pair for this GPU.
  */
 export function resolveVisionSidecarPair(
@@ -563,8 +598,9 @@ export function resolveVisionSidecarPair(
   modelsDir: string,
   totalVramBytes: number | null,
 ): ResolvedVisionSidecarPair {
+  const rec = pickDedicatedVisionModel(totalVramBytes);
   const dedicatedOrder: readonly DedicatedVisionModel[] = [
-    pickDedicatedVisionModel(totalVramBytes),
+    rec,
     VISION_SIDECAR_MODELS.standard,
     VISION_SIDECAR_MODELS.compact,
   ];
@@ -589,13 +625,22 @@ export function resolveVisionSidecarPair(
         mmprojDownload: cand.mmproj,
         mmprojReady: true,
         ready: true,
+        recommendedUpgrade: null,
       };
     }
   }
 
-  // Backwards compatibility: if the active brain GGUF and its matching mmproj are both already on disk, use them.
+  const recModelPath = join(modelsDir, rec.modelFileName);
+  const recMmprojPath = join(modelsDir, rec.mmproj.fileName);
+  const recModelReady = existsSync(recModelPath);
+  const recMmprojReady = existsSync(recMmprojPath);
+
+  // Backwards compatibility: if the active brain GGUF and its matching mmproj are both already on disk,
+  // keep working immediately while offering a one-click upgrade to the dedicated compact vision model.
   const brainMm = resolveVisionMmproj(choice, modelsDir, totalVramBytes);
   if (brainMm.downloaded && brainMm.mmprojPath && existsSync(brainMm.modelPath)) {
+    const missingBytes =
+      (recModelReady ? 0 : rec.modelSizeBytes) + (recMmprojReady ? 0 : rec.mmproj.sizeBytes);
     return {
       source: "brain",
       modelLabel: brainMm.modelLabel,
@@ -606,30 +651,72 @@ export function resolveVisionSidecarPair(
       mmprojDownload: brainMm.download,
       mmprojReady: true,
       ready: true,
+      recommendedUpgrade: {
+        label: rec.label,
+        modelPath: recModelPath,
+        modelDownload: {
+          fileName: rec.modelFileName,
+          url: rec.modelUrl,
+          sizeBytes: rec.modelSizeBytes,
+        },
+        modelReady: recModelReady,
+        mmprojPath: recMmprojPath,
+        mmprojDownload: rec.mmproj,
+        mmprojReady: recMmprojReady,
+        missingBytes,
+      },
     };
   }
 
   // Otherwise recommend the dedicated lightweight vision model pair for download.
-  const rec = pickDedicatedVisionModel(totalVramBytes);
-  const modelPath = join(modelsDir, rec.modelFileName);
-  const mmprojPath = join(modelsDir, rec.mmproj.fileName);
-  const modelReady = existsSync(modelPath);
-  const mmprojReady = existsSync(mmprojPath);
   return {
     source: "dedicated",
     modelLabel: rec.label,
-    modelPath,
+    modelPath: recModelPath,
     modelDownload: {
       fileName: rec.modelFileName,
       url: rec.modelUrl,
       sizeBytes: rec.modelSizeBytes,
     },
-    modelReady,
-    mmprojPath,
+    modelReady: recModelReady,
+    mmprojPath: recMmprojPath,
     mmprojDownload: rec.mmproj,
-    mmprojReady,
-    ready: modelReady && mmprojReady,
+    mmprojReady: recMmprojReady,
+    ready: recModelReady && recMmprojReady,
+    recommendedUpgrade: null,
   };
+}
+
+export interface CatalogDownloadAsset {
+  label: string;
+  fileName: string;
+  url: string;
+  sizeBytes: number;
+}
+
+/** Enumerates every unique downloadable GGUF & mmproj asset declared in the model catalog. */
+export function listCatalogDownloadAssets(): CatalogDownloadAsset[] {
+  const byUrl = new Map<string, CatalogDownloadAsset>();
+  const add = (label: string, fileName: string, url: string, sizeBytes: number): void => {
+    if (!byUrl.has(url)) {
+      byUrl.set(url, { label, fileName, url, sizeBytes });
+    }
+  };
+  for (const model of [
+    ...Object.values(BRAIN_MODELS),
+    ...Object.values(MOE_WORKSTATION_MODELS),
+    ...ROLLING_MODEL_CATALOG.map((entry) => entry.model),
+  ]) {
+    add(model.label, model.fileName, model.url, model.sizeBytes);
+    if (model.mmproj) {
+      add(`${model.label} mmproj`, model.mmproj.fileName, model.mmproj.url, model.mmproj.sizeBytes);
+    }
+  }
+  for (const vis of Object.values(VISION_SIDECAR_MODELS)) {
+    add(vis.label, vis.modelFileName, vis.modelUrl, vis.modelSizeBytes);
+    add(`${vis.label} mmproj`, vis.mmproj.fileName, vis.mmproj.url, vis.mmproj.sizeBytes);
+  }
+  return [...byUrl.values()];
 }
 
 /** Streams a local model file and verifies its SHA-256 digest in constant time. */

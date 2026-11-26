@@ -1,5 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import type { WindowDetail } from "./desktop.ts";
 import { operateVerdict } from "./operateRules.ts";
 import type { Backup, Machine } from "./fleet.ts";
@@ -92,6 +93,15 @@ export interface PolicyContext {
    * a note-to-self could be something that text told her to write, so saving one asks.
    */
   readOutsideText?: boolean;
+  /**
+   * True on turns where external MCP server tool schemas/descriptions are offered to the model.
+   * Persistence and exfiltration built-ins escalate to `"ask"` so an adversarial MCP tool
+   * description cannot silently write memories, reminders, agenda items, or clipboard contents,
+   * while `readOnlyAutoAllow` MCP calls on a clean turn still proceed without prompt fatigue.
+   */
+  mcpSchemasOffered?: boolean;
+  /** Optional custom user address so internal refusal strings avoid "Captain" when customized. */
+  userAddress?: string;
   /**
    * Files she may only change through their own tool (the Deck Log), even though they
    * sit in her folder. Otherwise writing the file directly would dodge that tool's check.
@@ -567,12 +577,13 @@ export async function toolVerdict(
           return { decision: "ask", sensitive: true, reason: SENSITIVE_REASON };
         }
       }
-      if (!context.readOutsideText) return { decision: "allow" };
+      if (!context.readOutsideText && !context.mcpSchemasOffered) return { decision: "allow" };
       return {
         decision: "ask",
         sensitive: false,
-        reason:
-          "She has read a web page, a file or a program's output in this conversation, so check this is what you want sent to your phone.",
+        reason: context.readOutsideText
+          ? "She has read a web page, a file or a program's output in this conversation, so check this is what you want sent to your phone."
+          : "External MCP tool descriptions are loaded on this turn, so check this is what you want sent to your phone.",
       };
     }
     // Deleting several gigabytes is always the user's call, however sure she is.
@@ -609,8 +620,8 @@ export async function toolVerdict(
           reason: "The clipboard may hold something private, like a password you just copied.",
         };
       }
-      // What she puts there the user will paste somewhere, so it is checked once outside text is about.
-      if (!context.readOutsideText) return { decision: "allow" };
+      // What she puts there the user will paste somewhere, so it is checked once outside text or MCP schemas are present.
+      if (!context.readOutsideText && !context.mcpSchemasOffered) return { decision: "allow" };
       if ((stringField(input, "text") ?? "").length > MAX_CLIPBOARD_CHARS) {
         throw new Error(
           `That is too long to copy now (${MAX_CLIPBOARD_CHARS} characters at most once you have read outside text). Save it to a file with write_file instead.`,
@@ -619,8 +630,9 @@ export async function toolVerdict(
       return {
         decision: "ask",
         sensitive: false,
-        reason:
-          "She has read a web page, a file or a program's output in this conversation, so check this is what you want to paste.",
+        reason: context.readOutsideText
+          ? "She has read a web page, a file or a program's output in this conversation, so check this is what you want to paste."
+          : "External MCP tool descriptions are loaded on this turn, so check this is what you want to paste.",
       };
     case TOOLS.findFiles: {
       // Looking through the user's own folders is free; anywhere else, or a private
@@ -648,7 +660,10 @@ export async function toolVerdict(
       if (toolName === TOOLS.missions && missionToResume(input) !== null) {
         if (context.away) {
           throw new Error(
-            "A stopped mission is taken up again at the PC only. Tell Captain to ask for it there.",
+            replaceInternalCaptain(
+              "A stopped mission is taken up again at the PC only. Tell Captain to ask for it there.",
+              context.userAddress,
+            ),
           );
         }
         return {
@@ -662,7 +677,10 @@ export async function toolVerdict(
       if (toolName === TOOLS.missions && missionToPin(input) !== null) {
         if (context.away) {
           throw new Error(
-            "Pinning a mission for devices can only be done at the PC. Tell Captain to do it there.",
+            replaceInternalCaptain(
+              "Pinning a mission for devices can only be done at the PC. Tell Captain to do it there.",
+              context.userAddress,
+            ),
           );
         }
         return {
@@ -681,33 +699,41 @@ export async function toolVerdict(
       if (toolName === TOOLS.missions && missionWantsUnpin(input)) {
         if (context.away) {
           throw new Error(
-            "Unpinning a mission from devices can only be done at the PC. Tell Captain to do it there.",
+            replaceInternalCaptain(
+              "Unpinning a mission from devices can only be done at the PC. Tell Captain to do it there.",
+              context.userAddress,
+            ),
           );
         }
-        if (!context.readOutsideText) return { decision: "allow" };
+        if (!context.readOutsideText && !context.mcpSchemasOffered) return { decision: "allow" };
         return {
           decision: "ask",
           sensitive: false,
-          reason:
-            "She has read a web page, a file or a program's output in this conversation, so check this is something you want.",
+          reason: context.readOutsideText
+            ? "She has read a web page, a file or a program's output in this conversation, so check this is something you want."
+            : "External MCP tool descriptions are loaded on this turn, so check this is something you want.",
         };
       }
       if (toolName === TOOLS.missions && missionNote(input) !== null) {
-        if (!context.readOutsideText) return { decision: "allow" };
+        if (!context.readOutsideText && !context.mcpSchemasOffered) return { decision: "allow" };
         return {
           decision: "ask",
           sensitive: false,
-          reason:
-            "She has read a web page, a file or a program's output in this conversation, so check this is something you want.",
+          reason: context.readOutsideText
+            ? "She has read a web page, a file or a program's output in this conversation, so check this is something you want."
+            : "External MCP tool descriptions are loaded on this turn, so check this is something you want.",
         };
       }
       const undo = stringField(input, "cancel") ?? stringField(input, "stop");
-      if (!undo || !context.readOutsideText) return { decision: "allow" };
+      if (!undo || (!context.readOutsideText && !context.mcpSchemasOffered)) {
+        return { decision: "allow" };
+      }
       return {
         decision: "ask",
         sensitive: false,
-        reason:
-          "She has read a web page, a file or a program's output in this conversation, so check this is something you want.",
+        reason: context.readOutsideText
+          ? "She has read a web page, a file or a program's output in this conversation, so check this is something you want."
+          : "External MCP tool descriptions are loaded on this turn, so check this is something you want.",
       };
     }
     // A standing order runs again and again with nobody watching, so making one is
@@ -776,7 +802,10 @@ export async function toolVerdict(
       if ("problem" in made) return { decision: "allow" };
       if (context.away && made.mission.pinnedToDevices) {
         throw new Error(
-          "Only a mission planned at the PC can be pinned to devices. Tell Captain to pin it at the PC.",
+          replaceInternalCaptain(
+            "Only a mission planned at the PC can be pinned to devices. Tell Captain to pin it at the PC.",
+            context.userAddress,
+          ),
         );
       }
       if (typeof input === "object" && input !== null) settledMissions.set(input, made.mission);
@@ -802,12 +831,13 @@ export async function toolVerdict(
     case TOOLS.agenda: {
       const action = stringField(input, "action");
       if (action !== "add" && action !== "remove") return { decision: "allow" };
-      if (!context.readOutsideText) return { decision: "allow" };
+      if (!context.readOutsideText && !context.mcpSchemasOffered) return { decision: "allow" };
       return {
         decision: "ask",
         sensitive: false,
-        reason:
-          "She has read a calendar, a web page, a file or a program's output in this conversation, so check this is something you asked for.",
+        reason: context.readOutsideText
+          ? "She has read a calendar, a web page, a file or a program's output in this conversation, so check this is something you asked for."
+          : "External MCP tool descriptions are loaded on this turn, so check this is something you asked for.",
       };
     }
     // These all write something she will read again later (a note, a reminder that comes
@@ -816,12 +846,13 @@ export async function toolVerdict(
     case TOOLS.deckLog:
     case TOOLS.remember:
     case TOOLS.forget:
-      if (!context.readOutsideText) return { decision: "allow" };
+      if (!context.readOutsideText && !context.mcpSchemasOffered) return { decision: "allow" };
       return {
         decision: "ask",
         sensitive: false,
-        reason:
-          "She has read a web page, a file or a program's output in this conversation, so check this is something you want her to keep.",
+        reason: context.readOutsideText
+          ? "She has read a web page, a file or a program's output in this conversation, so check this is something you want her to keep."
+          : "External MCP tool descriptions are loaded on this turn, so check this is something you want her to keep.",
       };
     case TOOLS.readWebPage: {
       const url = stringField(input, "url") ?? "";
@@ -869,16 +900,9 @@ export async function toolVerdict(
       }
       if (toolName.startsWith("mcp:")) {
         if (context.mcpPolicy) {
-          const decided = context.mcpPolicy(toolName, input);
-          if (decided.decision === "allow" && context.readOutsideText) {
-            return {
-              decision: "ask",
-              sensitive: false,
-              reason:
-                "She has read outside text in this conversation, so check before running an MCP tool.",
-            };
-          }
-          return decided;
+          // `mcpPolicy` (`evaluateMcpToolVerdict`) already enforces `handsOff` and `readOutsideText`,
+          // so trust its decision directly without re-escalating clean `readOnlyAutoAllow` calls.
+          return context.mcpPolicy(toolName, input);
         }
         return {
           decision: "ask",

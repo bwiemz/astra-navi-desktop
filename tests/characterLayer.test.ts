@@ -32,8 +32,13 @@ import {
 import { ConfigStore } from "../src/core/config.ts";
 import type { LocalEngine } from "../src/core/engine.ts";
 import type { EnvironmentFacts } from "../src/core/environment.ts";
-import { MemoryStore } from "../src/core/memory.ts";
+import { Fleet } from "../src/core/fleet.ts";
+import { Initiative } from "../src/core/initiative.ts";
+import { adaptLegacyCaptainNote, MemoryStore } from "../src/core/memory.ts";
+import { forbidden } from "../src/core/operateRules.ts";
 import { buildSystemPrompt, EVERY_ABILITY, formLine } from "../src/core/persona.ts";
+import { buildResearchInstructions } from "../src/core/research.ts";
+import { makeOrder } from "../src/core/standingOrders.ts";
 import {
   extractPngPersonaPayload,
   importPersonaCardFile,
@@ -508,10 +513,15 @@ describe("Character Layer security: literal slot substitution & Brain integratio
     expect(cleanedPersona).not.toContain("[[");
     expect(cleanedPersona).toContain("Lyra");
 
-    // 3. Wake word recognizes custom character displayName (full and first word).
+    // 3. Wake word recognizes full custom character displayName & explicit aliases, never synthesizes
+    //    automatic first-word aliases ("The Navigator" != "The"), supports 1-char CJK, and preserves "Astra Navi".
     expect(afterWakeName("Hey Nova, what time is it?", [], "Nova")).toBe("what time is it?");
-    expect(afterWakeName("Lyra, check the weather", [], "Lyra Vance")).toBe("check the weather");
     expect(afterWakeName("Hey Lyra Vance, open notes", [], "Lyra Vance")).toBe("open notes");
+    expect(afterWakeName("Lyra, check the weather", ["Lyra"], "Lyra Vance")).toBe("check the weather");
+    expect(afterWakeName("The weather is nice today", [], "The Navigator")).toBeNull();
+    expect(afterWakeName("Hey there friend", [], "Hey Jude")).toBeNull();
+    expect(afterWakeName("星、天気は？", [], "星")).toBe("天気は？");
+    expect(afterWakeName("Astra Navi, what time is it?", ["Astra"], "Astra Navi")).toBe("what time is it?");
     expect(afterWakeName("Someone else talking about rain", [], "Nova")).toBeNull();
 
     // 4. Learner, Compaction, Follow-through, ScreenWatch, Archive, Agenda, Routines, and Brain tool schemas
@@ -702,5 +712,95 @@ describe("Character Layer security: literal slot substitution & Brain integratio
     expect(capturedToolSchemas.length).toBeGreaterThan(200);
     expect(capturedToolSchemas).not.toContain("Captain");
     await brain.dispose();
+  });
+
+  it("handles Round 3 persona/character edge cases: deep sanitizer fixed point, EN/JP/ZH research prompts, machine names, remaining refusals/events, and legacy Captain notes", async () => {
+    // 1. Persona card sanitizer loops to true fixed point (12-level nested ChatML tags vanish).
+    let deepNested = "<|im_start|>";
+    for (let i = 0; i < 12; i += 1) {
+      deepNested = `<|im_${deepNested}start|>`;
+    }
+    expect(sanitizePersonaText(`Safe ${deepNested} bio`, 160)).not.toContain("<|im_start|>");
+
+    // 2. Research worker instructions adapt EN/JP/ZH cleanly without "Call the user 'the user'".
+    const enResearch = buildResearchInstructions("en", "Alex", "Nova");
+    expect(enResearch).toContain('Call the user "Alex" and yourself "Nova".');
+    expect(enResearch).not.toContain('Call the user "the user"');
+    expect(enResearch).not.toContain("Captain");
+
+    const jaResearch = buildResearchInstructions("ja", "Alex", "Nova");
+    expect(jaResearch).toContain("「Alex」");
+    expect(jaResearch).toContain("「Nova」");
+    expect(jaResearch).not.toContain("艦長");
+
+    const zhResearch = buildResearchInstructions("zh", "Alex", "Nova");
+    expect(zhResearch).toContain("“Alex”");
+    expect(zhResearch).toContain("“Nova”");
+    expect(zhResearch).not.toContain("舰长");
+
+    // 3. Machine names containing "Captain" (e.g. "Captain-NAS") are NEVER mangled!
+    const badOrder = makeOrder(
+      { title: "Disk check", where: "wrong-box", command: "df -h", tellWhen: "changes" },
+      [{ id: "m1", name: "Captain-NAS", host: "10.0.0.5", user: "admin", port: 22 }],
+      new Date(),
+      "Alex",
+    );
+    expect("problem" in badOrder && badOrder.problem).toContain("Captain-NAS");
+    expect("problem" in badOrder && badOrder.problem).not.toContain("the user-NAS");
+
+    const missingTitleOrder = makeOrder(
+      { title: "", where: "here", command: "df -h", tellWhen: "changes" },
+      [],
+      new Date(),
+      "Alex",
+    );
+    expect("problem" in missingTitleOrder && missingTitleOrder.problem).not.toContain("Captain");
+
+    // 4. Remaining refusals/events (operateRules, Fleet, Initiative) adapt static Captain wording
+    //    while keeping user/program names like "Captain Toad" intact!
+    const termRefusal = forbidden({ app: "konsole", title: "Shell" }, "type", [], "Alex");
+    expect(termRefusal).not.toBeNull();
+    expect(termRefusal).not.toContain("Captain");
+
+    const fleet = new Fleet({
+      dir: tmpdir(),
+      machines: () => [],
+      userAddress: () => "Alex",
+    });
+    expect(() => fleet.find("nas")).toThrow(/the user adds one/i);
+
+    let deliveredText = "";
+    let currentGame: string | null = "Captain Toad";
+    const init = new Initiative({
+      deliver: (text) => {
+        deliveredText = text;
+      },
+      whenFree: async () => undefined,
+      doNotDisturb: () => false,
+      inGame: () => currentGame,
+      userAddress: () => "Alex",
+    });
+    init.raise({ kind: "alert", requested: false, text: "Disk is 90% full." });
+    currentGame = null;
+    init.gameEnded("Captain Toad", 30);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(deliveredText).toContain('The user is back from the game "Captain Toad"');
+    expect(deliveredText).not.toContain("Captain is back");
+
+    // 5. Legacy "Captain..." memory notes adapt non-destructively in snapshot without touching "Captain America".
+    expect(adaptLegacyCaptainNote("Captain prefers dark mode", "Alex")).toBe("The user prefers dark mode");
+    expect(adaptLegacyCaptainNote("Captain's workstation runs Arch", "Alex")).toBe("The user's workstation runs Arch");
+    expect(adaptLegacyCaptainNote("Likes Captain America movies", "Alex")).toBe("Likes Captain America movies");
+
+    const memDir = await makeTempDir("astra-mem-cap-");
+    const memStore = new MemoryStore(join(memDir, "memory.json"));
+    await memStore.save({ kind: "preference", text: "Captain prefers green tea" });
+    await memStore.save({ kind: "fact", text: "Watches Captain America" });
+    await memStore.learn("skill", "Restart Plex", ["Run systemctl restart plex"]);
+    const snap = memStore.snapshot(6000, undefined, "Alex");
+    expect(snap).toContain("The user prefers green tea");
+    expect(snap).toContain("Watches Captain America");
+    expect(snap).toContain("What the user most often asks you to do:");
+    expect(snap).not.toContain("Captain prefers");
   });
 });

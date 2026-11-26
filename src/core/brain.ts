@@ -603,7 +603,7 @@ export class Brain {
     const { deps } = this;
     return buildSystemPrompt(
       deps.environment,
-      deps.memory.snapshot(),
+      deps.memory.snapshot(undefined, undefined, deps.config.value.character.userAddress),
       deps.config.value.language,
       daysAboard(deps.config.value.firstMetAt, new Date()),
       this.abilities(),
@@ -650,33 +650,51 @@ export class Brain {
     const { deps } = this;
     this.offeredFewer = false;
     this.pickedOut = [];
+    const allNames = Object.keys(all);
+    if (message.event || allNames.length === 0) return all;
     const wanted = deps.lab?.fittingTools ?? deps.config.value.fittingTools;
-    if (!wanted || message.event || Object.keys(all).length === 0) return all;
+    const hasMcp = allNames.some((name) => name.startsWith("mcp:"));
+    if (!wanted && !hasMcp) return all;
     this.router ??= new ToolRouter(deps.recall?.embedder ?? null);
     const toolDescriptions = Object.fromEntries(
       Object.entries(all).map(([name, fn]) => [name, fn.description ?? ""]),
     );
     const route = await this.router.route(message.text, {
-      available: Object.keys(all),
+      available: allNames,
       recent: this.toolsOfLate.flat(),
       machines: deps.fleet?.machines().map((machine) => machine.name) ?? [],
       toolDescriptions,
       ...(this.saidBefore === undefined ? {} : { before: this.saidBefore }),
     });
-    const offered = new Set(route.offered);
+    // Even when `fittingTools` is off, route external `mcp:*` tools selectively so untrusted
+    // server schemas are only exposed on turns that actually involve them.
+    const offered = wanted
+      ? new Set(route.offered)
+      : new Set([
+          ...allNames.filter((name) => !name.startsWith("mcp:")),
+          ...route.offered.filter((name) => name.startsWith("mcp:")),
+        ]);
     // Only what this message itself called for is carried forward. A tool that is here
     // because it was on offer a moment ago, or because it goes with another, would
     // otherwise keep itself on offer for ever.
     this.pickedOut = Object.entries(route.why)
-      .filter(([, reason]) => /^(?:words|meaning|names a machine|mcp)/.test(reason))
+      .filter(([tool, reason]) =>
+        wanted
+          ? /^(?:words|meaning|names a machine|mcp)/.test(reason)
+          : tool.startsWith("mcp:") && /^mcp/.test(reason),
+      )
       .map(([tool]) => tool);
-    this.pickedFor = route.why;
-    this.offeredFewer = offered.size < Object.keys(all).length;
-    deps.lab?.onOffered?.(route.offered, route.why);
+    this.pickedFor = wanted
+      ? route.why
+      : Object.fromEntries(Object.entries(route.why).filter(([tool]) => tool.startsWith("mcp:")));
+    this.offeredFewer = offered.size < allNames.length;
+    if (wanted) {
+      deps.lab?.onOffered?.(route.offered, route.why);
+    }
     if (process.env["AI_CHAN_DEBUG"]) {
       console.log(
-        `\n[brain] offering ${offered.size} of ${Object.keys(all).length} tools; beyond the core: ${
-          Object.entries(route.why)
+        `\n[brain] offering ${offered.size} of ${allNames.length} tools; beyond the core: ${
+          Object.entries(this.pickedFor)
             .map(([tool, reason]) => `${tool} (${reason})`)
             .join(", ") || "none"
         }`,
@@ -1302,8 +1320,11 @@ export class Brain {
         workspace: deps.environment.workspace,
         home: deps.environment.home,
         isKnownAddress: (url) => this.knownAddresses.has(Brain.addressKey(url)),
-        // Taint only on actual outside text / MCP tool results; server descriptions are sanitized instead.
+        // Taint only on actual outside text / MCP tool results; server descriptions are sanitized
+        // and separately gate persistence/exfiltration built-ins via `mcpSchemasOffered`.
         readOutsideText: this.readOutsideText,
+        mcpSchemasOffered: this.offeredNow.some((name) => name.startsWith("mcp:")),
+        userAddress: deps.config.value.character.userAddress,
         protectedFiles: deps.ship ? [deps.ship.deckLogFile] : [],
         // Standing permission to look is for whoever is at the PC.
         maySeeScreen: deps.config.value.sight.withoutAsking && !this.turnAway,

@@ -211,7 +211,7 @@ const VOICE_TEMPLATE_TOKEN_RE =
  * companion display name ONLY inside explicit localized voice-instruction and example
  * templates (never across safety rules, OS paths, or `<memories>`).
  */
-function adaptVoiceTemplate(
+export function adaptVoiceTemplate(
   text: string,
   userAddress: string | undefined,
   shortName: string,

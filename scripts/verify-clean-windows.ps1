@@ -211,9 +211,9 @@ $startMenuLnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\As
 
 if (Test-Path $voicePy) {
   try {
-    $pyCheck = & $voicePy -c "import fastapi, uvicorn; print('ok')" 2>&1
+    $pyCheck = & $voicePy -c "import numpy, torch, qwen_tts; print('ok')" 2>&1
     if ($LASTEXITCODE -eq 0 -and "$pyCheck" -match "ok") {
-      Report-Pass "Bootstrap Voice Env" "$voicePy (fastapi & uvicorn importable)"
+      Report-Pass "Bootstrap Voice Env" "$voicePy (numpy, torch & qwen_tts importable)"
     } else {
       Report-Fail "Bootstrap Voice Env" "Venv exists at $voicePy but packages failed to import: $pyCheck"
     }

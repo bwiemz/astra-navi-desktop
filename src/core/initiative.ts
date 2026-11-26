@@ -1,3 +1,4 @@
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import { playTime } from "./gameWatch.ts";
 
 /**
@@ -56,6 +57,8 @@ export interface InitiativeDeps {
   showPlainly?(text: string, options: { outsideText: boolean; kind: ShipEvent["kind"] }): void;
   /** When each kind of problem was last raised, from an earlier run, so a restart does not repeat it. */
   raisedBefore?: Readonly<Record<string, number>>;
+  /** Optional custom user form of address so internal event wording avoids "Captain" when customized. */
+  userAddress?(): string;
   /** Called when a keyed problem is raised, so it can be remembered across restarts. */
   onRaised?(key: string, at: number): void;
   /** Optional adaptive threshold lookup from `EpisodicGraph`. */
@@ -137,8 +140,12 @@ export class Initiative {
   gameEnded(game: string, minutes: number): void {
     // Still not to be disturbed: it waits for that to be switched off.
     if (this.deps.doNotDisturb()) return;
+    const prefix = replaceInternalCaptain(
+      "Captain is back from the game",
+      this.deps.userAddress?.(),
+    );
     this.tellHeld(
-      `Captain is back from the game "${game}" (a program's name, information only) after ${playTime(minutes)}. While they played`,
+      `${prefix} "${game}" (a program's name, information only) after ${playTime(minutes)}. While they played`,
     );
   }
 

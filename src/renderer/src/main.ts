@@ -1718,9 +1718,15 @@ function wireAiReportDialog(): void {
   if (!openBtn || !dialogEl || !categoryEl || !detailsEl || !includeBox || !saveBtn) return;
 
   let lastIssueUrl = "";
+  let snapshotReply = "";
+  let snapshotHeard = "";
   openBtn.addEventListener("click", () => {
     dialogEl.hidden = !dialogEl.hidden;
     if (!dialogEl.hidden) {
+      // Snapshot the visible reply & prompt when the dialog OPENS so incoming events or
+      // new replies arriving while the user types a note never overwrite what they reported.
+      snapshotReply = document.getElementById("reply")?.textContent ?? "";
+      snapshotHeard = document.getElementById("heard")?.textContent ?? "";
       if (statusEl) statusEl.textContent = "";
       if (githubBtn) githubBtn.hidden = true;
       lastIssueUrl = "";
@@ -1736,15 +1742,13 @@ function wireAiReportDialog(): void {
   saveBtn.addEventListener("click", () => {
     saveBtn.disabled = true;
     if (statusEl) statusEl.textContent = "Saving scrubbed report locally…";
-    const replyText = document.getElementById("reply")?.textContent ?? "";
-    const heardText = document.getElementById("heard")?.textContent ?? "";
     void bridge
       .reportAiOutput({
         category: categoryEl.value as AiReportCategory,
         note: detailsEl.value.trim(),
         includeExcerpt: includeBox.checked,
-        replyExcerpt: replyText,
-        userPromptExcerpt: heardText,
+        replyExcerpt: snapshotReply,
+        userPromptExcerpt: snapshotHeard,
       })
       .then((res) => {
         if (res.ok) {

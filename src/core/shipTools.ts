@@ -230,9 +230,10 @@ export function createShipTools(host: ToolHost, services: ShipServices): ChatSes
                     orderRequest(input),
                     host.policy().machines?.() ?? [],
                     new Date(),
+                    host.userAddress?.(),
                   );
                   if ("problem" in made) {
-                    return `Nothing was set: ${replaceInternalCaptain(made.problem, host.userAddress?.())}`;
+                    return `Nothing was set: ${made.problem}`;
                   }
                   return `Nothing was set: ${replaceInternalCaptain(PRIVATE_CHECK, host.userAddress?.())}`;
                 }

@@ -975,6 +975,7 @@ function startShipServices(workspace: string): void {
     brainAwake: () => engine?.isLoaded() ?? false,
     showPlainly: (text) => showNotice(text),
     raisedBefore: config.value.alertsRaised,
+    userAddress: () => config.value.character.userAddress,
     onRaised: (key, at) => {
       void config
         .update({ alertsRaised: { ...config.value.alertsRaised, [key]: at } })
@@ -1656,7 +1657,11 @@ async function main(): Promise<void> {
   await searchBudget.load();
   const hasPhoneLink = environment.commands.has("kdeconnect-cli");
   settings.setPhoneLink(hasPhoneLink);
-  fleet = new Fleet({ dir: fleetDir(), machines: () => config.value.fleet.machines });
+  fleet = new Fleet({
+    dir: fleetDir(),
+    machines: () => config.value.fleet.machines,
+    userAddress: () => config.value.character.userAddress,
+  });
   mcpHub = new McpHub();
   settings.setCanAskPassword(environment.commands.has("kdialog") || environment.commands.has("zenity"));
   void settings.detectFirewall();
@@ -1681,6 +1686,7 @@ async function main(): Promise<void> {
     },
     language: () => config.value.language,
     userAddress: () => config.value.character.userAddress,
+    displayName: () => config.value.character.displayName,
     reportsDir: join(environment.workspace, "reports"),
     memory,
     actions,

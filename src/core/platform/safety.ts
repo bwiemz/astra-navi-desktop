@@ -1,3 +1,4 @@
+import { replaceInternalCaptain } from "../characterLayer.ts";
 import type { Control } from "../hands.ts";
 import { forbidden, type OperateAction } from "../operateRules.ts";
 
@@ -80,6 +81,7 @@ export interface SafeDispatchRequest {
   targetWindow: { id: string; app: string; title: string };
   actualForeground: { id: string; app: string; title: string } | null;
   ownApps?: readonly string[];
+  userAddress?: string;
 }
 
 export interface SafeDispatchDecision {
@@ -103,7 +105,7 @@ export function assertSafeDesktopDispatch(req: SafeDispatchRequest): SafeDispatc
   }
 
   const ownApps = req.ownApps ?? [];
-  const targetRefusal = forbidden(req.targetWindow, req.action, ownApps);
+  const targetRefusal = forbidden(req.targetWindow, req.action, ownApps, req.userAddress);
   if (targetRefusal) {
     return { allowed: false, reason: targetRefusal };
   }
@@ -114,8 +116,10 @@ export function assertSafeDesktopDispatch(req: SafeDispatchRequest): SafeDispatc
   ) {
     return {
       allowed: false,
-      reason:
+      reason: replaceInternalCaptain(
         "That is a terminal. You do not type into terminals; run the command with run_command instead, where Captain can read it first.",
+        req.userAddress,
+      ),
     };
   }
 
@@ -126,7 +130,7 @@ export function assertSafeDesktopDispatch(req: SafeDispatchRequest): SafeDispatc
     };
   }
 
-  const foregroundRefusal = forbidden(req.actualForeground, req.action, ownApps);
+  const foregroundRefusal = forbidden(req.actualForeground, req.action, ownApps, req.userAddress);
   if (foregroundRefusal) {
     return { allowed: false, reason: foregroundRefusal };
   }

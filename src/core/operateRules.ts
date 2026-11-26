@@ -1,3 +1,4 @@
+import { replaceInternalCaptain } from "./characterLayer.ts";
 import type { WindowDetail } from "./desktop.ts";
 import { matchWindows } from "./desktop.ts";
 import { parseKeys } from "./hands.ts";
@@ -121,24 +122,40 @@ export function forbidden(
   window: Pick<WindowDetail, "app" | "title">,
   action: OperateAction,
   ownApps: readonly string[],
+  userAddress?: string,
 ): string | null {
   const app = window.app.toLowerCase();
   if (ownApps.some((own) => own.toLowerCase() === app)) {
-    return "That is your own window. You do not work your own controls; answer Captain in words.";
+    return replaceInternalCaptain(
+      "That is your own window. You do not work your own controls; answer Captain in words.",
+      userAddress,
+    );
   }
   if (SECRET_KEEPERS.test(app)) {
-    return "That program keeps passwords and keys. You do not read or touch it; Captain does.";
+    return replaceInternalCaptain(
+      "That program keeps passwords and keys. You do not read or touch it; Captain does.",
+      userAddress,
+    );
   }
   if (AUTHORITY.test(app)) {
-    return "That window is the system asking Captain for a password or for permission. Only Captain answers it.";
+    return replaceInternalCaptain(
+      "That window is the system asking Captain for a password or for permission. Only Captain answers it.",
+      userAddress,
+    );
   }
   // The same windows her watch never reads: private browsing, sign-in pages, anything
   // whose title speaks of passwords. Their controls hold what is typed into them.
   if (isPrivate(window, [])) {
-    return "That window is private (a sign-in, private browsing, or something to do with passwords). You do not read or touch it; Captain does.";
+    return replaceInternalCaptain(
+      "That window is private (a sign-in, private browsing, or something to do with passwords). You do not read or touch it; Captain does.",
+      userAddress,
+    );
   }
   if (TERMINALS.test(app) && (action === "type" || action === "key" || action === "fill")) {
-    return "That is a terminal. You do not type into terminals; run the command with run_command instead, where Captain can read it first.";
+    return replaceInternalCaptain(
+      "That is a terminal. You do not type into terminals; run the command with run_command instead, where Captain can read it first.",
+      userAddress,
+    );
   }
   return null;
 }
@@ -312,7 +329,7 @@ export async function operateVerdict(input: unknown, context: PolicyContext): Pr
   const step = readOperateInput(input);
   if (!context.windows) throw new Error("Working other programs is not available here.");
   const target = pickTarget(step, await context.windows(), context.ownApps ?? []);
-  const refusal = forbidden(target, step.action, context.ownApps ?? []);
+  const refusal = forbidden(target, step.action, context.ownApps ?? [], context.userAddress);
   if (refusal) throw new Error(refusal);
   if (typeof input === "object" && input !== null) approvedTargets.set(input, target);
   const where = nameOf(target);

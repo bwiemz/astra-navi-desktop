@@ -6,11 +6,13 @@ import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   BRAIN_MODELS,
+  listCatalogDownloadAssets,
   MOE_WORKSTATION_MODELS,
   resolveVisionMmproj,
   resolveVisionSidecarPair,
   VISION_SIDECAR_MODELS,
 } from "../src/core/models.ts";
+import { checkCatalogSizes } from "../scripts/check-model-sizes.ts";
 import { Sight } from "../src/core/sight.ts";
 import {
   buildVisionMessages,
@@ -555,5 +557,171 @@ describe("Sight native vision sidecar preference", () => {
 
     await sight.rest();
     expect(disposed).toBe(true);
+  });
+});
+
+describe("Round 3 vision catalog integrity, pairing precision, migration, flags, and boot disposal", () => {
+  it("declares exact 0.8B projector size (204,987,232 bytes) and catches drift in checkCatalogSizes()", async () => {
+    expect(VISION_SIDECAR_MODELS.compact.mmproj.sizeBytes).toBe(204_987_232);
+    const allAssets = listCatalogDownloadAssets();
+    expect(allAssets.length).toBeGreaterThanOrEqual(15);
+
+    const exactCheck = await checkCatalogSizes(
+      [
+        {
+          label: "0.8B mmproj",
+          fileName: "Qwen3.5-0.8B-mmproj-F16.gguf",
+          url: "https://example.test/mmproj.gguf",
+          sizeBytes: 204_987_232,
+        },
+      ],
+      {
+        fetchImpl: (async () =>
+          new Response(null, { status: 200, headers: { "content-length": "204987232" } })) as typeof fetch,
+      },
+    );
+    expect(exactCheck.ok).toBe(true);
+
+    const driftCheck = await checkCatalogSizes(
+      [
+        {
+          label: "0.8B mmproj stale",
+          fileName: "Qwen3.5-0.8B-mmproj-F16.gguf",
+          url: "https://example.test/mmproj.gguf",
+          sizeBytes: 620_000_000,
+        },
+      ],
+      {
+        fetchImpl: (async () =>
+          new Response(null, { status: 200, headers: { "content-length": "204987232" } })) as typeof fetch,
+      },
+    );
+    expect(driftCheck.ok).toBe(false);
+    expect(driftCheck.results[0]?.error).toMatch(/drift/i);
+  });
+
+  it("refuses cross-family Qwen3-14B + Qwen3.5-4B mmproj pairing and offers compact upgrade for legacy brain-projector users", async () => {
+    const dir = await makeTempDir("astra-vis-pair-");
+    const qwen3TextOnly = join(dir, "Qwen3-14B-Q4_K_M.gguf");
+    const qwen35Proj = join(dir, "Qwen3.5-4B-mmproj-F16.gguf");
+    const qwen35Model = join(dir, "Qwen3.5-4B-Q4_K_M.gguf");
+    await writeFile(qwen3TextOnly, "stub");
+    await writeFile(qwen35Proj, "stub");
+    await writeFile(qwen35Model, "stub");
+
+    // Qwen3-14B MUST NOT pair with Qwen3.5-4B-mmproj-F16.gguf!
+    const badPair = resolveVisionMmproj(qwen3TextOnly, dir, null);
+    expect(badPair.downloaded).toBe(false);
+    expect(badPair.mmprojPath).toBeNull();
+
+    // Matching Qwen3.5-4B custom path DOES pair!
+    const goodPair = resolveVisionMmproj(qwen35Model, dir, null);
+    expect(goodPair.downloaded).toBe(true);
+    expect(goodPair.mmprojPath).toBe(qwen35Proj);
+
+    // Legacy user with brain 9B + 9B mmproj on disk gets working status + upgrade offer to compact 0.8B!
+    const legacyDir = await makeTempDir("astra-vis-legacy-");
+    await writeFile(join(legacyDir, "Qwen3.5-9B-Q4_K_M.gguf"), "brain");
+    await writeFile(join(legacyDir, "Qwen3.5-9B-mmproj-F16.gguf"), "brain-mmproj");
+    const pair = resolveVisionSidecarPair("standard", legacyDir, 8 * 1024 ** 3);
+    expect(pair.source).toBe("brain");
+    expect(pair.ready).toBe(true);
+    expect(pair.recommendedUpgrade).not.toBeNull();
+    expect(pair.recommendedUpgrade?.label).toBe("Qwen3.5 0.8B Vision");
+    expect(pair.recommendedUpgrade?.missingBytes).toBe(
+      VISION_SIDECAR_MODELS.compact.modelSizeBytes + VISION_SIDECAR_MODELS.compact.mmproj.sizeBytes,
+    );
+
+    const sidecar = new LlamaVisionSidecar({
+      modelsDir: legacyDir,
+      brainChoice: () => "standard",
+      totalVramBytes: () => 8 * 1024 ** 3,
+      binaryPath: () => process.execPath,
+    });
+    const st = sidecar.status();
+    expect(st.upgradeAvailable).toBe(true);
+    expect(st.upgradeLabel).toBe("Qwen3.5 0.8B Vision");
+    expect(st.reason).toContain("switch to Qwen3.5 0.8B Vision");
+  });
+
+  it("passes --ctx-size 4096 and --no-mmproj-offload with -ngl 0, aborts spawn on dispose() during boot, and never counts deliberate dispose() as a backoff failure", async () => {
+    const dir = await makeTempDir("astra-vis-flags-");
+    await writeFile(join(dir, VISION_SIDECAR_MODELS.compact.modelFileName), "vl");
+    await writeFile(join(dir, VISION_SIDECAR_MODELS.compact.mmproj.fileName), "mm");
+    const argsLog = join(dir, "args.json");
+    const slowBin = join(dir, "llama-server");
+
+    // First verify --ctx-size 4096 + --no-mmproj-offload on dedicated model when gpuBusy=true (-ngl 0).
+    await writeFile(
+      slowBin,
+      [
+        `#!${process.execPath}`,
+        `import { createServer } from "node:http";`,
+        `import { writeFileSync } from "node:fs";`,
+        `const args = process.argv.slice(2);`,
+        `const arg = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };`,
+        `writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify(args));`,
+        `const server = createServer((req, res) => {`,
+        `  if (req.url === "/health") { res.writeHead(200); res.end("ok"); return; }`,
+        `  req.resume();`,
+        `  req.on("end", () => {`,
+        `    res.writeHead(200, { "content-type": "application/json" });`,
+        `    res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));`,
+        `  });`,
+        `});`,
+        `server.listen(Number(arg("--port")), arg("--host"));`,
+        `process.on("SIGTERM", () => server.close(() => process.exit(0)));`,
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(slowBin, 0o755);
+
+    const sidecar = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => slowBin,
+      gpuBusy: () => true,
+      startupTimeoutMs: 5_000,
+      idleUnloadMs: 0,
+    });
+    expect(await sidecar.describeImage(await makeTestPng(), { mode: "screen" })).toBe("ok");
+    const { readFile } = await import("node:fs/promises");
+    const args = JSON.parse(await readFile(argsLog, "utf8")) as string[];
+    expect(args[args.indexOf("--ctx-size") + 1]).toBe("4096");
+    expect(args[args.indexOf("-ngl") + 1]).toBe("0");
+    expect(args).toContain("--no-mmproj-offload");
+    await sidecar.dispose();
+
+    // Now verify dispose() during boot stops spawn cleanly and does NOT activate backoff!
+    const hangBin = join(dir, "llama-server-hang");
+    const hangPidFile = join(dir, "hang.pid");
+    await writeFile(
+      hangBin,
+      [
+        `#!${process.execPath}`,
+        `import { writeFileSync } from "node:fs";`,
+        `writeFileSync(${JSON.stringify(hangPidFile)}, String(process.pid));`,
+        `setInterval(() => {}, 1000);`,
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(hangBin, 0o755);
+
+    const bootingSidecar = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => hangBin,
+      startupTimeoutMs: 10_000,
+      killTimeoutMs: 200,
+      failureBackoffBaseMs: 60_000,
+      idleUnloadMs: 0,
+    });
+    const pending = bootingSidecar.describeImage(await makeTestPng(), { mode: "screen" });
+    // Wait briefly for child spawn, then call deliberate dispose().
+    await new Promise((r) => setTimeout(r, 150));
+    await bootingSidecar.dispose();
+    expect(await pending).toBeNull();
+    expect(bootingSidecar.status().backoffActive).toBe(false);
+    expect(bootingSidecar.status().lastError).toBeNull();
   });
 });

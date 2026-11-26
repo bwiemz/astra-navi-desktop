@@ -58,8 +58,9 @@ export function sanitizePersonaText(raw: string, maxChars: number): string {
     chars.push(ch);
   }
   let neutralized = chars.join("");
-  // Iterate to fixed point so nested payloads like `<tool_<tool_call>call>` or `<|im_<|im_start|>start|>` vanish.
-  for (let pass = 0; pass < 8; pass += 1) {
+  // Loop until true fixed point so arbitrarily nested payloads like `<tool_<tool_call>call>` or
+  // `<|im_<|im_start|>start|>` vanish completely (input is already pre-bounded so this is strictly linear).
+  for (;;) {
     const next = neutralized
       .replaceAll("<|im_start|>", "")
       .replaceAll("<|im_end|>", "")

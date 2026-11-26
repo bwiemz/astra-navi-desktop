@@ -87,13 +87,24 @@ export function showCharacterAndVision(view: SettingsView): void {
   element("vision-status").textContent = vision.reason;
 
   const dlBtn = element<HTMLButtonElement>("vision-download-mmproj");
+  const wantsUpgrade =
+    vision.nativeVision &&
+    vision.upgradeAvailable === true &&
+    vision.upgradeLabel !== null &&
+    vision.upgradeLabel !== undefined &&
+    vision.mode !== "loopback-endpoint";
   const canDownloadMmproj =
     vision.nativeVision &&
-    !vision.mmprojReady &&
-    vision.mmprojFileName !== null &&
-    vision.mode !== "loopback-endpoint";
+    vision.mode !== "loopback-endpoint" &&
+    (wantsUpgrade || (!vision.mmprojReady && vision.mmprojFileName !== null));
   dlBtn.hidden = !canDownloadMmproj;
-  if (canDownloadMmproj && vision.mmprojFileName) {
+  if (wantsUpgrade && vision.upgradeLabel) {
+    const sizeText =
+      vision.upgradeBytes !== null && vision.upgradeBytes !== undefined
+        ? ` (${formatMiB(vision.upgradeBytes)})`
+        : "";
+    dlBtn.textContent = `Switch to ${vision.upgradeLabel}${sizeText}`;
+  } else if (canDownloadMmproj && vision.mmprojFileName) {
     const sizeText =
       vision.mmprojSizeBytes !== null ? ` (${formatMiB(vision.mmprojSizeBytes)})` : "";
     dlBtn.textContent = `Download ${vision.mmprojFileName}${sizeText}`;

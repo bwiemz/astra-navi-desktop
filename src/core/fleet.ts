@@ -4,6 +4,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { access, chmod, constants, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { replaceInternalCaptain } from "./characterLayer.ts";
 
 /**
  * The user's other machines: a server, a NAS, anything that speaks SSH.
@@ -177,9 +178,9 @@ const TOO_BIG_TO_COPY =
   "The file there is over 100 MB, too large to keep a copy of, so it was not replaced. Captain can have it moved aside with a command first.";
 
 /** What the write and put-back scripts say by their exit codes. */
-function whyNotWritten(code: number | null): string | null {
+function whyNotWritten(code: number | null, userAddress?: string): string | null {
   if (code === 94) return NOT_A_FILE;
-  if (code === 95) return TOO_BIG_TO_COPY;
+  if (code === 95) return replaceInternalCaptain(TOO_BIG_TO_COPY, userAddress);
   if (code === 96) return "That copy is no longer there.";
   if (code === 98) return NO_COPY;
   return null;
@@ -194,6 +195,8 @@ export interface FleetOptions {
   dir: string;
   /** The machines as the settings have them. */
   machines(): readonly Machine[];
+  /** Optional custom user address so static refusal strings avoid "Captain" when customized. */
+  userAddress?(): string;
   /** For tests: a different `ssh` and friends. */
   programs?: Partial<Record<"ssh" | "ssh-keygen" | "ssh-keyscan", string>>;
 }
@@ -230,7 +233,10 @@ export class Fleet {
     const all = this.machines();
     if (all.length === 0) {
       throw new Error(
-        'No other machines have been added. Captain adds one in Settings, under "Your other machines".',
+        replaceInternalCaptain(
+          'No other machines have been added. Captain adds one in Settings, under "Your other machines".',
+          this.options.userAddress?.(),
+        ),
       );
     }
     const exact = all.filter((machine) => machine.name.toLowerCase() === words);
@@ -476,7 +482,7 @@ export class Fleet {
       [...this.sshArgs(machine), scripted("write", word(path), String(bytes.length), backup)],
       { input: bytes, timeoutMs: 60_000 },
     );
-    const refused = whyNotWritten(result.code);
+    const refused = whyNotWritten(result.code, this.options.userAddress?.());
     if (refused) throw new Error(refused);
     if (result.code !== 0) throw new Error(explain(result.errors) || "It could not be written.");
     return result.out.toString("utf8").includes("kept") ? backup : null;
@@ -538,7 +544,7 @@ export class Fleet {
     const result = await this.pipe([...this.sshArgs(machine), scripted("restore", id, keep)], {
       timeoutMs: 60_000,
     });
-    const refused = whyNotWritten(result.code);
+    const refused = whyNotWritten(result.code, this.options.userAddress?.());
     if (refused) throw new Error(refused);
     if (result.code !== 0) throw new Error(explain(result.errors) || "It could not be put back.");
     return result.out.toString("utf8").includes("kept") ? keep : null;
@@ -614,7 +620,7 @@ export class Fleet {
       [...this.sshArgs(machine), scripted("write", word(remotePath), String(size), backup)],
       { timeoutMs: 30 * 60_000, signal, fromFile: localPath },
     );
-    const refused = whyNotWritten(result.code);
+    const refused = whyNotWritten(result.code, this.options.userAddress?.());
     if (refused) throw new Error(refused);
     if (result.code !== 0) throw new Error(explain(result.errors) || "It could not be sent.");
     return { bytes: size, backup: result.out.toString("utf8").includes("kept") ? backup : null };
