@@ -311,6 +311,12 @@ export class Brain {
    * are checked with the user. Cleared only by starting a new conversation.
    */
   private readOutsideText = false;
+  /**
+   * True once any external MCP tool schema (with server-supplied parameter descriptions)
+   * has been placed into the model's prompt in this conversation. Taints built-in tools
+   * without blocking a server's own first `readOnlyAutoAllow` call.
+   */
+  private mcpSchemaExposed = false;
   private idleWaiters: (() => void)[] = [];
   private historyLoaded = false;
   /** Counts replies begun, so work done between replies can tell that one has started since. */
@@ -494,6 +500,7 @@ export class Brain {
     this.clock.reset();
     this.deps.screen?.reset();
     this.readOutsideText = false;
+    this.mcpSchemaExposed = false;
     this.deps.engine.setHistory([]);
     // Unloading makes the next message start from a fresh system prompt with current memories.
     // Her test suite starts over hundreds of times and keeps the model in memory instead.
@@ -576,10 +583,14 @@ export class Brain {
     const wanted = deps.lab?.fittingTools ?? deps.config.value.fittingTools;
     if (!wanted || message.event || Object.keys(all).length === 0) return all;
     this.router ??= new ToolRouter(deps.recall?.embedder ?? null);
+    const toolDescriptions = Object.fromEntries(
+      Object.entries(all).map(([name, fn]) => [name, fn.description ?? ""]),
+    );
     const route = await this.router.route(message.text, {
       available: Object.keys(all),
       recent: this.toolsOfLate.flat(),
       machines: deps.fleet?.machines().map((machine) => machine.name) ?? [],
+      toolDescriptions,
       ...(this.saidBefore === undefined ? {} : { before: this.saidBefore }),
     });
     const offered = new Set(route.offered);
@@ -587,7 +598,7 @@ export class Brain {
     // because it was on offer a moment ago, or because it goes with another, would
     // otherwise keep itself on offer for ever.
     this.pickedOut = Object.entries(route.why)
-      .filter(([, reason]) => /^(?:words|meaning|names a machine)/.test(reason))
+      .filter(([, reason]) => /^(?:words|meaning|names a machine|mcp)/.test(reason))
       .map(([tool]) => tool);
     this.pickedFor = route.why;
     this.offeredFewer = offered.size < Object.keys(all).length;
@@ -718,6 +729,9 @@ export class Brain {
       );
       if (signal.aborted) return;
       this.offeredNow = Object.keys(functions);
+      if (this.offeredNow.some((name) => name.startsWith("mcp:"))) {
+        this.mcpSchemaExposed = true;
+      }
       // So that a later change to the conversation does not cost reading the
       // instructions again; see the engine.
       await deps.engine.anchor(functions, signal);
@@ -1144,7 +1158,8 @@ export class Brain {
         workspace: deps.environment.workspace,
         home: deps.environment.home,
         isKnownAddress: (url) => this.knownAddresses.has(Brain.addressKey(url)),
-        readOutsideText: this.readOutsideText,
+        // Server-supplied MCP parameter descriptions are untrusted text and taint built-in tools once offered.
+        readOutsideText: this.readOutsideText || this.mcpSchemaExposed,
         protectedFiles: deps.ship ? [deps.ship.deckLogFile] : [],
         // Standing permission to look is for whoever is at the PC.
         maySeeScreen: deps.config.value.sight.withoutAsking && !this.turnAway,

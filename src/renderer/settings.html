@@ -507,8 +507,10 @@
           <div id="mcp-stdio-fields" class="mcp-group">
             <label class="row">
               <span class="what">Command</span>
-              <input id="mcp-command" type="text" maxlength="260" placeholder="npx" required />
-              <span class="why">Executable name or full path (no shell chaining).</span>
+              <input id="mcp-command" type="text" maxlength="260" placeholder="uvx (or npx / node)" required />
+              <span class="why"
+                >Executable name or full path (e.g. uvx, node, python, or npx; no shell chaining).</span
+              >
             </label>
             <label class="row">
               <span class="what">Arguments (one per line)</span>
