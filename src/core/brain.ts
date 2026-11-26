@@ -311,12 +311,6 @@ export class Brain {
    * are checked with the user. Cleared only by starting a new conversation.
    */
   private readOutsideText = false;
-  /**
-   * True once any external MCP tool schema (with server-supplied parameter descriptions)
-   * has been placed into the model's prompt in this conversation. Taints built-in tools
-   * without blocking a server's own first `readOnlyAutoAllow` call.
-   */
-  private mcpSchemaExposed = false;
   private idleWaiters: (() => void)[] = [];
   private historyLoaded = false;
   /** Counts replies begun, so work done between replies can tell that one has started since. */
@@ -500,7 +494,6 @@ export class Brain {
     this.clock.reset();
     this.deps.screen?.reset();
     this.readOutsideText = false;
-    this.mcpSchemaExposed = false;
     this.deps.engine.setHistory([]);
     // Unloading makes the next message start from a fresh system prompt with current memories.
     // Her test suite starts over hundreds of times and keeps the model in memory instead.
@@ -729,9 +722,6 @@ export class Brain {
       );
       if (signal.aborted) return;
       this.offeredNow = Object.keys(functions);
-      if (this.offeredNow.some((name) => name.startsWith("mcp:"))) {
-        this.mcpSchemaExposed = true;
-      }
       // So that a later change to the conversation does not cost reading the
       // instructions again; see the engine.
       await deps.engine.anchor(functions, signal);
@@ -1158,8 +1148,8 @@ export class Brain {
         workspace: deps.environment.workspace,
         home: deps.environment.home,
         isKnownAddress: (url) => this.knownAddresses.has(Brain.addressKey(url)),
-        // Server-supplied MCP parameter descriptions are untrusted text and taint built-in tools once offered.
-        readOutsideText: this.readOutsideText || this.mcpSchemaExposed,
+        // Taint only on actual outside text / MCP tool results; server descriptions are sanitized instead.
+        readOutsideText: this.readOutsideText,
         protectedFiles: deps.ship ? [deps.ship.deckLogFile] : [],
         // Standing permission to look is for whoever is at the PC.
         maySeeScreen: deps.config.value.sight.withoutAsking && !this.turnAway,
