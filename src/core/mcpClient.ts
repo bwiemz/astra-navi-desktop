@@ -13,6 +13,7 @@ import { isPrivateLanHost } from "./workerMesh.ts";
  */
 
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
+export const MAX_MCP_SERVERS = 16;
 const MAX_OUTPUT_CHARS = 32_768;
 const MAX_STDIO_BUFFER_BYTES = 2 * 1024 * 1024;
 const MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -145,6 +146,8 @@ export const McpServerConfigSchema = z
     id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
     name: z.string().min(1).max(80).optional(),
     transport: z.enum(["stdio", "http"]),
+    /** When false, the server stays saved in config without connecting or exposing tools. */
+    enabled: z.boolean().default(true),
     command: z.string().min(1).max(260).optional(),
     args: z.array(z.string().max(512)).max(64).optional(),
     env: z.record(z.string(), z.string()).optional(),
@@ -198,6 +201,7 @@ export const McpServerConfigSchema = z
   });
 
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
+export type McpServerConfigInput = z.input<typeof McpServerConfigSchema>;
 
 export interface McpToolAnnotations {
   readOnlyHint?: boolean;
@@ -654,7 +658,7 @@ export class McpClient {
   private initialized = false;
   private cachedTools: McpToolDescriptor[] = [];
 
-  constructor(config: McpServerConfig, customTransport?: McpTransport) {
+  constructor(config: McpServerConfigInput, customTransport?: McpTransport) {
     this.config = McpServerConfigSchema.parse(config);
     this.transport =
       customTransport ??
@@ -802,6 +806,7 @@ export class McpClient {
 
   async close(): Promise<void> {
     this.initialized = false;
+    this.cachedTools = [];
     await this.transport.close();
   }
 }
@@ -855,14 +860,35 @@ export interface McpCallGuard {
   confirm?: (reason: string, sensitive: boolean) => Promise<boolean>;
 }
 
+export interface McpServerRuntimeStatus {
+  id: string;
+  connected: boolean;
+  tools: readonly McpToolDescriptor[];
+  error: string | null;
+}
+
 /** Multi-server MCP coordinator integrated with `permissions.ts` and `semanticBridge.ts`. */
 export class McpHub {
   private readonly clients = new Map<string, McpClient>();
+  private readonly configSnapshots = new Map<string, string>();
+  private readonly lastErrors = new Map<string, string>();
 
-  registerServer(config: McpServerConfig, customTransport?: McpTransport): McpClient {
+  registerServer(config: McpServerConfigInput, customTransport?: McpTransport): McpClient {
     const client = new McpClient(config, customTransport);
     this.clients.set(client.config.id, client);
+    this.configSnapshots.set(client.config.id, JSON.stringify(client.config));
+    this.lastErrors.delete(client.config.id);
     return client;
+  }
+
+  async unregisterServer(serverId: string): Promise<void> {
+    const existing = this.clients.get(serverId);
+    this.clients.delete(serverId);
+    this.configSnapshots.delete(serverId);
+    this.lastErrors.delete(serverId);
+    if (existing) {
+      await existing.close().catch(() => undefined);
+    }
   }
 
   getClient(serverId: string): McpClient | undefined {
@@ -871,6 +897,20 @@ export class McpHub {
 
   listServers(): readonly McpServerConfig[] {
     return [...this.clients.values()].map((c) => c.config);
+  }
+
+  statusFor(serverId: string): McpServerRuntimeStatus {
+    const client = this.clients.get(serverId);
+    return {
+      id: serverId,
+      connected: client?.isConnected === true,
+      tools: client?.tools ?? [],
+      error: this.lastErrors.get(serverId) ?? null,
+    };
+  }
+
+  statusSnapshot(): McpServerRuntimeStatus[] {
+    return [...this.clients.keys()].map((id) => this.statusFor(id));
   }
 
   private parsePrefixedToolName(
@@ -895,24 +935,116 @@ export class McpHub {
     return { serverId, toolName, client: this.clients.get(serverId) };
   }
 
+  async connectServer(
+    serverId: string,
+  ): Promise<{ ok: boolean; tools: readonly McpToolDescriptor[]; error?: string }> {
+    const client = this.clients.get(serverId);
+    if (!client) {
+      return { ok: false, tools: [], error: `Unknown MCP server "${serverId}".` };
+    }
+    if (client.config.enabled === false) {
+      await client.close().catch(() => undefined);
+      this.lastErrors.delete(serverId);
+      return { ok: false, tools: [], error: "Server is disabled." };
+    }
+    if (client.isConnected) {
+      await client.close().catch(() => undefined);
+    }
+    try {
+      await client.initialize();
+      await client.listTools();
+      this.lastErrors.delete(serverId);
+      return { ok: true, tools: client.tools };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.lastErrors.set(serverId, message);
+      await client.close().catch(() => undefined);
+      return { ok: false, tools: [], error: message };
+    }
+  }
+
   async connectAll(): Promise<{ connected: string[]; errors: Record<string, string> }> {
     const connected: string[] = [];
     const errors: Record<string, string> = {};
     for (const [id, client] of this.clients) {
+      if (client.config.enabled === false) continue;
       try {
         await client.initialize();
         await client.listTools();
+        this.lastErrors.delete(id);
         connected.push(id);
       } catch (err) {
-        errors[id] = err instanceof Error ? err.message : String(err);
+        const message = err instanceof Error ? err.message : String(err);
+        this.lastErrors.set(id, message);
+        errors[id] = message;
       }
     }
     return { connected, errors };
   }
 
+  /**
+   * Reconciles live MCP connections against the persisted server list: closes removed,
+   * disabled, or modified servers while preserving unchanged active connections.
+   */
+  async syncServers(
+    configs: readonly McpServerConfigInput[],
+  ): Promise<{ connected: string[]; errors: Record<string, string> }> {
+    const desired = new Map<string, McpServerConfig>();
+    for (const raw of configs.slice(0, MAX_MCP_SERVERS)) {
+      const parsed = McpServerConfigSchema.safeParse(raw);
+      if (parsed.success) desired.set(parsed.data.id, parsed.data);
+    }
+
+    // Close servers removed from config, disabled, or whose configuration changed.
+    for (const [id, client] of [...this.clients.entries()]) {
+      const next = desired.get(id);
+      if (!next || next.enabled === false) {
+        await this.unregisterServer(id);
+        continue;
+      }
+      const nextSnap = JSON.stringify(next);
+      if (this.configSnapshots.get(id) !== nextSnap) {
+        await this.unregisterServer(id);
+      } else if (!client.isConnected) {
+        this.lastErrors.delete(id);
+      }
+    }
+
+    const connected: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const [id, cfg] of desired) {
+      if (cfg.enabled === false) continue;
+      const existing = this.clients.get(id);
+      if (existing && existing.isConnected) {
+        connected.push(id);
+        continue;
+      }
+      if (!existing) {
+        this.registerServer(cfg);
+      }
+      const res = await this.connectServer(id);
+      if (res.ok) connected.push(id);
+      else if (res.error) errors[id] = res.error;
+    }
+    return { connected, errors };
+  }
+
+  /** True only when the discovered MCP tool explicitly declares itself read-only and local/non-destructive. */
+  isReadOnlyTool(fullToolName: string): boolean {
+    const parsed = this.parsePrefixedToolName(fullToolName);
+    if (!parsed?.client) return false;
+    const tool = parsed.client.tools.find((t) => t.name === parsed.toolName);
+    return (
+      tool?.annotations?.readOnlyHint === true &&
+      tool.annotations.destructiveHint !== true &&
+      tool.annotations.openWorldHint !== true
+    );
+  }
+
   listPrefixedTools(): { fullName: string; serverId: string; tool: McpToolDescriptor }[] {
     const out: { fullName: string; serverId: string; tool: McpToolDescriptor }[] = [];
     for (const [serverId, client] of this.clients) {
+      if (client.config.enabled === false || !client.isConnected) continue;
       for (const tool of client.tools) {
         out.push({ fullName: `mcp:${serverId}.${tool.name}`, serverId, tool });
       }
@@ -977,8 +1109,9 @@ export class McpHub {
   }
 
   async closeAll(): Promise<void> {
+    this.lastErrors.clear();
     for (const client of this.clients.values()) {
-      await client.close();
+      await client.close().catch(() => undefined);
     }
   }
 }

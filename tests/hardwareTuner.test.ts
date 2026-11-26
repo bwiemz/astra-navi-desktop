@@ -23,13 +23,19 @@ import {
 const GIB = 1024 ** 3;
 
 describe("BRAIN_MODELS xl & verifyModelSha256", () => {
-  it("resolves xl tier cleanly while keeping pickAutomatically conservative", () => {
+  it("resolves xl and Qwen3.5 35B-A3B MoE presets cleanly while keeping pickAutomatically conservative", () => {
     expect(BRAIN_MODELS.xl.vramGb).toBe(48);
+    expect(MOE_WORKSTATION_MODELS.largeMoe.architecture).toBe("moe");
+    expect(MOE_WORKSTATION_MODELS.largeMoe.vramGb).toBe(24);
     expect(MOE_WORKSTATION_MODELS.xlMoe.architecture).toBe("moe");
     expect(pickAutomatically(96 * GIB).id).toBe("standard");
     const resolved = resolveBrain("xl", "/models", 96 * GIB);
     expect(resolved.download?.id).toBe("xl");
-    expect(resolved.path).toBe("/models/Qwen3.5-72B-Q4_K_M.gguf");
+    expect(resolved.path).toBe("/models/Qwen3.5-122B-A10B-UD-IQ3_S.gguf");
+    const fastMoe = resolveBrain("qwen3.5-35b-a3b-moe", "/models", 24 * GIB);
+    expect(fastMoe.path).toBe("/models/Qwen3.5-35B-A3B-Q4_K_M.gguf");
+    expect(fastMoe.download?.architecture).toBe("moe");
+    expect(fastMoe.download?.activeParamsB).toBe(3);
   });
 
   it("computes KV-cache memory & selects highest fitting quantization precision", () => {
@@ -83,8 +89,7 @@ describe("hardwareTuner", () => {
     expect(rec.tier).toBe("xl");
     expect(rec.leanMemory).toBe(false);
     expect(rec.contextSize).toBe(32_768);
-    expect(rec.architecture).toBe("dense");
-    expect(rec.quantization).toBe("Q6_K");
+    expect(rec.architecture).toBe("moe");
     expect(rec.estimatedVramGb).toBeGreaterThan(40);
     expect(rec.stepDownFrom).toBeUndefined();
   });

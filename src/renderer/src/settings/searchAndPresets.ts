@@ -26,8 +26,6 @@ export function wireSearchAndPresets(savePatch: (patch: SettingsPatch) => Promis
   const input = element<HTMLInputElement>("settings-search");
   const clearBtn = element<HTMLButtonElement>("settings-search-clear");
   const countEl = element("settings-search-count");
-  const tier10Block = element<HTMLDetailsElement>("tier10-block");
-  let preSearchTier10Open: boolean | null = null;
 
   const filterSettings = (): void => {
     const query = input.value.trim().toLowerCase();
@@ -39,15 +37,10 @@ export function wireSearchAndPresets(savePatch: (patch: SettingsPatch) => Promis
       for (const el of document.querySelectorAll(".search-miss")) {
         el.classList.remove("search-miss");
       }
-      if (preSearchTier10Open !== null) {
-        tier10Block.open = preSearchTier10Open;
-        preSearchTier10Open = null;
-      }
       countEl.textContent = "";
       return;
     }
 
-    if (preSearchTier10Open === null) preSearchTier10Open = tier10Block.open;
     document.body.dataset["searching"] = "true";
 
     let totalMatches = 0;
@@ -56,7 +49,9 @@ export function wireSearchAndPresets(savePatch: (patch: SettingsPatch) => Promis
       const heading = panel.querySelector("h2")?.textContent?.toLowerCase() ?? "";
       const panelTitleMatch = heading.includes(query);
       const rows = [
-        ...panel.querySelectorAll<HTMLElement>(":scope > .row, :scope > .signin > form > .row, :scope > .machine-form > .row"),
+        ...panel.querySelectorAll<HTMLElement>(
+          ":scope > .row, :scope > .signin > form > .row, :scope > .machine-form > .row, :scope > .machine-form > .mcp-group > .row",
+        ),
       ];
       let visibleInPanel = 0;
 
@@ -68,23 +63,6 @@ export function wireSearchAndPresets(savePatch: (patch: SettingsPatch) => Promis
           visibleInPanel += 1;
           totalMatches += 1;
         }
-      }
-
-      const expRows = [...tier10Block.querySelectorAll<HTMLElement>(".row")];
-      if (panel.contains(tier10Block)) {
-        let matchedExp = 0;
-        for (const row of expRows) {
-          const text = (row.textContent ?? "").toLowerCase();
-          const match = panelTitleMatch || text.includes(query) || "experimental options".includes(query);
-          row.classList.toggle("search-miss", !match);
-          if (match) {
-            matchedExp += 1;
-            totalMatches += 1;
-          }
-        }
-        tier10Block.classList.toggle("search-miss", matchedExp === 0);
-        if (matchedExp > 0) tier10Block.open = true;
-        visibleInPanel += matchedExp;
       }
 
       panel.classList.toggle("search-miss", visibleInPanel === 0 && !panelTitleMatch);

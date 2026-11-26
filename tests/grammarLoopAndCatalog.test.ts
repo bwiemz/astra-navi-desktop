@@ -107,6 +107,18 @@ describe("Pillar 3 & 4: Strict Grammar-Constrained Tool Decoding, Loop Guards, a
     expect(moe?.benchmarkStatus).toBe("pending_gpu");
     expect(moe?.model.architecture).toBe("moe");
 
+    const fastMoe = findCatalogEntry("qwen3.5-35b-a3b-moe");
+    expect(fastMoe?.model.fileName).toBe("Qwen3.5-35B-A3B-Q4_K_M.gguf");
+    expect(fastMoe?.model.activeParamsB).toBe(3);
+
+    const xlMoe = findCatalogEntry("qwen3.5-122b-a10b-moe");
+    expect(xlMoe?.model.fileName).toBe("Qwen3.5-122B-A10B-UD-IQ3_S.gguf");
+    expect(xlMoe?.model.activeParamsB).toBe(10);
+
+    // Dead placeholder entries must not remain in the catalog
+    expect(findCatalogEntry("qwen3.5-72b")).toBeNull();
+    expect(findCatalogEntry("qwen3.5-120b-a16b-moe")).toBeNull();
+
     const resolvedPreset = resolvePresetChoice("qwen3.5-9b", "/models", null);
     expect(resolvedPreset.path.endsWith("Qwen3.5-9B-Q4_K_M.gguf")).toBe(true);
 

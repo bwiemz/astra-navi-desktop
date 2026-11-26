@@ -108,6 +108,8 @@ export interface SettingsView {
   phoneLink: boolean;
   pingPhone: boolean;
   machines: MachineView[];
+  /** Configured external MCP servers (header/env values are redacted; only key names are sent). */
+  mcpServers: McpServerView[];
   /** The desktop has a password window she can have SSH ask with. */
   canAskPassword: boolean;
   /** Whether the first-run setup wizard has been completed. */
@@ -174,6 +176,44 @@ export interface MachineView {
   port: number;
   user: string;
   lookWithoutAsking: boolean;
+}
+
+/** One discovered tool on a connected MCP server, shown in Settings. */
+export interface McpToolSummaryView {
+  name: string;
+  description?: string;
+  readOnly: boolean;
+  destructive: boolean;
+}
+
+/** One configured external MCP server as shown in Settings (secret header/env values omitted). */
+export interface McpServerView {
+  id: string;
+  name: string;
+  transport: "stdio" | "http";
+  enabled: boolean;
+  target: string;
+  headerKeys: string[];
+  envKeys: string[];
+  readOnlyAutoAllow: boolean;
+  connected: boolean;
+  toolCount: number;
+  tools: McpToolSummaryView[];
+  error: string | null;
+}
+
+/** Form payload submitted from Settings to add a new external MCP server. */
+export interface McpServerAddRequest {
+  id: string;
+  name?: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  readOnlyAutoAllow?: boolean;
 }
 
 /** One kept backup on a remote machine, as the Settings rollback drawer shows it. */
@@ -334,6 +374,21 @@ export interface SettingsBridge {
   ): Promise<{ restored: boolean; keptNew: string | null }>;
   /** Asks (with a confirmation) to forget a machine; resolves with the fresh view. */
   removeMachine(id: string): Promise<SettingsView>;
+  /** Adds an external MCP server, persists it, and attempts to connect and discover its tools. */
+  addMcpServer(
+    server: McpServerAddRequest,
+  ): Promise<{ ok: true; view: SettingsView; warning?: string } | { ok: false; why: string }>;
+  /** Removes an external MCP server and disconnects it. */
+  removeMcpServer(id: string): Promise<SettingsView>;
+  /** Enables or disables an external MCP server without deleting its config. */
+  toggleMcpServer(
+    id: string,
+    enabled: boolean,
+  ): Promise<{ ok: boolean; view: SettingsView; error?: string }>;
+  /** Toggles whether read-only tools on an MCP server may run without confirmation before outside text is read. */
+  setMcpReadOnlyAuto(id: string, on: boolean): Promise<SettingsView>;
+  /** Reconnects an external MCP server and refreshes its tool list. */
+  reconnectMcpServer(id: string): Promise<{ ok: boolean; view: SettingsView; error?: string }>;
   /** Probes local GPU/VRAM/RAM and recommends the optimal brain tier & quantization. */
   hardwareProfile(force?: boolean): Promise<HardwareRecommendationView>;
   /** Reads a bundled voice sample wav as a base64 data URI, or null if missing. */
@@ -410,7 +465,7 @@ export const POSTURE_PRESETS: readonly PosturePresetDefinition[] = [
   {
     id: "full-ship-ai",
     label: "Full Ship AI",
-    summary: "Enables UI automation, notification awareness, semantic bridges & advanced controls.",
+    summary: "Enables UI automation, notification awareness & advanced controls.",
     patch: {
       handsOff: false,
       watch: true,
@@ -418,9 +473,6 @@ export const POSTURE_PRESETS: readonly PosturePresetDefinition[] = [
       readNotices: true,
       workInPrograms: true,
       advancedSettings: true,
-      tier10: {
-        semanticBridges: true,
-      },
     },
   },
 ];

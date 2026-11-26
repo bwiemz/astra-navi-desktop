@@ -165,7 +165,7 @@
           </button>
           <button type="button" class="posture-btn" data-posture="full-ship-ai" aria-pressed="false">
             <span class="posture-title">Full Ship AI</span>
-            <span class="posture-desc">+ Hands, notices &amp; bridges</span>
+            <span class="posture-desc">+ Hands, notices &amp; advanced controls</span>
           </button>
         </div>
       </div>
@@ -178,6 +178,7 @@
       <a href="#sec-watch">Watch</a>
       <a href="#sec-agenda">Agenda</a>
       <a href="#sec-devices">Devices</a>
+      <a href="#sec-mcp">MCP tools</a>
       <a href="#sec-machines" class="advanced-only">Machines</a>
       <a href="#sec-memory">Memory</a>
       <a href="#sec-search" class="advanced-only">Search</a>
@@ -468,6 +469,108 @@
         </label>
       </section>
 
+      <section id="sec-mcp" class="panel">
+        <h2>External MCP tools</h2>
+        <p class="note">
+          Connect local or private-LAN Model Context Protocol (MCP) servers (such as Home
+          Assistant, Obsidian, or local developer tools). Every tool asks your permission by
+          default, and all MCP responses are treated as untrusted outside text.
+        </p>
+        <ul id="mcp-servers" class="machines"></ul>
+        <form id="mcp-form" class="machine-form" autocomplete="off">
+          <label class="row">
+            <span class="what">Server ID</span>
+            <input
+              id="mcp-id"
+              type="text"
+              maxlength="64"
+              placeholder="home-assistant"
+              pattern="[a-z0-9][a-z0-9_-]{0,63}"
+              required
+            />
+            <span class="why">
+              Short lowercase slug (letters, digits, <code>-</code> or <code>_</code>). Tools appear
+              as <code>mcp:&lt;id&gt;.&lt;tool&gt;</code>.
+            </span>
+          </label>
+          <label class="row">
+            <span class="what">Display name</span>
+            <input id="mcp-name" type="text" maxlength="80" placeholder="Home Assistant" />
+          </label>
+          <label class="row">
+            <span class="what">Transport</span>
+            <select id="mcp-transport">
+              <option value="stdio">Local command (stdio)</option>
+              <option value="http">HTTP / SSE (localhost or private LAN)</option>
+            </select>
+          </label>
+          <div id="mcp-stdio-fields" class="mcp-group">
+            <label class="row">
+              <span class="what">Command</span>
+              <input id="mcp-command" type="text" maxlength="260" placeholder="npx" required />
+              <span class="why">Executable name or full path (no shell chaining).</span>
+            </label>
+            <label class="row">
+              <span class="what">Arguments (one per line)</span>
+              <textarea
+                id="mcp-args"
+                rows="3"
+                placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;/home/you/notes"
+              ></textarea>
+            </label>
+            <label class="row">
+              <span class="what">Working folder (optional)</span>
+              <input id="mcp-cwd" type="text" maxlength="400" placeholder="/home/you/project" />
+            </label>
+            <label class="row">
+              <span class="what">Environment variables (optional)</span>
+              <textarea
+                id="mcp-env"
+                rows="2"
+                placeholder="API_TOKEN=secret-value"
+              ></textarea>
+              <span class="why">One <code>KEY=VALUE</code> per line. Saved privately in local config.</span>
+            </label>
+          </div>
+          <div id="mcp-http-fields" class="mcp-group" hidden>
+            <label class="row">
+              <span class="what">Server URL</span>
+              <input
+                id="mcp-url"
+                type="url"
+                maxlength="512"
+                placeholder="http://homeassistant.local:8123/mcp_server/sse"
+              />
+              <span class="why">
+                <code>https://</code> anywhere public, or <code>http://</code> on localhost /
+                private home LAN only.
+              </span>
+            </label>
+            <label class="row">
+              <span class="what">HTTP headers (optional)</span>
+              <textarea
+                id="mcp-headers"
+                rows="2"
+                placeholder="Authorization: Bearer your-long-lived-token"
+              ></textarea>
+              <span class="why">One <code>Header: value</code> per line. Values are never echoed back.</span>
+            </label>
+          </div>
+          <label class="row switch">
+            <input id="mcp-readonly-auto" type="checkbox" />
+            <span class="what">Allow read-only tools without asking</span>
+            <span class="why">
+              Off by default. Even when on, tools still ask once any outside text enters the chat.
+            </span>
+          </label>
+          <div class="row">
+            <span class="what"></span>
+            <button id="mcp-add-btn" type="submit">Add &amp; connect</button>
+            <span id="mcp-note" class="why" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+      </section>
+
       <section id="sec-machines" class="panel advanced-only">
         <h2>Your other machines</h2>
         <p class="note">
@@ -727,14 +830,6 @@
             <code>npm run export-pairs</code> reads.</span
           >
         </label>
-        <details id="tier10-block" class="traces advanced-only">
-          <summary>Experimental options (all off by default)</summary>
-          <p class="note">
-            Every experimental option stays off until you turn it on here. Everything runs locally
-            on your computer or private home network.
-          </p>
-          <div id="tier10-toggles"></div>
-        </details>
         <details id="traces-block" class="traces advanced-only">
           <summary>Why did she do that?</summary>
           <p class="note">

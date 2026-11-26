@@ -16,8 +16,9 @@ import type { LocalEngine } from "../core/engine.ts";
 import { benchmarkFirstLaunchHardware } from "../core/hardwareTuner.ts";
 import type { Initiative } from "../core/initiative.ts";
 import { LANGUAGE_CODES, LANGUAGES, type LanguageCode } from "../core/languages.ts";
-import { BRAIN_MODELS } from "../core/models.ts";
+import { BRAIN_MODELS, findCatalogEntry, MOE_WORKSTATION_MODELS } from "../core/models.ts";
 import type { MemoryStore } from "../core/memory.ts";
+import type { McpHub } from "../core/mcpClient.ts";
 import type { MissionBoard } from "../core/missionPlan.ts";
 import type { NoticeWatch } from "../core/notices.ts";
 import { dataDir, ordersFile, resolveBundledRoot, stationDir } from "../core/paths.ts";
@@ -55,6 +56,7 @@ import type {
   SupportBundleResultView,
 } from "../shared/settings.ts";
 import { setStartAtLogin } from "./loginStart.ts";
+import { buildMcpServerViews } from "./mcpIpc.ts";
 import { SettingsPatchSchema, StationAccountSchema } from "./settingsSchema.ts";
 
 /**
@@ -75,6 +77,7 @@ export interface SettingsIpcDeps {
   noticeWatch(): NoticeWatch | null;
   initiative(): Initiative | null;
   reach(): Reach | null;
+  mcpHub?(): McpHub | null;
   board?(): MissionBoard | null;
   searchBudget(): SearchBudget | null;
   designedVoices(): string[];
@@ -219,7 +222,13 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
     const fullVoiceReady = deps.fullVoiceReady();
     return {
       brain: config.value.brain,
-      brains: Object.values(BRAIN_MODELS).map((model) => ({
+      brains: [
+        BRAIN_MODELS.small,
+        BRAIN_MODELS.standard,
+        BRAIN_MODELS.large,
+        { ...MOE_WORKSTATION_MODELS.largeMoe, id: "qwen3.5-35b-a3b-moe" },
+        BRAIN_MODELS.xl,
+      ].map((model) => ({
         id: model.id,
         label: `${model.label}, about ${model.vramGb} GB of graphics memory`,
       })),
@@ -314,6 +323,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       phoneLink,
       pingPhone: config.value.devices.pingPhone,
       machines: config.value.fleet.machines.map((machine) => ({ ...machine })),
+      mcpServers: buildMcpServerViews(config.value.mcp.servers, deps.mcpHub?.() ?? null),
       canAskPassword,
       onboardingComplete: config.value.onboardingComplete,
       advancedSettings: config.value.advancedSettings,
@@ -654,6 +664,10 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       config.value.search.searxngUrl,
       stationAccount()?.username,
       ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
+      ...config.value.mcp.servers.flatMap((s) => [
+        ...Object.values(s.headers ?? {}),
+        ...Object.values(s.env ?? {}),
+      ]),
     ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 
     const enabledTier10Flags = Object.entries(config.value.tier10)
@@ -853,7 +867,10 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       "settings:download-brain",
       async (event, tier: unknown): Promise<SettingsView> => {
         if (!fromSettingsWindow(event)) throw new Error("Not allowed from here.");
-        if (typeof tier !== "string" || (tier !== "auto" && !Object.hasOwn(BRAIN_MODELS, tier))) {
+        if (
+          typeof tier !== "string" ||
+          (tier !== "auto" && !Object.hasOwn(BRAIN_MODELS, tier) && findCatalogEntry(tier) === null)
+        ) {
           throw new Error("Choose a valid brain tier.");
         }
         deps.chooseBrain(tier);

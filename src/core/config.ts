@@ -4,6 +4,7 @@ import { z } from "zod";
 import { isReservedCalendarName, MAX_CALENDARS, whyNotThisCalendar } from "./agenda.ts";
 import { MACHINE_HOST, MACHINE_NAME, MACHINE_USER } from "./fleet.ts";
 import { LANGUAGE_CODES } from "./languages.ts";
+import { MAX_MCP_SERVERS, McpServerConfigSchema } from "./mcpClient.ts";
 
 const CalendarSchema = z.object({
   name: z
@@ -257,6 +258,25 @@ const ConfigSchema = z.object({
       pushToTalk: z.string().max(40).default(""),
       summonHide: z.string().max(40).default(""),
       clickThrough: z.string().max(40).default(""),
+    })
+    .prefault({}),
+  /** External MCP servers configured explicitly by the user in Settings (never added by the model). */
+  mcp: z
+    .object({
+      servers: z
+        .preprocess(
+          (given) =>
+            Array.isArray(given)
+              ? given
+                  .flatMap((entry) => {
+                    const taken = McpServerConfigSchema.safeParse(entry);
+                    return taken.success ? [taken.data] : [];
+                  })
+                  .slice(0, MAX_MCP_SERVERS)
+              : [],
+          z.array(McpServerConfigSchema).max(MAX_MCP_SERVERS),
+        )
+        .default([]),
     })
     .prefault({}),
   /** Tier 10 experimental capabilities: strictly default-off until opted in. */

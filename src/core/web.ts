@@ -12,8 +12,9 @@ import { isPlainWebAddress, isPublicIp } from "./permissions.ts";
  */
 
 /** Says plainly what is making the request; sites that do not want automated visitors can refuse. */
-const USER_AGENT =
-  "AI-chan-Desktop/0.1 (local desktop assistant; fetches pages a user asked about)";
+export const WEB_USER_AGENT =
+  "Astra-Navi-Desktop/1.0 (local desktop assistant; fetches pages a user asked about)";
+const USER_AGENT = WEB_USER_AGENT;
 const TIMEOUT_MS = 15_000;
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_PAGE_CHARS = 6000;

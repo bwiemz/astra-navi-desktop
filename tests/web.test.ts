@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { decodeEntities, htmlToText, pageLinks, parseSearchResults } from "../src/core/web.ts";
+import {
+  decodeEntities,
+  htmlToText,
+  pageLinks,
+  parseSearchResults,
+  WEB_USER_AGENT,
+} from "../src/core/web.ts";
+
+describe("WEB_USER_AGENT", () => {
+  it("identifies Astra Navi Desktop rather than legacy AI-chan branding", () => {
+    expect(WEB_USER_AGENT).toMatch(/^Astra-Navi-Desktop\//);
+    expect(WEB_USER_AGENT).not.toContain("AI-chan");
+  });
+});
 
 describe("htmlToText", () => {
   it("keeps the words and drops scripts, styles, menus and markup", () => {

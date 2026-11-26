@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { LANGUAGE_CODES } from "../core/languages.ts";
-import { BRAIN_MODELS } from "../core/models.ts";
+import { BRAIN_MODELS, findCatalogEntry } from "../core/models.ts";
 
 /**
  * What the settings page may send. The page is her own, but what arrives from it is
@@ -17,7 +17,7 @@ export const StationAccountSchema = z.object({
 
 export const SettingsPatchSchema = z
   .object({
-    // "auto", one of the three sizes, or a model file of the user's own.
+    // "auto", a built-in tier, a rolling catalog preset, or a model file of the user's own.
     brain: z
       .string()
       .max(300)
@@ -25,6 +25,7 @@ export const SettingsPatchSchema = z
         (value) =>
           value === "auto" ||
           Object.hasOwn(BRAIN_MODELS, value) ||
+          findCatalogEntry(value) !== null ||
           (isAbsolute(value) && /\.gguf$/i.test(value)),
       ),
     language: z.enum(LANGUAGE_CODES),

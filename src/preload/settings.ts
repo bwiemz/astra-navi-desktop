@@ -6,6 +6,7 @@ import type {
   DiskSpaceCheckView,
   HardwareRecommendationView,
   MachineFound,
+  McpServerAddRequest,
   ModelDownloadStatusView,
   PolicyAuditSummaryView,
   ProfileBackupActionResult,
@@ -65,6 +66,26 @@ const bridge: SettingsBridge = {
       keptNew: string | null;
     }>,
   removeMachine: (id: string) => ipcRenderer.invoke("fleet:remove", id) as Promise<SettingsView>,
+  addMcpServer: (server: McpServerAddRequest) =>
+    ipcRenderer.invoke("mcp:add-server", server) as Promise<
+      { ok: true; view: SettingsView; warning?: string } | { ok: false; why: string }
+    >,
+  removeMcpServer: (id: string) =>
+    ipcRenderer.invoke("mcp:remove-server", id) as Promise<SettingsView>,
+  toggleMcpServer: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke("mcp:toggle-server", id, enabled) as Promise<{
+      ok: boolean;
+      view: SettingsView;
+      error?: string;
+    }>,
+  setMcpReadOnlyAuto: (id: string, on: boolean) =>
+    ipcRenderer.invoke("mcp:set-read-only-auto", id, on) as Promise<SettingsView>,
+  reconnectMcpServer: (id: string) =>
+    ipcRenderer.invoke("mcp:reconnect-server", id) as Promise<{
+      ok: boolean;
+      view: SettingsView;
+      error?: string;
+    }>,
   hardwareProfile: (force?: boolean) =>
     ipcRenderer.invoke("settings:hardware-profile", Boolean(force)) as Promise<HardwareRecommendationView>,
   previewVoice: (name: string) =>

@@ -37,12 +37,10 @@ describe("Tier 10 Settings Schema, Config Synchronization & UI Integration", () 
       readFile(join(ROOT, "src/renderer/src/settings.ts"), "utf8"),
       readFile(join(ROOT, "src/main/settingsIpc.ts"), "utf8"),
     ]);
-    expect(html).toContain('id="tier10-toggles"');
-    expect(html).toContain("Experimental options (all off by default)");
+    // Inactive Tier 10 switches remain hidden from the Settings UI so users are not shown dead toggles.
+    expect(html).not.toContain('id="tier10-toggles"');
+    expect(html).not.toContain('id="tier10-block"');
     expect(html).not.toContain("Tier 10");
-    expect(uiScript).toContain("TIER10_KEYS");
-    expect(uiScript).toContain("EXPERIMENTAL_OPTIONS");
-    expect(uiScript).toContain('why.className = "why"');
     expect(uiScript).not.toContain("innerHTML");
     expect(ipcScript).toContain("tier10: { ...config.value.tier10 }");
   });
