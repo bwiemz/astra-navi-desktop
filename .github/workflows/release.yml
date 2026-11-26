@@ -281,6 +281,7 @@ jobs:
           cp hands/linux-hands-native/target/release/linux-hands hands/linux-hands-native/bin/linux-hands
       - run: npm ci
       - run: npm run check
+      - run: npm run check:model-sizes
       - run: npm run build
       - run: npm run eval -- --fuzz
       - run: npm run eval -- --audit

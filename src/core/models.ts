@@ -35,7 +35,7 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     label: "Small (Qwen3.5 4B)",
     fileName: "Qwen3.5-4B-Q4_K_M.gguf",
     url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
-    sizeBytes: 2_740_000_000,
+    sizeBytes: 2_740_937_888,
     vramGb: 4,
     architecture: "dense",
     quantization: "Q4_K_M",
@@ -48,7 +48,7 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     label: "Standard (Qwen3.5 9B)",
     fileName: "Qwen3.5-9B-Q4_K_M.gguf",
     url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf",
-    sizeBytes: 5_680_000_000,
+    sizeBytes: 5_680_522_464,
     vramGb: 7,
     architecture: "dense",
     quantization: "Q4_K_M",
@@ -61,7 +61,7 @@ export const BRAIN_MODELS: Record<BrainModel["id"], BrainModel> = {
     label: "Large (Qwen3.8 27B)",
     fileName: "Qwen3.8-27B-UD-Q4_K_M.gguf",
     url: "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_M.gguf",
-    sizeBytes: 16_560_000_000,
+    sizeBytes: 16_564_259_744,
     vramGb: 19,
     architecture: "dense",
     quantization: "Q4_K_M",
@@ -390,7 +390,7 @@ export const ROLLING_MODEL_CATALOG: readonly RollingModelEntry[] = [
       label: "Large MoE (Qwen3 30B-A3B)",
       fileName: "Qwen3-30B-A3B-Q4_K_M.gguf",
       url: "https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf",
-      sizeBytes: 18_600_000_000,
+      sizeBytes: 18_556_686_912,
       vramGb: 20,
       architecture: "moe",
       quantization: "Q4_K_M",
@@ -428,6 +428,31 @@ export function getVettedPresets(): RollingModelEntry[] {
 
 export function findCatalogEntry(presetId: string): RollingModelEntry | null {
   return ROLLING_MODEL_CATALOG.find((entry) => entry.presetId === presetId) ?? null;
+}
+
+export interface CatalogDownloadAsset {
+  label: string;
+  fileName: string;
+  url: string;
+  sizeBytes: number;
+}
+
+/** Enumerates every unique downloadable GGUF asset declared in the model catalog. */
+export function listCatalogDownloadAssets(): CatalogDownloadAsset[] {
+  const byUrl = new Map<string, CatalogDownloadAsset>();
+  const add = (label: string, fileName: string, url: string, sizeBytes: number): void => {
+    if (!byUrl.has(url)) {
+      byUrl.set(url, { label, fileName, url, sizeBytes });
+    }
+  };
+  for (const model of [
+    ...Object.values(BRAIN_MODELS),
+    ...Object.values(MOE_WORKSTATION_MODELS),
+    ...ROLLING_MODEL_CATALOG.map((entry) => entry.model),
+  ]) {
+    add(model.label, model.fileName, model.url, model.sizeBytes);
+  }
+  return [...byUrl.values()];
 }
 
 /** Resolves `"auto"`, a tier ID, a rolling catalog `presetId`, or an absolute `.gguf` path. */

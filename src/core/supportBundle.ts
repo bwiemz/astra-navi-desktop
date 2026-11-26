@@ -75,6 +75,57 @@ const FORBIDDEN_BUNDLE_FIELDS = [
   "password",
 ] as const;
 
+const COMMON_NON_SECRET_LITERALS = new Set([
+  "true",
+  "false",
+  "null",
+  "none",
+  "info",
+  "debug",
+  "warn",
+  "warning",
+  "error",
+  "trace",
+  "fatal",
+  "verbose",
+  "silent",
+  "localhost",
+  "default",
+  "development",
+  "production",
+  "staging",
+  "testing",
+  "local",
+  "public",
+  "private",
+  "enabled",
+  "disabled",
+  "utf8",
+  "utf-8",
+  "ascii",
+  "json",
+  "text",
+  "plain",
+  "http",
+  "https",
+  "stdio",
+  "status",
+  "server",
+  "client",
+  "system",
+]);
+
+function escapeRegexLiteral(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function shouldRedactExtraSecret(secret: string): boolean {
+  if (secret.length < 6) return false;
+  if (/^\d+(?:\.\d+)?$/.test(secret)) return false;
+  if (COMMON_NON_SECRET_LITERALS.has(secret.toLowerCase())) return false;
+  return true;
+}
+
 /**
  * Scrubs API keys, tokens, URLs with embedded credentials/queries, private keys,
  * SSH public/host fingerprints, email addresses, IP addresses, and OS user paths.
@@ -96,7 +147,13 @@ export function redactSupportText(
 
   for (const rawSecret of extraSecrets) {
     const secret = rawSecret.trim();
-    if (secret.length >= 3 && out.includes(secret)) {
+    if (!shouldRedactExtraSecret(secret) || !out.includes(secret)) continue;
+    if (secret.length < 16 && /^[A-Za-z0-9_]+$/.test(secret)) {
+      replaceCount(
+        new RegExp(`(?<![A-Za-z0-9_])${escapeRegexLiteral(secret)}(?![A-Za-z0-9_])`, "g"),
+        "[redacted]",
+      );
+    } else {
       out = out.split(secret).join("[redacted]");
       count += 1;
     }

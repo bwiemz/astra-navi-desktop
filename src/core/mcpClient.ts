@@ -73,7 +73,35 @@ const FORBIDDEN_ENV_KEYS = new Set([
 
 const SAFE_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
-/** Strips control, zero-width, Unicode tag, BiDi override characters, and `[[...]]` mood markers. */
+/**
+ * Strips non-whitespace control chars, invisible Unicode tag characters (`U+E0000–U+E007F`),
+ * BiDi overrides/directional marks, and `[[...]]` mood markers from MCP tool *outputs* and
+ * *resources* while preserving legitimate zero-width joiners (`U+200D` ZWJ for compound emoji
+ * like 👩‍💻 and `U+200C` ZWNJ for Persian/Arabic/Indic text) so read-then-write round trips
+ * keep file contents intact.
+ */
+export function sanitizeUntrustedOutput(raw: string): string {
+  const parts: string[] = [];
+  for (const ch of raw) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (
+      (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d) ||
+      cp === 0x7f ||
+      cp === 0x061c ||
+      cp === 0x200e ||
+      cp === 0x200f ||
+      (cp >= 0x202a && cp <= 0x202e) ||
+      (cp >= 0x2066 && cp <= 0x2069) ||
+      (cp >= 0xe0000 && cp <= 0xe007f)
+    ) {
+      continue;
+    }
+    parts.push(ch);
+  }
+  return parts.join("").replaceAll("[[", "[").replaceAll("]]", "]");
+}
+
+/** Strips control, zero-width, Unicode tag, BiDi override characters, and `[[...]]` mood markers for schema metadata. */
 function sanitizeUntrustedText(raw: string, collapseWhitespace: boolean): string {
   const parts: string[] = [];
   for (const ch of raw) {
@@ -107,7 +135,7 @@ function sanitizeUntrustedText(raw: string, collapseWhitespace: boolean): string
  * Aggressively sanitizes server-supplied MCP tool & parameter descriptions before they
  * enter the model prompt/tool schema: bounds input BEFORE regex stripping (preventing
  * quadratic regex backtracking on huge descriptions), strips control/zero-width/Unicode-tag/
- * BiDi chars, ChatML delimiters, XML tool/system/memory tags (iterated to fixed point),
+ * BiDi chars, ChatML delimiters, XML tool/system/memory tags (iterated to true fixed point),
  * and mood markers.
  */
 export function sanitizeMcpMetadataText(raw: string, maxChars = MAX_TOOL_DESCRIPTION_CHARS): string {
@@ -116,7 +144,8 @@ export function sanitizeMcpMetadataText(raw: string, maxChars = MAX_TOOL_DESCRIP
   const preLimit = Math.max(1024, safeMax * 4);
   const clipped = raw.length > preLimit ? raw.slice(0, preLimit) : raw;
   let cleaned = sanitizeUntrustedText(clipped, true);
-  for (let pass = 0; pass < 6; pass += 1) {
+  // Loop until true fixed point: every non-noop pass strictly shrinks the bounded string.
+  for (;;) {
     const next = cleaned
       .replaceAll("<|im_start|>", "")
       .replaceAll("<|im_end|>", "")
@@ -135,7 +164,8 @@ export function sanitizeMcpMetadataText(raw: string, maxChars = MAX_TOOL_DESCRIP
 /**
  * Resolves a stdio MCP command safely while keeping `shell: false` (never spawning `cmd.exe`).
  * On Windows, Node 20+ rejects `.cmd`/`.bat` shims like `npx` with `EINVAL` under `shell: false`;
- * this resolves `npx`/`npm` directly to `node.exe` + `npx-cli.js`/`npm-cli.js` when present.
+ * this resolves `npx`/`npm` directly to `node.exe` + `npx-cli.js`/`npm-cli.js` when present
+ * (marking `useElectronAsNode: true` if falling back to Electron's `process.execPath`).
  */
 export function resolveStdioCommand(
   command: string,
@@ -146,7 +176,7 @@ export function resolveStdioCommand(
     nodeExecPath?: string;
     fileExists?: (path: string) => boolean;
   } = {},
-): { command: string; args: string[] } {
+): { command: string; args: string[]; useElectronAsNode?: boolean } {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32") {
     return { command, args: [...args] };
@@ -176,21 +206,29 @@ export function resolveStdioCommand(
     return null;
   };
 
-  const findNodeExe = (): string => {
+  const findNodeExe = (): { command: string; useElectronAsNode: boolean } => {
     if (pathLib.basename(nodeExec).toLowerCase() === "node.exe" && exists(nodeExec)) {
-      return nodeExec;
+      return { command: nodeExec, useElectronAsNode: false };
     }
     for (const dir of pathDirs) {
       const cand = pathLib.join(dir, "node.exe");
-      if (exists(cand)) return cand;
+      if (exists(cand)) return { command: cand, useElectronAsNode: false };
     }
-    return nodeExec;
+    return {
+      command: nodeExec,
+      useElectronAsNode: pathLib.basename(nodeExec).toLowerCase() !== "node.exe",
+    };
   };
 
   if (baseLower === "npx" || baseLower === "npx.cmd") {
     const cli = findNodeCliScript("npx-cli.js");
     if (cli) {
-      return { command: findNodeExe(), args: [cli, ...args] };
+      const node = findNodeExe();
+      return {
+        command: node.command,
+        args: [cli, ...args],
+        ...(node.useElectronAsNode ? { useElectronAsNode: true } : {}),
+      };
     }
     throw new Error(
       `Windows cannot run "${trimmed}" directly without a shell and npx-cli.js was not found on PATH. Install Node.js (with npm) or configure "node" with the server script path, or use "uvx".`,
@@ -199,7 +237,12 @@ export function resolveStdioCommand(
   if (baseLower === "npm" || baseLower === "npm.cmd") {
     const cli = findNodeCliScript("npm-cli.js");
     if (cli) {
-      return { command: findNodeExe(), args: [cli, ...args] };
+      const node = findNodeExe();
+      return {
+        command: node.command,
+        args: [cli, ...args],
+        ...(node.useElectronAsNode ? { useElectronAsNode: true } : {}),
+      };
     }
     throw new Error(
       `Windows cannot run "${trimmed}" directly without a shell and npm-cli.js was not found on PATH.`,
@@ -445,7 +488,6 @@ export class StdioMcpTransport implements McpTransport {
   private nextId = 1;
   private stdoutBuf = "";
   private readonly pending = new Map<number, PendingRpc>();
-  private stderrTail = "";
   private closedByCaller = false;
   private disconnectListener: ((reason: string) => void) | null = null;
 
@@ -469,39 +511,49 @@ export class StdioMcpTransport implements McpTransport {
     }
     const resolved = resolveStdioCommand(rawCommand, this.cfg.args ?? []);
     const cleanEnv = assertSafeEnvOverrides(this.cfg.env);
+    const spawnEnv = resolved.useElectronAsNode
+      ? { ...cleanEnv, ELECTRON_RUN_AS_NODE: "1" }
+      : cleanEnv;
     this.closedByCaller = false;
-    this.stderrTail = "";
     this.stdoutBuf = "";
+    let stderrTail = "";
     const child = spawn(resolved.command, resolved.args, {
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
       ...(this.cfg.cwd ? { cwd: this.cfg.cwd } : {}),
-      env: cleanEnv,
+      env: spawnEnv,
       windowsHide: true,
     });
     this.child = child;
     child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => this.handleChunk(chunk));
+    child.stdout?.on("data", (chunk: string) => {
+      if (this.child !== child) return;
+      this.handleChunk(chunk);
+    });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
-      this.stderrTail = (this.stderrTail + chunk).slice(-2048);
+      stderrTail = (stderrTail + chunk).slice(-2048);
     });
     child.on("error", (err) => {
       const reason = `MCP stdio error: ${err.message}`;
       const wasActive = this.child === child;
-      if (wasActive) this.child = null;
-      this.rejectAll(new Error(reason));
-      if (wasActive && !this.closedByCaller) {
-        this.disconnectListener?.(reason);
+      if (wasActive) {
+        this.child = null;
+        this.rejectAll(new Error(reason));
+        if (!this.closedByCaller) {
+          this.disconnectListener?.(reason);
+        }
       }
     });
     child.on("exit", (code, signal) => {
-      const reason = `MCP stdio process exited (${code ?? signal ?? "unknown"})${this.stderrTail ? `: ${this.stderrTail.trim()}` : ""}`;
+      const reason = `MCP stdio process exited (${code ?? signal ?? "unknown"})${stderrTail ? `: ${stderrTail.trim()}` : ""}`;
       const wasActive = this.child === child;
-      if (wasActive) this.child = null;
-      this.rejectAll(new Error(reason));
-      if (wasActive && !this.closedByCaller) {
-        this.disconnectListener?.(reason);
+      if (wasActive) {
+        this.child = null;
+        this.rejectAll(new Error(reason));
+        if (!this.closedByCaller) {
+          this.disconnectListener?.(reason);
+        }
       }
     });
   }
@@ -542,9 +594,13 @@ export class StdioMcpTransport implements McpTransport {
 
   private handleChunk(chunk: string): void {
     if (Buffer.byteLength(this.stdoutBuf, "utf8") + Buffer.byteLength(chunk, "utf8") > MAX_STDIO_BUFFER_BYTES) {
+      const reason = "MCP stdio stdout buffer exceeded 2 MiB limit.";
       this.stdoutBuf = "";
-      this.rejectAll(new Error("MCP stdio stdout buffer exceeded 2 MiB limit."));
+      this.rejectAll(new Error(reason));
       this.killChildQuietly();
+      if (!this.closedByCaller) {
+        this.disconnectListener?.(reason);
+      }
       return;
     }
     this.stdoutBuf += chunk;
@@ -936,7 +992,7 @@ export class McpClient {
           piece = "[unserializable MCP content item]";
         }
       }
-      const sanitized = sanitizeUntrustedText(piece, false);
+      const sanitized = sanitizeUntrustedOutput(piece);
       parts.push(sanitized);
       runningLen += sanitized.length;
       if (runningLen >= MAX_OUTPUT_CHARS) break;
@@ -969,7 +1025,7 @@ export class McpClient {
     const first = Array.isArray(res?.contents) ? res.contents[0] : undefined;
     const rawText = typeof first?.text === "string" ? first.text : "";
     return {
-      text: sanitizeUntrustedText(rawText.slice(0, MAX_OUTPUT_CHARS), false),
+      text: sanitizeUntrustedOutput(rawText.slice(0, MAX_OUTPUT_CHARS)),
       ...(first?.mimeType ? { mimeType: first.mimeType } : {}),
       outsideText: true,
     };
@@ -1061,6 +1117,7 @@ export class McpHub {
   private readonly reconnectMaxMs: number;
   private readonly maxReconnectAttempts: number;
   private readonly stableConnectionMs: number;
+  private closed = false;
 
   constructor(options: McpHubOptions = {}) {
     this.reconnectBaseMs = Math.max(10, options.reconnectBaseMs ?? DEFAULT_RECONNECT_BASE_MS);
@@ -1090,7 +1147,7 @@ export class McpHub {
     if (!this.reconnectAttempts.has(serverId)) return;
     const timer = setTimeout(() => {
       this.stableTimers.delete(serverId);
-      if (this.clients.get(serverId) === client && client.isConnected) {
+      if (!this.closed && this.clients.get(serverId) === client && client.isConnected) {
         this.reconnectAttempts.delete(serverId);
       }
     }, this.stableConnectionMs);
@@ -1099,7 +1156,7 @@ export class McpHub {
   }
 
   private scheduleReconnect(serverId: string): void {
-    if (this.maxReconnectAttempts <= 0) return;
+    if (this.closed || this.maxReconnectAttempts <= 0) return;
     const client = this.clients.get(serverId);
     if (!client || client.config.enabled === false) return;
     if (this.reconnectTimers.has(serverId)) return;
@@ -1120,10 +1177,11 @@ export class McpHub {
     const delayMs = Math.min(this.reconnectMaxMs, this.reconnectBaseMs * 2 ** (attempt - 1));
     const timer = setTimeout(() => {
       this.reconnectTimers.delete(serverId);
+      if (this.closed) return;
       const current = this.clients.get(serverId);
       if (!current || current.config.enabled === false || current.isConnected) return;
       void this.connectServer(serverId, { fromAutoReconnect: true }).then((res) => {
-        if (!res.ok) this.scheduleReconnect(serverId);
+        if (!res.ok && !this.closed) this.scheduleReconnect(serverId);
       });
     }, delayMs);
     timer.unref?.();
@@ -1131,13 +1189,14 @@ export class McpHub {
   }
 
   registerServer(config: McpServerConfigInput, customTransport?: McpTransport): McpClient {
+    this.closed = false;
     const client = new McpClient(config, customTransport);
     const id = client.config.id;
     this.clearReconnectTimer(id);
     this.clearStableTimer(id);
     this.reconnectAttempts.delete(id);
     client.setOnDisconnect((reason) => {
-      if (this.clients.get(id) !== client) return;
+      if (this.closed || this.clients.get(id) !== client) return;
       this.clearStableTimer(id);
       this.lastErrors.set(id, reason);
       this.scheduleReconnect(id);
@@ -1210,11 +1269,15 @@ export class McpHub {
     serverId: string,
     options: { fromAutoReconnect?: boolean } = {},
   ): Promise<{ ok: boolean; tools: readonly McpToolDescriptor[]; error?: string }> {
-    this.clearReconnectTimer(serverId);
-    this.clearStableTimer(serverId);
+    if (options.fromAutoReconnect && this.closed) {
+      return { ok: false, tools: [], error: "MCP hub is closed." };
+    }
     if (!options.fromAutoReconnect) {
+      this.closed = false;
       this.reconnectAttempts.delete(serverId);
     }
+    this.clearReconnectTimer(serverId);
+    this.clearStableTimer(serverId);
     const client = this.clients.get(serverId);
     if (!client) {
       return { ok: false, tools: [], error: `Unknown MCP server "${serverId}".` };
@@ -1227,34 +1290,47 @@ export class McpHub {
     if (client.isConnected) {
       await client.close().catch(() => undefined);
     }
+    if (this.closed) {
+      return { ok: false, tools: [], error: "MCP hub is closed." };
+    }
     try {
       await client.initialize();
       await client.listTools();
+      if (this.closed || this.clients.get(serverId) !== client) {
+        await client.close().catch(() => undefined);
+        return { ok: false, tools: [], error: "MCP hub closed during connect." };
+      }
       this.lastErrors.delete(serverId);
       // Only reset backoff after the server stays connected for `stableConnectionMs` so rapid crash loops give up.
       this.scheduleStabilityReset(serverId, client);
       return { ok: true, tools: client.tools };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.lastErrors.set(serverId, message);
+      if (!this.closed) this.lastErrors.set(serverId, message);
       await client.close().catch(() => undefined);
       return { ok: false, tools: [], error: message };
     }
   }
 
   async connectAll(): Promise<{ connected: string[]; errors: Record<string, string> }> {
+    this.closed = false;
     const connected: string[] = [];
     const errors: Record<string, string> = {};
     for (const [id, client] of this.clients) {
+      if (this.closed) break;
       if (client.config.enabled === false) continue;
       try {
         await client.initialize();
         await client.listTools();
+        if (this.closed) {
+          await client.close().catch(() => undefined);
+          break;
+        }
         this.lastErrors.delete(id);
         connected.push(id);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        this.lastErrors.set(id, message);
+        if (!this.closed) this.lastErrors.set(id, message);
         errors[id] = message;
       }
     }
@@ -1268,6 +1344,7 @@ export class McpHub {
   async syncServers(
     configs: readonly McpServerConfigInput[],
   ): Promise<{ connected: string[]; errors: Record<string, string> }> {
+    this.closed = false;
     const desired = new Map<string, McpServerConfig>();
     for (const raw of configs.slice(0, MAX_MCP_SERVERS)) {
       const parsed = McpServerConfigSchema.safeParse(raw);
@@ -1388,6 +1465,7 @@ export class McpHub {
   }
 
   async closeAll(): Promise<void> {
+    this.closed = true;
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
     for (const timer of this.stableTimers.values()) clearTimeout(timer);

@@ -20,6 +20,7 @@
     "chat": "node scripts/chat.ts",
     "eval": "node scripts/eval.ts",
     "benchmark:catalog": "node scripts/benchmark-catalog.ts",
+    "check:model-sizes": "node scripts/check-model-sizes.ts",
     "prompt-size": "node scripts/prompt-size.ts",
     "route-check": "node scripts/route-check.ts",
     "export-pairs": "node scripts/export-pairs.ts",

@@ -176,6 +176,219 @@ function makeNullableSchema(schema: GbnfJsonSchema): GbnfJsonSchema {
   } as unknown as GbnfJsonSchema;
 }
 
+/**
+ * Returns a compact, type-preserving degraded schema stub when a subtree exceeds the
+ * expansion depth/node/character budget, so over-budget objects degrade to
+ * `{ type: "object", properties: {} }` and primitive fields keep their real JSON types
+ * instead of silently flattening to `"string"`.
+ */
+function degradedFallbackForNode(
+  raw: unknown,
+  root: Record<string, unknown>,
+  seenRefs: ReadonlySet<string>,
+  allowArrayItem = true,
+): GbnfJsonSchema {
+  const { node, nextSeen } = derefNode(raw, root, seenRefs);
+  if (!node) return { type: "string" };
+
+  if ("const" in node) {
+    const val = node["const"];
+    if (
+      typeof val === "string" ||
+      typeof val === "number" ||
+      typeof val === "boolean" ||
+      val === null
+    ) {
+      return { const: val } as GbnfJsonSchema;
+    }
+  }
+
+  if (Array.isArray(node["enum"]) && node["enum"].length > 0) {
+    const validEnum = node["enum"]
+      .filter(
+        (v): v is string | number | boolean | null =>
+          typeof v === "string" ||
+          typeof v === "number" ||
+          typeof v === "boolean" ||
+          v === null,
+      )
+      .slice(0, MAX_ENUM_VALUES);
+    if (validEnum.length > 0) return { enum: validEnum } as GbnfJsonSchema;
+  }
+
+  const unionRaw = Array.isArray(node["oneOf"])
+    ? node["oneOf"]
+    : Array.isArray(node["anyOf"])
+      ? node["anyOf"]
+      : null;
+  if (unionRaw && unionRaw.length > 0) {
+    const primTypes: string[] = [];
+    let allPrim = true;
+    let sawNull = false;
+    let firstNonNull: GbnfJsonSchema | null = null;
+    for (const branch of unionRaw.slice(0, MAX_UNION_BRANCHES)) {
+      const degraded = degradedFallbackForNode(branch, root, nextSeen, false);
+      const rec = degraded as unknown as Record<string, unknown>;
+      const t = rec["type"];
+      if (t === "null") {
+        sawNull = true;
+        if (!primTypes.includes("null")) primTypes.push("null");
+        continue;
+      }
+      if (!firstNonNull) firstNonNull = degraded;
+      if (typeof t === "string" && PRIMITIVE_TYPES.has(t)) {
+        if (!primTypes.includes(t)) primTypes.push(t);
+      } else if (Array.isArray(t) && t.every((item) => typeof item === "string" && PRIMITIVE_TYPES.has(item))) {
+        for (const item of t as string[]) {
+          if (!primTypes.includes(item)) primTypes.push(item);
+        }
+      } else {
+        allPrim = false;
+      }
+    }
+    if (allPrim && primTypes.length > 0) {
+      return {
+        type: primTypes.length === 1 ? primTypes[0] : primTypes,
+      } as unknown as GbnfJsonSchema;
+    }
+    if (firstNonNull) {
+      return sawNull ? makeNullableSchema(firstNonNull) : firstNonNull;
+    }
+  }
+
+  const rawType = node["type"];
+  if (Array.isArray(rawType)) {
+    const validTypes = rawType.filter((t): t is string => typeof t === "string" && PRIMITIVE_TYPES.has(t));
+    if (validTypes.length > 0 && validTypes.length === rawType.length) {
+      return {
+        type: validTypes.length === 1 ? validTypes[0] : validTypes,
+      } as unknown as GbnfJsonSchema;
+    }
+  }
+
+  const primaryType = Array.isArray(rawType)
+    ? rawType.find((t): t is string => typeof t === "string" && t !== "null")
+    : typeof rawType === "string"
+      ? rawType
+      : isPlainObject(node["properties"])
+        ? "object"
+        : node["items"] !== undefined
+          ? "array"
+          : "string";
+  const wantsNull = Array.isArray(rawType) && rawType.includes("null");
+
+  switch (primaryType) {
+    case "string":
+    case "number":
+    case "integer":
+    case "boolean":
+    case "null":
+      return {
+        type: wantsNull && primaryType !== "null" ? [primaryType, "null"] : primaryType,
+      } as unknown as GbnfJsonSchema;
+    case "array": {
+      const arr: GbnfJsonSchema = {
+        type: "array",
+        items: allowArrayItem
+          ? degradedFallbackForNode(node["items"], root, nextSeen, false)
+          : { type: "string" },
+      } as GbnfJsonSchema;
+      return wantsNull ? makeNullableSchema(arr) : arr;
+    }
+    case "object": {
+      const obj: GbnfJsonSchema = { type: "object", properties: {} } as GbnfJsonSchema;
+      return wantsNull ? makeNullableSchema(obj) : obj;
+    }
+    default:
+      return { type: wantsNull ? ["string", "null"] : "string" } as unknown as GbnfJsonSchema;
+  }
+}
+
+/**
+ * Normalizes an object's `properties` prioritizing `required` keys first and capping each
+ * property's subtree budget so one deep `$ref` property degrades only its own over-budget
+ * subtree without starving or dropping sibling/required properties.
+ */
+function normalizeObjectProperties(
+  node: Record<string, unknown>,
+  root: Record<string, unknown>,
+  depth: number,
+  nextSeen: ReadonlySet<string>,
+  budget: SchemaExpansionBudget,
+  preserveAllSiblings: boolean,
+): { properties: Record<string, GbnfJsonSchema>; required: string[] } {
+  const requiredRaw = Array.isArray(node["required"])
+    ? node["required"].filter((key): key is string => typeof key === "string")
+    : [];
+  const requiredSet = new Set(requiredRaw);
+
+  const rawEntries: [string, unknown][] = [];
+  if (isPlainObject(node["properties"])) {
+    for (const [key, propSchema] of Object.entries(node["properties"])) {
+      if (rawEntries.length >= MAX_OBJECT_PROPERTIES) break;
+      if (!key || key.length > 80 || key.includes("\0")) continue;
+      rawEntries.push([key, propSchema]);
+    }
+  }
+
+  // Schedule required properties first so they always receive expansion priority over optional trees.
+  const ordered: [string, unknown][] = [
+    ...rawEntries.filter(([key]) => requiredSet.has(key)),
+    ...rawEntries.filter(([key]) => !requiredSet.has(key)),
+  ];
+
+  const normalizedByKey = new Map<string, GbnfJsonSchema>();
+  for (let i = 0; i < ordered.length; i += 1) {
+    const entry = ordered[i];
+    if (!entry) continue;
+    const [key, propSchema] = entry;
+    const isReq = requiredSet.has(key);
+    const remaining = ordered.length - i;
+
+    if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) {
+      if (preserveAllSiblings || isReq) {
+        const degraded = degradedFallbackForNode(propSchema, root, nextSeen);
+        normalizedByKey.set(key, isReq ? degraded : makeNullableSchema(degraded));
+      }
+      continue;
+    }
+
+    const keyOverhead = key.length + (isReq ? 16 : 96);
+    budget.charsLeft = Math.max(0, budget.charsLeft - keyOverhead);
+
+    // Give each property a bounded slice of the remaining budget so one giant `$ref` cannot starve siblings.
+    const allocNodes =
+      remaining > 1
+        ? Math.min(budget.nodesLeft, Math.max(2, Math.floor(budget.nodesLeft / remaining)))
+        : budget.nodesLeft;
+    const allocChars =
+      remaining > 1
+        ? Math.min(budget.charsLeft, Math.max(128, Math.floor(budget.charsLeft / remaining)))
+        : budget.charsLeft;
+    const subBudget: SchemaExpansionBudget = {
+      nodesLeft: allocNodes,
+      charsLeft: allocChars,
+    };
+
+    const propNode = normalizeSchemaNode(propSchema, root, depth + 1, nextSeen, subBudget);
+    const spentNodes = allocNodes - subBudget.nodesLeft;
+    const spentChars = allocChars - subBudget.charsLeft;
+    budget.nodesLeft = Math.max(0, budget.nodesLeft - spentNodes);
+    budget.charsLeft = Math.max(0, budget.charsLeft - spentChars);
+
+    normalizedByKey.set(key, isReq ? propNode : makeNullableSchema(propNode));
+  }
+
+  // Re-emit properties in their original declaration order.
+  const properties: Record<string, GbnfJsonSchema> = {};
+  for (const [key] of rawEntries) {
+    const val = normalizedByKey.get(key);
+    if (val !== undefined) properties[key] = val;
+  }
+  const required = requiredRaw.filter((key) => Object.hasOwn(properties, key));
+  return { properties, required };
+}
+
 function normalizeSchemaNode(
   raw: unknown,
   root: Record<string, unknown>,
@@ -184,7 +397,7 @@ function normalizeSchemaNode(
   budget: SchemaExpansionBudget,
 ): GbnfJsonSchema {
   if (depth > MAX_SCHEMA_DEPTH || !consumeBudget(budget, 24)) {
-    return { type: "string" };
+    return degradedFallbackForNode(raw, root, seenRefs);
   }
   const { node, nextSeen } = derefNode(raw, root, seenRefs);
   if (!node) {
@@ -333,25 +546,14 @@ function normalizeSchemaNode(
       break;
 
     case "object": {
-      const properties: Record<string, GbnfJsonSchema> = {};
-      const requiredRaw = Array.isArray(node["required"])
-        ? node["required"].filter((key): key is string => typeof key === "string")
-        : [];
-      const requiredSet = new Set(requiredRaw);
-
-      if (isPlainObject(node["properties"])) {
-        let count = 0;
-        for (const [key, propSchema] of Object.entries(node["properties"])) {
-          if (count >= MAX_OBJECT_PROPERTIES) break;
-          if (!key || key.length > 80 || key.includes("\0")) continue;
-          if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) break;
-          budget.charsLeft -= key.length + (requiredSet.has(key) ? 16 : 96);
-          const propNode = normalizeSchemaNode(propSchema, root, depth + 1, nextSeen, budget);
-          properties[key] = requiredSet.has(key) ? propNode : makeNullableSchema(propNode);
-          count += 1;
-        }
-      }
-      const required = requiredRaw.filter((key) => Object.hasOwn(properties, key));
+      const { properties, required } = normalizeObjectProperties(
+        node,
+        root,
+        depth,
+        nextSeen,
+        budget,
+        depth <= 1,
+      );
       normalized = {
         type: "object",
         properties,
@@ -377,6 +579,7 @@ function normalizeSchemaNode(
  * GBNF JSON Schema object:
  * - resolves local `#/$defs/...` and `#/definitions/...` `$ref` pointers,
  * - preserves `anyOf` / `oneOf` unions instead of flattening them to `"string"`,
+ * - schemas required & top-level properties first and degrades only over-budget subtrees,
  * - models optional (non-required) parameters as nullable so `node-llama-cpp` 3.22.3
  *   does not force the model to invent values for optional keys,
  * - sanitizes every external server-supplied parameter description.
@@ -394,25 +597,15 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
   };
   const { node, nextSeen } = derefNode(raw, raw, new Set());
   const effective = node ?? raw;
-  const requiredRaw = Array.isArray(effective["required"])
-    ? effective["required"].filter((key): key is string => typeof key === "string")
-    : [];
-  const requiredSet = new Set(requiredRaw);
-
-  const properties: Record<string, GbnfJsonSchema> = {};
-  if (isPlainObject(effective["properties"])) {
-    let count = 0;
-    for (const [key, propSchema] of Object.entries(effective["properties"])) {
-      if (count >= MAX_OBJECT_PROPERTIES) break;
-      if (!key || key.length > 80 || key.includes("\0")) continue;
-      if (budget.nodesLeft <= 0 || budget.charsLeft <= 0) break;
-      budget.charsLeft -= key.length + (requiredSet.has(key) ? 16 : 96);
-      const propNode = normalizeSchemaNode(propSchema, raw, 1, nextSeen, budget);
-      properties[key] = requiredSet.has(key) ? propNode : makeNullableSchema(propNode);
-      count += 1;
-    }
-  }
-  const required = requiredRaw.filter((key) => Object.hasOwn(properties, key));
+  const { properties, required } = normalizeObjectProperties(
+    effective,
+    raw,
+    0,
+    nextSeen,
+    budget,
+    true,
+  );
+  const requiredSet = new Set(required);
   const description = cleanDescription(effective["description"], MAX_DESC_CHARS);
   let result: McpObjectParamsSchema = {
     type: "object",
@@ -421,13 +614,13 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
     ...(description ? { description } : {}),
   };
   // Final hard ceiling: if deeply nested unions/nullable wrappers still exceed 12 KB serialized,
-  // flatten top-level property values to compact primitive/nullable schemas so memory stays bounded.
+  // degrade each top-level property to its compact type-preserving stub (never turning integers/booleans into string).
   if (JSON.stringify(result).length > MAX_SERIALIZED_SCHEMA_BYTES) {
+    const rawProps = isPlainObject(effective["properties"]) ? effective["properties"] : {};
     const compactProps: Record<string, GbnfJsonSchema> = {};
     for (const key of Object.keys(properties)) {
-      compactProps[key] = requiredSet.has(key)
-        ? { type: "string" }
-        : ({ type: ["string", "null"] } as unknown as GbnfJsonSchema);
+      const base = degradedFallbackForNode(rawProps[key], raw, nextSeen);
+      compactProps[key] = requiredSet.has(key) ? base : makeNullableSchema(base);
     }
     result = {
       type: "object",
@@ -440,10 +633,132 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
   return result;
 }
 
+function pickMatchingUnionBranch(
+  value: unknown,
+  branches: readonly unknown[],
+  rootSchema: Record<string, unknown>,
+  seenRefs: ReadonlySet<string>,
+): Record<string, unknown> | undefined {
+  if (Array.isArray(value)) {
+    for (const rawBranch of branches.slice(0, MAX_UNION_BRANCHES)) {
+      const { node } = derefNode(rawBranch, rootSchema, seenRefs);
+      if (!node) continue;
+      const typ = node["type"];
+      if (
+        typ === "array" ||
+        (Array.isArray(typ) && typ.includes("array")) ||
+        node["items"] !== undefined ||
+        Array.isArray(node["oneOf"]) ||
+        Array.isArray(node["anyOf"])
+      ) {
+        return node;
+      }
+    }
+    return undefined;
+  }
+  if (isPlainObject(value)) {
+    const valueKeys = new Set(Object.keys(value));
+    let best: Record<string, unknown> | undefined;
+    let bestScore = -Infinity;
+    for (const rawBranch of branches.slice(0, MAX_UNION_BRANCHES)) {
+      const { node } = derefNode(rawBranch, rootSchema, seenRefs);
+      if (!node) continue;
+      const typ = node["type"];
+      const isObj =
+        typ === "object" ||
+        (Array.isArray(typ) && typ.includes("object")) ||
+        isPlainObject(node["properties"]);
+      if (!isObj) continue;
+      let score = 0;
+      const props = isPlainObject(node["properties"]) ? node["properties"] : {};
+      for (const k of valueKeys) {
+        if (Object.hasOwn(props, k)) score += 2;
+      }
+      if (Array.isArray(node["required"])) {
+        for (const reqKey of node["required"]) {
+          if (typeof reqKey !== "string") continue;
+          score += valueKeys.has(reqKey) && value[reqKey] !== null ? 1 : -2;
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = node;
+      }
+    }
+    return best;
+  }
+  return undefined;
+}
+
+function stripNullValue(
+  value: unknown,
+  rawSchema: unknown,
+  rootSchema: Record<string, unknown>,
+  seenRefs: ReadonlySet<string>,
+  depth: number,
+): unknown {
+  if (depth >= MAX_STRIP_ARG_DEPTH || !isPlainObject(rawSchema)) {
+    return value;
+  }
+  const { node, nextSeen } = derefNode(rawSchema, rootSchema, seenRefs);
+  const effective = node ?? rawSchema;
+
+  const unionRaw = Array.isArray(effective["oneOf"])
+    ? effective["oneOf"]
+    : Array.isArray(effective["anyOf"])
+      ? effective["anyOf"]
+      : null;
+  if (unionRaw && unionRaw.length > 0 && (isPlainObject(value) || Array.isArray(value))) {
+    const matched = pickMatchingUnionBranch(value, unionRaw, rootSchema, nextSeen);
+    if (matched) {
+      return stripNullValue(value, matched, rootSchema, nextSeen, depth + 1);
+    }
+  }
+
+  if (Array.isArray(value)) {
+    const itemSchema = effective["items"];
+    if (isPlainObject(itemSchema)) {
+      return value.map((item) =>
+        stripNullValue(item, itemSchema, rootSchema, nextSeen, depth + 1),
+      );
+    }
+    return value;
+  }
+
+  if (isPlainObject(value)) {
+    const props = isPlainObject(effective["properties"]) ? effective["properties"] : {};
+    const requiredSet = new Set(
+      Array.isArray(effective["required"])
+        ? effective["required"].filter((k): k is string => typeof k === "string")
+        : [],
+    );
+    const cleaned: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (val === undefined) continue;
+      const propRaw = props[key];
+      if (val === null) {
+        if (requiredSet.has(key) || rawSchemaExplicitlyAllowsNull(propRaw, rootSchema, nextSeen)) {
+          cleaned[key] = null;
+        }
+        continue;
+      }
+      if (isPlainObject(propRaw)) {
+        cleaned[key] = stripNullValue(val, propRaw, rootSchema, nextSeen, depth + 1);
+      } else {
+        cleaned[key] = val;
+      }
+    }
+    return cleaned;
+  }
+
+  return value;
+}
+
 /**
  * Recursively strips `null` / `undefined` values from optional (non-required) object keys
- * before forwarding tool arguments to an external MCP server, unless the server's original
- * schema explicitly allowed `null` for that property.
+ * (including inside `$ref`-referenced arrays, nested arrays of arrays, and `anyOf`/`oneOf`
+ * union branches) before forwarding tool arguments to an external MCP server, unless the
+ * server's original schema explicitly allowed `null` for that property.
  */
 export function stripNullOptionalArgs(
   args: Record<string, unknown>,
@@ -459,37 +774,8 @@ export function stripNullOptionalArgs(
     }
     return out;
   }
-  const { node, nextSeen } = derefNode(rawSchema, rootSchema, seenRefs);
-  const effective = node ?? rawSchema;
-  const props = isPlainObject(effective["properties"]) ? effective["properties"] : {};
-  const requiredSet = new Set(
-    Array.isArray(effective["required"])
-      ? effective["required"].filter((k): k is string => typeof k === "string")
-      : [],
-  );
-
-  const cleaned: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) {
-    if (value === undefined) continue;
-    const propRaw = props[key];
-    if (value === null) {
-      if (requiredSet.has(key) || rawSchemaExplicitlyAllowsNull(propRaw, rootSchema, nextSeen)) {
-        cleaned[key] = null;
-      }
-      continue;
-    }
-    if (isPlainObject(value) && isPlainObject(propRaw)) {
-      cleaned[key] = stripNullOptionalArgs(value, propRaw, rootSchema, nextSeen, depth + 1);
-    } else if (Array.isArray(value) && isPlainObject(propRaw) && isPlainObject(propRaw["items"])) {
-      const itemSchema = propRaw["items"];
-      cleaned[key] = value.map((item) =>
-        isPlainObject(item) ? stripNullOptionalArgs(item, itemSchema, rootSchema, nextSeen, depth + 1) : item,
-      );
-    } else {
-      cleaned[key] = value;
-    }
-  }
-  return cleaned;
+  const cleaned = stripNullValue(args, rawSchema, rootSchema, seenRefs, depth);
+  return isPlainObject(cleaned) ? cleaned : {};
 }
 
 /**
