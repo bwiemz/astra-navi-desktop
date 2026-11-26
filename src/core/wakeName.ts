@@ -119,15 +119,39 @@ export function wakeAliasesWithCharacter(
   return out;
 }
 
+/**
+ * Cleans up malformed auto-migrated wake aliases from earlier releases (e.g. `"Dr."`, `"Mr."`,
+ * `"The"`, or trailing punctuation like `"Lyra,"` -> `"Lyra"`).
+ */
+export function sanitizeLegacyWakeAliases(otherNames: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of otherNames) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    // Strip trailing/leading punctuation artifacts (e.g. "Lyra," -> "Lyra", "Dr." -> "Dr").
+    const cleaned = trimmed.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+    if (!isValidWakeAlias(cleaned)) continue;
+    const key = cleaned.toLowerCase();
+    // Drop punctuated stop-word titles like "Dr." / "Mr." / "The" if punctuation was present or it's a pure title stop-word.
+    if (trimmed !== cleaned && LEGACY_FIRST_WORD_STOP_WORDS.has(key)) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
+
 function buildAliasRegex(name: string): RegExp {
   const escaped = name
     .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
     .replace(/\s+/g, String.raw`[\s-]*`);
   const endsWithCjk = CJK_CHAR_RE.test(name.slice(-1));
-  if (endsWithCjk && name.length <= 2) {
-    // 1- and 2-character CJK wake aliases (e.g. "星", "阿斯", "アス") MUST be followed by a
-    // separator (comma/pause/space) or end of utterance so longer built-in names ("星航",
-    // "阿斯特拉", "アストラ") and ordinary words ("星期", "アスファルト") never get hijacked.
+  if (endsWithCjk && name.length === 1) {
+    // Only 1-character CJK wake aliases (e.g. "星") require a separator/end so ordinary words
+    // ("星期") never misfire. 2-character CJK names ("小星", "リラ") match directly without
+    // punctuation (matching STT output like "小星打开笔记" / "リラノートを開いて") while
+    // longest-match below still prevents "阿斯"/"アス" from cutting "阿斯特拉"/"アストラ".
     return new RegExp(
       String.raw`^\s*${GREETING}${escaped}(?:[\s,.!?:;、。！？，-]+|$)`,
       "iu",

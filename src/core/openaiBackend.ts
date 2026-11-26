@@ -584,7 +584,11 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
   private readonly config: InferenceBackendConfig;
   private readonly locality: EndpointLocality;
   private readonly fetchImpl: typeof fetch;
-  private readonly contextSize: number;
+  /** Remote model's discovered/explicit context window in tokens (independent of local GGUF contextSize). */
+  private remoteContextTokens: number | null;
+  private probedRemoteContext = false;
+  /** Remembered per-session so a server rejecting `chat_template_kwargs` (400/422) never costs 2 round trips again. */
+  private supportsChatTemplateKwargs = true;
   private systemPrompt: string;
   private history: ChatHistoryItem[] = [];
   private inputTokens = 0;
@@ -594,7 +598,7 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     config: InferenceBackendConfig,
     systemPrompt: string,
     fetchImpl: typeof fetch = fetch,
-    contextSize = 8_192,
+    remoteContextTokens?: number,
   ) {
     const checked = classifyInferenceEndpoint(config.baseUrl);
     if (!checked.ok) {
@@ -607,7 +611,67 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     this.locality = checked;
     this.systemPrompt = systemPrompt;
     this.fetchImpl = fetchImpl;
-    this.contextSize = Math.max(1_024, Math.floor(contextSize));
+    if (typeof remoteContextTokens === "number" && Number.isFinite(remoteContextTokens) && remoteContextTokens >= 1_024) {
+      this.remoteContextTokens = Math.floor(remoteContextTokens);
+      this.probedRemoteContext = true;
+    } else {
+      this.remoteContextTokens = null;
+    }
+  }
+
+  /** Lazily queries `/models` once to learn the remote server's actual context window (falls back safely to 4096). */
+  private async resolveRemoteContextTokens(signal?: AbortSignal): Promise<number> {
+    if (this.probedRemoteContext) {
+      return this.remoteContextTokens ?? 4_096;
+    }
+    this.probedRemoteContext = true;
+    try {
+      const timeout = AbortSignal.timeout(1_500);
+      const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      const res = await this.fetchImpl(`${this.locality.apiBaseUrl}/models`, {
+        method: "GET",
+        headers: { accept: "application/json", ...authHeaders(this.config.apiKey) },
+        signal: combined,
+      });
+      if (res.ok) {
+        const payload = (await res.json()) as {
+          data?: Record<string, unknown>[];
+          models?: Record<string, unknown>[];
+        };
+        const entries = [
+          ...(Array.isArray(payload.data) ? payload.data : []),
+          ...(Array.isArray(payload.models) ? payload.models : []),
+        ];
+        const wanted = this.config.model.trim().toLowerCase();
+        const match =
+          entries.find((e) => {
+            const id = typeof e["id"] === "string" ? e["id"] : typeof e["name"] === "string" ? e["name"] : "";
+            return id.trim().toLowerCase() === wanted;
+          }) ?? entries[0];
+        if (match) {
+          const meta =
+            typeof match["meta"] === "object" && match["meta"] !== null
+              ? (match["meta"] as Record<string, unknown>)
+              : {};
+          const candidates = [
+            match["max_model_len"],
+            match["context_length"],
+            match["n_ctx"],
+            match["max_context_length"],
+            meta["n_ctx_train"],
+          ];
+          for (const c of candidates) {
+            if (typeof c === "number" && Number.isFinite(c) && c >= 1_024) {
+              this.remoteContextTokens = Math.floor(c);
+              break;
+            }
+          }
+        }
+      }
+    } catch {
+      // Conservative 4096-token fallback when server omits or doesn't expose context metadata.
+    }
+    return this.remoteContextTokens ?? 4_096;
   }
 
   getChatHistory(): ChatHistoryItem[] {
@@ -672,9 +736,10 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
     const falseRule =
       typeof criteria["false"] === "string" ? criteria["false"] : "Only talked, asked, or declined.";
 
-    // Size the reply excerpt dynamically to the configured context window (2.4K–12K chars) so
-    // small 2K–4K local contexts never overflow while 8K+ contexts inspect full mid-reply claims.
-    const maxExcerptChars = Math.max(2_400, Math.min(12_000, Math.floor(this.contextSize * 1.5)));
+    // Size the reply excerpt dynamically to the REMOTE server's discovered/configured context
+    // window (2.4K–12K chars) rather than the local GGUF context setting.
+    const remoteCtx = await this.resolveRemoteContextTokens(extra?.signal);
+    const maxExcerptChars = Math.max(2_400, Math.min(12_000, Math.floor(remoteCtx * 1.5)));
     const replyExcerpt =
       lastReply.length <= maxExcerptChars
         ? lastReply
@@ -721,11 +786,13 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
         signal: extra?.signal,
       });
 
-    // Pass `chat_template_kwargs: { enable_thinking: false }` on local/LAN OpenAI-compatible servers
-    // (llama-server, vLLM, SGLang, Ollama) and transparently retry once without it if a server rejects it (HTTP 400).
-    const tryDisableThinking = this.locality.scope !== "remote-internet";
+    // Try `chat_template_kwargs: { enable_thinking: false }` for all servers (including remote
+    // thinking models). If rejected with HTTP 400 or 422, remember per-session so later calls
+    // take a single round trip and retry once immediately without it.
+    const tryDisableThinking = this.supportsChatTemplateKwargs;
     let res = await sendDecide(tryDisableThinking);
-    if (tryDisableThinking && res.status === 400) {
+    if (tryDisableThinking && (res.status === 400 || res.status === 422)) {
+      this.supportsChatTemplateKwargs = false;
       res = await sendDecide(false);
     }
     if (!res.ok) {

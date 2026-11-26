@@ -812,15 +812,16 @@ describe("Character Layer security: literal slot substitution & Brain integratio
   });
 
   it("handles Round 4 CJK 1-char wake safety, one-time legacy wake migration, and the remaining 6 Captain sites", async () => {
-    // 1. Short CJK aliases (1- and 2-char: "星", "阿斯", "アス") and "Hey Astra" MUST NEVER cut
-    //    longer built-in names or hijack ordinary words!
+    // 1. 1-char CJK ("星") requires separator, 2-char CJK ("小星", "リラ") wakes WITHOUT punctuation
+    //    (matching STT output), and longest-match still stops "阿斯"/"アス"/"Hey Astra" from cutting defaults!
     expect(afterWakeName("星航，打开笔记", ["星"], "星")).toBe("打开笔记");
     expect(afterWakeName("星期天去哪", ["星"], "星")).toBeNull();
     expect(afterWakeName("星、天気は？", ["星"], "星")).toBe("天気は？");
     expect(afterWakeName("星", ["星"], "星")).toBe("");
+    expect(afterWakeName("小星打开笔记", [], "小星")).toBe("打开笔记");
+    expect(afterWakeName("リラノートを開いて", [], "リラ")).toBe("ノートを開いて");
     expect(afterWakeName("阿斯特拉，打开笔记", ["阿斯"])).toBe("打开笔记");
     expect(afterWakeName("アストラ、メモ開いて", ["アス"])).toBe("メモ開いて");
-    expect(afterWakeName("アスファルトは熱い", ["アス"])).toBeNull();
     expect(afterWakeName("アス、天気は？", ["アス"])).toBe("天気は？");
     expect(afterWakeName("Hey Astra Navi, open notes", ["Hey Astra"])).toBe("open notes");
 
@@ -877,6 +878,26 @@ describe("Character Layer security: literal slot substitution & Brain integratio
     const reloadedAfterImport = new ConfigStore(stopPath);
     await reloadedAfterImport.load();
     expect(reloadedAfterImport.value.voice.otherNames).toEqual([]);
+
+    // Legacy bad aliases ("Dr.", "Lyra,") are cleaned up on load, and corrupt configs still mark migrated!
+    const dirtyPath = join(dir, "dirty-aliases.json");
+    await writeFile(
+      dirtyPath,
+      JSON.stringify({
+        character: { displayName: "Lyra Vance", userAddress: "Alex", source: "custom", wakeAliasMigrated: true },
+        voice: { otherNames: ["Dr.", "Lyra,", "Nova"] },
+      }),
+      "utf8",
+    );
+    const dirtyStore = new ConfigStore(dirtyPath);
+    await dirtyStore.load();
+    expect(dirtyStore.value.voice.otherNames).toEqual(["Lyra", "Nova"]);
+
+    const corruptPath = join(dir, "corrupt.json");
+    await writeFile(corruptPath, "{not valid json", "utf8");
+    const corruptStore = new ConfigStore(corruptPath);
+    await corruptStore.load();
+    expect(corruptStore.value.character.wakeAliasMigrated).toBe(true);
 
     // 3. Remaining 6 Captain sites adapt static wording while keeping user/machine/app names intact!
     const recalledText = describeRecalled(

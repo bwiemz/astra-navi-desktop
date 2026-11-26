@@ -172,7 +172,26 @@ export function showMcpServers(view: SettingsView, onView: (fresh: SettingsView)
         "Allow read-only tools without asking (still asks once outside text enters the chat).";
       readOnlyRow.append(readOnlyBox, readOnlyWords);
 
-      item.append(head, where, actions, readOnlyRow, note);
+      const alwaysOfferRow = document.createElement("label");
+      alwaysOfferRow.className = "machine-look";
+      const alwaysOfferBox = document.createElement("input");
+      alwaysOfferBox.type = "checkbox";
+      alwaysOfferBox.checked = server.alwaysOffer;
+      alwaysOfferBox.addEventListener("change", () => {
+        void bridge
+          .setMcpAlwaysOffer(server.id, alwaysOfferBox.checked)
+          .then((fresh) => {
+            onView(fresh);
+            stamp("Saved");
+          })
+          .catch((err: unknown) => say(stripIpcError(err, "Could not update routing setting.")));
+      });
+      const alwaysOfferWords = document.createElement("span");
+      alwaysOfferWords.textContent =
+        "Always offer this server's tools (opt-in for filesystem/database servers; persistence tools ask while active).";
+      alwaysOfferRow.append(alwaysOfferBox, alwaysOfferWords);
+
+      item.append(head, where, actions, readOnlyRow, alwaysOfferRow, note);
 
       if (server.tools.length > 0) {
         const details = document.createElement("details");
@@ -229,12 +248,14 @@ export function wireMcpSettings(onView: (fresh: SettingsView) => void): void {
     const name = element<HTMLInputElement>("mcp-name").value.trim();
     const transport = transportSelect.value === "http" ? "http" : "stdio";
     const readOnlyAutoAllow = element<HTMLInputElement>("mcp-readonly-auto").checked;
+    const alwaysOffer = element<HTMLInputElement>("mcp-always-offer").checked;
 
     const payload: McpServerAddRequest = {
       id,
       ...(name ? { name } : {}),
       transport,
       readOnlyAutoAllow,
+      alwaysOffer,
     };
 
     if (transport === "stdio") {

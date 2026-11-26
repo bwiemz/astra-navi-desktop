@@ -744,37 +744,47 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
     expect(rendererMain.slice(forgetLogIdx, forgetLogIdx + 250)).toContain("resetAiReportDialog()");
     const replyStartIdx = rendererMain.indexOf('case "reply-start":');
     expect(rendererMain.slice(replyStartIdx, replyStartIdx + 250)).toContain("refreshAiReportOnNewReply()");
+    // When closed, refreshAiReportOnNewReply also clears abandoned typed notes so they don't carry over.
+    const refreshIdx = dialogFn.indexOf("refreshAiReportOnNewReply = (): void =>");
+    expect(dialogFn.slice(refreshIdx, refreshIdx + 550)).toContain('detailsEl.value = ""');
 
-    // 4. decide() disables thinking (/no_think + chat_template_kwargs with HTTP 400 fallback),
-    //    grants max_tokens=1024, keeps mid-reply claims on 8K+ contexts, and scales excerpt to 2K contexts!
+    // 4. decide() probes remote /models context (never using local GGUF contextSize), sends
+    //    enable_thinking:false even on remote HTTPS servers, caches HTTP 400/422 rejection so
+    //    later calls take 1 round trip, and grants max_tokens=1024!
     const decideBodies: {
       max_tokens?: number;
       chat_template_kwargs?: { enable_thinking?: boolean };
       messages?: { role: string; content: string }[];
     }[] = [];
-    let failFirst400 = true;
+    let failFirst422 = true;
     const midSession = new OpenAiCompatibleSession(
       {
         provider: "openai-compatible",
-        preset: "ollama",
-        baseUrl: "http://gpu-box:11434/v1",
+        preset: "custom",
+        baseUrl: "https://api.example.com/v1",
         model: "qwen3.5:9b",
-        apiKey: "",
+        apiKey: "k-remote",
       },
       "You are Astra.",
-      (async (_u: string | URL | Request, init?: RequestInit) => {
+      (async (u: string | URL | Request, init?: RequestInit) => {
+        const urlStr = String(u);
+        if (urlStr.endsWith("/models")) {
+          return new Response(
+            JSON.stringify({ data: [{ id: "qwen3.5:9b", max_model_len: 8_192 }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
         const parsed = JSON.parse(String(init?.body ?? "{}")) as (typeof decideBodies)[number];
         decideBodies.push(parsed);
-        if (failFirst400 && parsed.chat_template_kwargs) {
-          failFirst400 = false;
-          return new Response("unknown field chat_template_kwargs", { status: 400 });
+        if (failFirst422 && parsed.chat_template_kwargs) {
+          failFirst422 = false;
+          return new Response("unprocessable chat_template_kwargs", { status: 422 });
         }
         return new Response(
           JSON.stringify({ choices: [{ message: { content: '{"claimed": 0.92}' } }] }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }) as typeof fetch,
-      8_192,
     );
     const midReply = `${"Opening paragraph. ".repeat(200)} I have just restarted nginx on your server. ${"Closing advice. ".repeat(200)}`;
     midSession.setChatHistory([
@@ -793,7 +803,12 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
       "I have just restarted nginx on your server.",
     );
 
-    // Small 2048-token context caps reply excerpt so verifier call cannot overflow local context.
+    // Second decide() on the same session remembers 422 rejection -> ONLY 1 round trip!
+    await midSession.decide(CLAIM_CHECK);
+    expect(decideBodies).toHaveLength(3);
+    expect(decideBodies[2]?.chat_template_kwargs).toBeUndefined();
+
+    // Small remote server reporting context_length: 2048 via /models caps reply excerpt cleanly!
     let smallUserContent = "";
     const smallCtxSession = new OpenAiCompatibleSession(
       {
@@ -804,7 +819,13 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
         apiKey: "",
       },
       "You are Astra.",
-      (async (_u: string | URL | Request, init?: RequestInit) => {
+      (async (u: string | URL | Request, init?: RequestInit) => {
+        if (String(u).endsWith("/models")) {
+          return new Response(
+            JSON.stringify({ data: [{ id: "qwen3.5:4b", context_length: 2_048 }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
         const parsed = JSON.parse(String(init?.body ?? "{}")) as (typeof decideBodies)[number];
         smallUserContent = parsed.messages?.find((m) => m.role === "user")?.content ?? "";
         return new Response(
@@ -812,7 +833,6 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }) as typeof fetch,
-      2_048,
     );
     smallCtxSession.setChatHistory([
       { type: "system", text: "You are Astra." },

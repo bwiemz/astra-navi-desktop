@@ -1751,12 +1751,14 @@ function wireAiReportDialog(): void {
   };
   refreshAiReportOnNewReply = (): void => {
     // Only refresh when the dialog is closed so incoming proactive reminders/events never
-    // close the dialog or wipe a note the user is currently typing.
+    // close the dialog or wipe a note the user is currently typing. Once closed, also clear
+    // any abandoned typed note so it never carries over to the next reply.
     if (!dialogEl.hidden) return;
     snapshotReply = "";
     snapshotHeard = "";
     lastIssueUrl = "";
     lastSavedKey = "";
+    detailsEl.value = "";
     if (statusEl) statusEl.textContent = "";
     if (githubBtn) githubBtn.hidden = true;
   };

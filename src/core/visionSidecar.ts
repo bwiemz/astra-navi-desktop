@@ -295,6 +295,8 @@ export class LlamaVisionSidecar implements VisionDescriber {
   private runningKey: string | null = null;
   private starting: Promise<{ baseUrl: string; apiKey: string | null } | null> | null = null;
   private bootAbort: AbortController | null = null;
+  private inFlightRequests = 0;
+  private inFlightWaiters: (() => void)[] = [];
   private disposeGeneration = 0;
   private idleTimer: NodeJS.Timeout | null = null;
   private consecutiveFailures = 0;
@@ -681,12 +683,26 @@ export class LlamaVisionSidecar implements VisionDescriber {
     });
   }
 
+  private waitForInFlight(timeoutMs = 2_000): Promise<void> {
+    if (this.inFlightRequests <= 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer);
+        const idx = this.inFlightWaiters.indexOf(done);
+        if (idx >= 0) this.inFlightWaiters.splice(idx, 1);
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      timer.unref?.();
+      this.inFlightWaiters.push(done);
+    });
+  }
+
   /** Stops the current child process during an internal restart WITHOUT bumping `disposeGeneration`. */
   private async stopCurrentChild(): Promise<void> {
-    if (this.idleTimer) {
-      clearTimeout(this.idleTimer);
-      this.idleTimer = null;
-    }
+    // Let any active `/v1/chat/completions` request on the old child finish briefly before restarting.
+    await this.waitForInFlight(2_000);
+    this.clearIdleTimer();
     const child = this.child;
     this.child = null;
     this.runningBaseUrl = null;
@@ -887,17 +903,26 @@ export class LlamaVisionSidecar implements VisionDescriber {
         ...(conn.apiKey ? { Authorization: `Bearer ${conn.apiKey}` } : {}),
       };
 
-      const res = await this.fetchImpl(`${conn.baseUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          messages,
-          max_tokens: 280,
-          temperature: 0.2,
-          stream: false,
-        }),
-        signal: combinedSignal,
-      });
+      this.inFlightRequests += 1;
+      let res: Response;
+      try {
+        res = await this.fetchImpl(`${conn.baseUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            messages,
+            max_tokens: 280,
+            temperature: 0.2,
+            stream: false,
+          }),
+          signal: combinedSignal,
+        });
+      } finally {
+        this.inFlightRequests = Math.max(0, this.inFlightRequests - 1);
+        if (this.inFlightRequests === 0) {
+          for (const waiter of this.inFlightWaiters.splice(0)) waiter();
+        }
+      }
       if (!res.ok) {
         throw new Error(`Local vision sidecar HTTP ${res.status}`);
       }

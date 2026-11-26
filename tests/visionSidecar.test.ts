@@ -982,5 +982,53 @@ describe("Round 3 vision catalog integrity, pairing precision, migration, flags,
     await new Promise((r) => setTimeout(r, 60)); // child 1 has exited
     expect(await idleRaceSidecar.describeImage(png, { mode: "screen" })).toBe("boot-2");
     await idleRaceSidecar.dispose();
+
+    // 8. Internal restart waits for an in-flight request on the old child instead of failing it mid-flight!
+    const slowRespBin = join(dir, "llama-inflight-drain");
+    await writeFile(
+      slowRespBin,
+      [
+        `#!${process.execPath}`,
+        `import { createServer } from "node:http";`,
+        `const args = process.argv.slice(2);`,
+        `const arg = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };`,
+        `const ngl = arg("-ngl");`,
+        `const server = createServer((req, res) => {`,
+        `  if (req.url === "/health") { res.writeHead(200); res.end("ok"); return; }`,
+        `  req.resume();`,
+        `  req.on("end", () => {`,
+        `    setTimeout(() => {`,
+        `      res.writeHead(200, { "content-type": "application/json" });`,
+        `      res.end(JSON.stringify({ choices: [{ message: { content: "served-ngl-" + ngl } }] }));`,
+        `    }, 180);`,
+        `  });`,
+        `});`,
+        `server.listen(Number(arg("--port")), arg("--host"));`,
+        `process.on("SIGTERM", () => server.close(() => process.exit(0)));`,
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(slowRespBin, 0o755);
+
+    let drainBusy = false;
+    const drainSidecar = new LlamaVisionSidecar({
+      modelsDir: dir,
+      brainChoice: () => "standard",
+      binaryPath: () => slowRespBin,
+      gpuBusy: () => drainBusy,
+      startupTimeoutMs: 5_000,
+      idleUnloadMs: 0,
+    });
+    // Start request 1 on GPU (-ngl 99)
+    expect(await drainSidecar.describeImage(png, { mode: "screen" })).toBe("served-ngl-99");
+    // Now start request 2 on GPU (takes 180ms), then flip gpuBusy=true and start request 3 (triggers restart)!
+    const req2 = drainSidecar.describeImage(png, { mode: "screen" });
+    await new Promise((r) => setTimeout(r, 40));
+    drainBusy = true;
+    const req3 = drainSidecar.describeImage(png, { mode: "screen" });
+    const [r2, r3] = await Promise.all([req2, req3]);
+    expect(r2).toBe("served-ngl-99");
+    expect(r3).toBe("served-ngl-0");
+    await drainSidecar.dispose();
   });
 });

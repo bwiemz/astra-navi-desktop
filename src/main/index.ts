@@ -14,7 +14,7 @@ import {
 } from "electron";
 import { takeAwayMessage } from "../core/awayMessage.ts";
 import { safeBrainLabel } from "../core/aiReport.ts";
-import { collectMcpEnvSecrets } from "../core/supportBundle.ts";
+import { collectMcpRedactionLists } from "../core/supportBundle.ts";
 import { Brain } from "../core/brain.ts";
 import { BRAIN_MODELS, findCatalogEntry, type BrainModel } from "../core/models.ts";
 import { ConfigStore } from "../core/config.ts";
@@ -1832,14 +1832,18 @@ async function main(): Promise<void> {
         config.value.inference.provider === "openai-compatible"
           ? `${config.value.inference.model.trim() || "OpenAI-compatible model"} (${loc.scope})`
           : localBrainLabel;
+      const mcpRedaction = collectMcpRedactionLists(config.value.mcp.servers);
       const extraSecrets = [
-        config.value.search.braveApiKey,
         config.value.search.searxngUrl,
-        config.value.inference.apiKey,
         settings.stationUsername(),
         ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
+        ...mcpRedaction.identifiers,
       ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-      const mcpEnvSecrets = collectMcpEnvSecrets(config.value.mcp.servers);
+      const mcpEnvSecrets = [
+        config.value.search.braveApiKey,
+        config.value.inference.apiKey,
+        ...mcpRedaction.credentials,
+      ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
       return {
         appVersion: app.getVersion(),
         reportsDir: join(dataDir(), "ai-reports"),

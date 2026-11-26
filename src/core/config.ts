@@ -5,7 +5,7 @@ import { isReservedCalendarName, MAX_CALENDARS, whyNotThisCalendar } from "./age
 import { MACHINE_HOST, MACHINE_NAME, MACHINE_USER } from "./fleet.ts";
 import { LANGUAGE_CODES } from "./languages.ts";
 import { MAX_MCP_SERVERS, McpServerConfigSchema } from "./mcpClient.ts";
-import { extractSafeLegacyFirstWordAlias } from "./wakeName.ts";
+import { extractSafeLegacyFirstWordAlias, sanitizeLegacyWakeAliases } from "./wakeName.ts";
 
 const CalendarSchema = z.object({
   name: z
@@ -390,39 +390,51 @@ export class ConfigStore {
       const parsed = ConfigSchema.safeParse(JSON.parse(raw));
       if (parsed.success) {
         this.current = parsed.data;
-        // Genuine one-time migration: preserve first-word wake alias for pre-existing multi-word
-        // custom character names (e.g. "Lyra Vance" -> adds "Lyra" to voice.otherNames once),
-        // then unconditionally mark `wakeAliasMigrated: true` so later card/bundle imports never re-run it.
+        // Genuine one-time migration: clean any bad punctuated aliases from earlier releases
+        // ("Dr.", "Lyra,"), preserve safe first-word alias for pre-existing multi-word custom
+        // character names ("Lyra Vance" -> "Lyra"), and unconditionally mark `wakeAliasMigrated: true`.
+        const cleanedExisting = sanitizeLegacyWakeAliases(this.current.voice.otherNames);
+        const aliasesCleaned =
+          cleanedExisting.length !== this.current.voice.otherNames.length ||
+          cleanedExisting.some((v, idx) => v !== this.current.voice.otherNames[idx]);
         if (this.current.character.wakeAliasMigrated !== true) {
           const legacyFirst = extractSafeLegacyFirstWordAlias(this.current.character.displayName);
-          const existing = this.current.voice.otherNames;
           const hasAlready =
             legacyFirst !== null &&
-            existing.some((name) => name.trim().toLowerCase() === legacyFirst.toLowerCase());
+            cleanedExisting.some((name) => name.trim().toLowerCase() === legacyFirst.toLowerCase());
           const nextOtherNames =
-            legacyFirst !== null && !hasAlready && existing.length < 5
-              ? [...existing, legacyFirst]
-              : existing;
+            legacyFirst !== null && !hasAlready && cleanedExisting.length < 5
+              ? [...cleanedExisting, legacyFirst]
+              : cleanedExisting;
+          const voiceChanged =
+            aliasesCleaned || nextOtherNames.length !== cleanedExisting.length;
           await this.update({
-            ...(nextOtherNames !== existing
+            ...(voiceChanged
               ? { voice: { ...this.current.voice, otherNames: nextOtherNames } }
               : {}),
             character: { ...this.current.character, wakeAliasMigrated: true },
           });
+        } else if (aliasesCleaned) {
+          await this.update({
+            voice: { ...this.current.voice, otherNames: cleanedExisting },
+          });
         }
       } else {
         console.warn(`[config] ignoring invalid config file: ${parsed.error.message}`);
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        // Fresh install with no legacy config on disk: mark migration complete in memory.
         this.current = {
           ...this.current,
           character: { ...this.current.character, wakeAliasMigrated: true },
         };
-      } else {
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         console.warn(`[config] could not read ${this.file}:`, error);
       }
+      // Fresh install or unreadable config: mark migration complete in memory so it never spuriously re-runs.
+      this.current = {
+        ...this.current,
+        character: { ...this.current.character, wakeAliasMigrated: true },
+      };
     }
     return this.current;
   }

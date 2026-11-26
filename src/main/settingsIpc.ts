@@ -52,7 +52,7 @@ import { excerpt, type StandingOrder } from "../core/standingOrders.ts";
 import { StationAccount, whyNotThese } from "../core/stationAccount.ts";
 import {
   buildRedactedSupportBundle,
-  collectMcpEnvSecrets,
+  collectMcpRedactionLists,
   formatSupportBundleJson,
 } from "../core/supportBundle.ts";
 import { forShow, type ShownTrace, type TraceKeeper } from "../core/trace.ts";
@@ -894,14 +894,18 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       checkBootstrapStatus(),
     ]);
 
-    const extraSecrets: string[] = [
+    const mcpRedaction = collectMcpRedactionLists(config.value.mcp.servers);
+    const credentialLiterals: string[] = [
       config.value.search.braveApiKey,
-      config.value.search.searxngUrl,
       config.value.inference.apiKey,
+      ...mcpRedaction.credentials,
+    ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+    const identifierLiterals: string[] = [
+      config.value.search.searxngUrl,
       stationAccount()?.username,
       ...config.value.fleet.machines.flatMap((m) => [m.name, m.host, m.user]),
+      ...mcpRedaction.identifiers,
     ].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-    const mcpEnvSecrets = collectMcpEnvSecrets(config.value.mcp.servers);
 
     const enabledTier10Flags = Object.entries(config.value.tier10)
       .filter(([, enabled]) => enabled)
@@ -934,8 +938,8 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
         stationOpen: config.value.devices.station,
         enabledTier10Flags,
       },
-      extraSecretLiterals: extraSecrets,
-      mcpEnvLiterals: mcpEnvSecrets,
+      credentialLiterals,
+      extraSecretLiterals: identifierLiterals,
     });
 
     const json = formatSupportBundleJson(bundle);

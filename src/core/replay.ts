@@ -28,8 +28,17 @@ const TracedCallSchema = z.object({
 });
 
 const TracedCheckSchema = z.object({
-  found: z.enum(["claimed", "looked", "unchecked", "stopped", "no-way", "sum", "wrong-sum"]),
-  did: z.enum(["again", "note"]),
+  found: z.enum([
+    "claimed",
+    "looked",
+    "unchecked",
+    "stopped",
+    "no-way",
+    "sum",
+    "wrong-sum",
+    "check-failed",
+  ]),
+  did: z.enum(["again", "note", "skipped"]),
 });
 
 const TurnTraceSchema = z.object({

@@ -210,6 +210,7 @@ export interface McpServerView {
   headerKeys: string[];
   envKeys: string[];
   readOnlyAutoAllow: boolean;
+  alwaysOffer: boolean;
   connected: boolean;
   toolCount: number;
   tools: McpToolSummaryView[];
@@ -228,6 +229,7 @@ export interface McpServerAddRequest {
   url?: string;
   headers?: Record<string, string>;
   readOnlyAutoAllow?: boolean;
+  alwaysOffer?: boolean;
 }
 
 /** Editable companion character & persona state shown in Settings. */
@@ -464,6 +466,7 @@ export interface SettingsBridge {
   ): Promise<{ ok: boolean; view: SettingsView; error?: string }>;
   /** Toggles whether read-only tools on an MCP server may run without confirmation before outside text is read. */
   setMcpReadOnlyAuto(id: string, on: boolean): Promise<SettingsView>;
+  setMcpAlwaysOffer(id: string, on: boolean): Promise<SettingsView>;
   /** Reconnects an external MCP server and refreshes its tool list. */
   reconnectMcpServer(id: string): Promise<{ ok: boolean; view: SettingsView; error?: string }>;
   /** Opens a file picker to import a Character Card (.json or .png) and applies its persona. */
