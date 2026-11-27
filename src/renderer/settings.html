@@ -476,6 +476,7 @@
           Assistant, Obsidian, or local developer tools). Every tool asks your permission by
           default, and all MCP responses are treated as untrusted outside text.
         </p>
+        <p id="mcp-semantic-status" class="why" role="status" aria-live="polite"></p>
         <ul id="mcp-servers" class="machines"></ul>
         <form id="mcp-form" class="machine-form" autocomplete="off">
           <label class="row">
@@ -569,9 +570,9 @@
             <input id="mcp-always-offer" type="checkbox" />
             <span class="what">Always offer this server's tools</span>
             <span class="why">
-              Off by default. Useful for filesystem or database servers so natural requests ("read
-              the file", "query the database") don't have to name the server; persistence tools ask
-              while active.
+              Off by default. Turn on for filesystem or database servers when semantic routing is
+              unavailable or you don't want to name the server; persistence tools ask and assistant
+              replies are withheld from background learning while active.
             </span>
           </label>
           <div class="row">

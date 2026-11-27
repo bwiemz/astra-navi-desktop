@@ -29,6 +29,7 @@ import {
 } from "../core/profileBackup.ts";
 import { buildPairingUri, encodeQrMatrix, type QrMatrix } from "../core/qrCode.ts";
 import type { Reach } from "../core/reach.ts";
+import type { Recall } from "../core/recall.ts";
 import { auditSecurityRules } from "../core/ruleAudit.ts";
 import type { SearchBudget } from "../core/searchBudget.ts";
 import type { SelfCheckResult } from "../core/selfCheck.ts";
@@ -81,6 +82,7 @@ export interface SettingsIpcDeps {
   noticeWatch(): NoticeWatch | null;
   initiative(): Initiative | null;
   reach(): Reach | null;
+  recall?(): Recall | null;
   mcpHub?(): McpHub | null;
   board?(): MissionBoard | null;
   searchBudget(): SearchBudget | null;
@@ -328,6 +330,7 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       pingPhone: config.value.devices.pingPhone,
       machines: config.value.fleet.machines.map((machine) => ({ ...machine })),
       mcpServers: buildMcpServerViews(config.value.mcp.servers, deps.mcpHub?.() ?? null),
+      semanticRoutingStatus: deps.recall?.()?.embedder?.status?.() ?? "unavailable",
       canAskPassword,
       onboardingComplete: config.value.onboardingComplete,
       advancedSettings: config.value.advancedSettings,

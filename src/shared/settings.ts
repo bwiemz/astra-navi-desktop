@@ -110,6 +110,8 @@ export interface SettingsView {
   machines: MachineView[];
   /** Configured external MCP servers (header/env values are redacted; only key names are sent). */
   mcpServers: McpServerView[];
+  /** Readiness of the local semantic embedder used for natural-language MCP routing. */
+  semanticRoutingStatus?: "ready" | "downloading" | "unavailable";
   /** The desktop has a password window she can have SSH ask with. */
   canAskPassword: boolean;
   /** Whether the first-run setup wizard has been completed. */

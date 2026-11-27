@@ -172,6 +172,88 @@ describe("redacted support bundle", () => {
     expect(scrubbed.text).not.toContain("ha-secret-token-7788");
   });
 
+  it("passes the full Round 7 redaction behaviour table (dictionary contexts, net.isIPv6 crash safety, unlisted env keys)", () => {
+    const mcpLists = collectMcpRedactionLists([
+      {
+        env: {
+          REGION: "us",
+          CUSTOM_SHORT: "us",
+          HOST: "home",
+          API_PIN: "4829",
+        },
+      },
+    ]);
+    expect(mcpLists.credentials).toEqual(["4829"]);
+    expect(mcpLists.identifiers).toEqual(["home"]);
+
+    const ids = ["home", "Mark", "Will", "nas", "nas.tail1234.ts.net", "admin", "kenji"];
+    const creds = [...mcpLists.credentials];
+
+    // Behaviour table: every must-redact and must-preserve case checked in full.
+    const table: {
+      name: string;
+      input: string;
+      mustContain?: readonly string[];
+      mustNotContain?: readonly string[];
+      exact?: string;
+    }[] = [
+      {
+        name: "dictionary-word identifier in host/machine context",
+        input: "connect to host home port 22 refused; machine Mark offline",
+        exact: "connect to host [redacted] port 22 refused; machine [redacted] offline",
+      },
+      {
+        name: "dictionary-word identifier in ssh/port/url/@/hostname contexts",
+        input: "ssh home; home:22; http://home/api; will@box; home.lan",
+        exact: "ssh [redacted]; [redacted]:22; http://[redacted]/api; [redacted]@box; [redacted].lan",
+      },
+      {
+        name: "dictionary-word prose stays untouched",
+        input: "I will check at home and mark it done",
+        exact: "I will check at home and mark it done",
+      },
+      {
+        name: "unlisted/REGION=us env value never redacts Contact us",
+        input: "Contact us for support",
+        exact: "Contact us for support",
+      },
+      {
+        name: "C++/Vulkan/Node double-colon crash symbols stay untouched (net.isIPv6)",
+        input: "Fatal: std::bad_alloc in vk::Device::Create via node::Start",
+        exact: "Fatal: std::bad_alloc in vk::Device::Create via node::Start",
+      },
+      {
+        name: "real IPv6 addresses (including IPv4-mapped & zoned) are scrubbed",
+        input: "peers 2001:db8::1, fe80::1a2b:3c4d%eth0, ::ffff:192.168.1.5",
+        exact: "peers [redacted-ip], [redacted-ip], [redacted-ip]",
+      },
+      {
+        name: "loopback ::1, timestamps, and MAC addresses stay untouched",
+        input: "loopback ::1 at 10:30:00 mac AA:BB:CC:DD:EE:FF",
+        exact: "loopback ::1 at 10:30:00 mac AA:BB:CC:DD:EE:FF",
+      },
+      {
+        name: "POSIX path and email scrubbed before literal identifiers",
+        input: "/home/alice/.config and Kenji@Example.com",
+        exact: "/home/[user]/.config and [redacted-email]",
+      },
+      {
+        name: "longest-first FQDN + case-insensitive short hostname + PIN",
+        input: "nas.tail1234.ts.net and NAS with pin 4829",
+        exact: "[redacted] and [redacted] with pin [redacted]",
+      },
+    ];
+
+    for (const row of table) {
+      const actual = redactSupportText(row.input, ids, creds).text;
+      if (row.exact !== undefined) {
+        expect(actual, row.name).toBe(row.exact);
+      }
+      for (const s of row.mustContain ?? []) expect(actual, row.name).toContain(s);
+      for (const s of row.mustNotContain ?? []) expect(actual, row.name).not.toContain(s);
+    }
+  });
+
   it("rejects forbidden private fields or unredacted keys if ever injected", () => {
     expect(() =>
       assertSupportBundleSafe(JSON.stringify({ conversations: ["secret user chat"] })),

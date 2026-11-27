@@ -200,6 +200,7 @@ let reach: Reach | null = null;
 let platformAdapter: PlatformAdapter | null = null;
 let fleet: Fleet | null = null;
 let mcpHub: McpHub | null = null;
+let recallRef: Recall | null = null;
 
 function gameOnCard(): Promise<string | null> {
   return platformAdapter ? platformAdapter.gameDetector.activeFullscreenGame() : cardGameOnCard();
@@ -737,6 +738,7 @@ const settings = createSettingsController({
   showAvatarWindow: () => showWindow(false),
   importModel,
   detectGameOnCard: gameOnCard,
+  recall: () => recallRef,
   sendToWindow,
   rebuildTrayMenu: () => rebuildTrayMenu(),
 });
@@ -1422,6 +1424,7 @@ async function main(): Promise<void> {
   const routines = new RoutineWatch(routinesFile());
   await routines.load();
   const recall = new Recall(memory, new LocalEmbedder(join(modelsDir(), "speech")), store);
+  recallRef = recall;
   const learner = new Learner({
     memory,
     recall,

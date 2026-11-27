@@ -322,7 +322,71 @@ export const MAX_ROUTED_MCP_TOOLS = 16;
 const MAX_ROUTED_MCP_BY_MEANING = 4;
 const MCP_EMBED_STANDS_OUT = 1.8;
 const MCP_EMBED_MIN_SIM = 0.45;
-const MAX_MCP_VECTOR_CACHE = 256;
+const MAX_MCP_VECTOR_CACHE = 1_024;
+
+const SERVER_RANK_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "can", "could", "do", "for", "from", "have", "help", "how", "i",
+  "in", "is", "it", "me", "my", "of", "on", "or", "our", "please", "show", "tell", "that",
+  "the", "their", "this", "to", "use", "using", "want", "what", "with", "would", "you", "your",
+]);
+
+const WRITE_INTENT_RE =
+  /\b(?:create|add|new|write|edit|update|modify|patch|put|post|delete|remove|drop|push|commit|merge|fork|close|reopen|assign|comment|send|set|turn|dim|toggle|start|stop|restart|run|exec|execute|install|uninstall)\b/i;
+
+function stemWord(word: string): string {
+  if (word.length > 4 && word.endsWith("ies")) return `${word.slice(0, -3)}y`;
+  if (word.length > 4 && word.endsWith("es") && /(?:s|x|z|ch|sh)es$/.test(word)) {
+    return word.slice(0, -2);
+  }
+  if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+  return word;
+}
+
+function extractMatchTokens(raw: string): Set<string> {
+  const normalized = raw
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .toLowerCase();
+  const out = new Set<string>();
+  for (const part of normalized.split(/[^a-z0-9]+/)) {
+    if (part.length < 3 || SERVER_RANK_STOP_WORDS.has(part)) continue;
+    out.add(stemWord(part));
+  }
+  return out;
+}
+
+/**
+ * Ranks tools WITHIN an already-matched MCP server using lexical overlap with the user's
+ * message and a read-only preference when the user is not asking to create/modify/delete.
+ * Only called after a server ID has already matched deterministically.
+ */
+function rankWithinMatchedServer(
+  rawTextLower: string,
+  msgTokens: ReadonlySet<string>,
+  wantsMutation: boolean,
+  fullName: string,
+  toolName: string,
+  description: string | undefined,
+  readOnlyMcpTools: ReadonlySet<string> | undefined,
+): number {
+  let bonus = 0;
+  const nameTokens = extractMatchTokens(toolName);
+  const descTokens = extractMatchTokens(cleanMcpDescriptionForEmbedding(description));
+  for (const tok of msgTokens) {
+    if (nameTokens.has(tok)) bonus += 3;
+    else if (descTokens.has(tok)) bonus += 1;
+  }
+  if (!wantsMutation && readOnlyMcpTools?.has(fullName)) {
+    bonus += 2.5;
+  }
+  if (
+    !wantsMutation &&
+    /\b(?:list|show|get|find|search|read|view|check)\b/i.test(rawTextLower) &&
+    /^(?:list|get|find|search|read|view|fetch|show|describe|check)(?:[_-]|$)/i.test(toolName)
+  ) {
+    bonus += 1.5;
+  }
+  return bonus;
+}
 
 function escapeRegexLiteral(raw: string): string {
   return raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -348,6 +412,10 @@ function hasExactWordBoundaryMatch(rawTextLower: string, identifierLower: string
 function matchDeterministicMcpTool(
   rawTextLower: string,
   fullName: string,
+  msgTokens: ReadonlySet<string>,
+  wantsMutation: boolean,
+  description: string | undefined,
+  readOnlyMcpTools: ReadonlySet<string> | undefined,
 ): { score: number; reason: string } | null {
   const rest = fullName.slice("mcp:".length);
   const dotIdx = rest.indexOf(".");
@@ -363,7 +431,7 @@ function matchDeterministicMcpTool(
     rawTextLower.includes(fullLower) ||
     (toolLower.length > 0 && hasExactWordBoundaryMatch(rawTextLower, qualifiedLower))
   ) {
-    return { score: 12, reason: "mcp exact name" };
+    return { score: 120, reason: "mcp exact name" };
   }
 
   // Exact tool name (>= 3 chars): compound identifiers match anywhere; plain single words require explicit invocation phrasing.
@@ -371,7 +439,7 @@ function matchDeterministicMcpTool(
     const isCompoundIdentifier = /[_-]|[a-z][A-Z]/.test(toolName);
     if (isCompoundIdentifier) {
       if (hasExactWordBoundaryMatch(rawTextLower, toolLower)) {
-        return { score: 10, reason: "mcp exact name" };
+        return { score: 100, reason: "mcp exact name" };
       }
     } else {
       const escaped = escapeRegexLiteral(toolLower);
@@ -380,23 +448,34 @@ function matchDeterministicMcpTool(
         "i",
       );
       if (explicitToolRe.test(rawTextLower)) {
-        return { score: 10, reason: "mcp exact name" };
+        return { score: 100, reason: "mcp exact name" };
       }
     }
   }
 
   // Exact server ID (>= 3 chars, never 2-char IDs like "ha" or common English filler words).
+  // Within a matched server, rank tools by message overlap and prefer read-only tools unless
+  // the user asked to write/modify, so large servers (e.g. GitHub) never cut `list_issues`
+  // behind alphabetical `create_*` / `delete_*` / `fork_*` write tools.
   if (serverLower.length >= 3 && !GENERIC_SERVER_ID_WORDS.has(serverLower)) {
-    if (hasExactWordBoundaryMatch(rawTextLower, serverLower)) {
-      return { score: 6, reason: "mcp server" };
-    }
+    const matchedDirect = hasExactWordBoundaryMatch(rawTextLower, serverLower);
     const spacedServer = serverLower.replace(/[-_]+/g, " ").trim();
-    if (
+    const matchedSpaced =
+      !matchedDirect &&
       spacedServer !== serverLower &&
       spacedServer.length >= 4 &&
-      hasExactWordBoundaryMatch(rawTextLower, spacedServer)
-    ) {
-      return { score: 6, reason: "mcp server" };
+      hasExactWordBoundaryMatch(rawTextLower, spacedServer);
+    if (matchedDirect || matchedSpaced) {
+      const intraBonus = rankWithinMatchedServer(
+        rawTextLower,
+        msgTokens,
+        wantsMutation,
+        fullName,
+        toolName,
+        description,
+        readOnlyMcpTools,
+      );
+      return { score: 20 + intraBonus, reason: "mcp server" };
     }
   }
 
@@ -433,6 +512,8 @@ export interface RouteOptions {
   toolDescriptions?: Readonly<Record<string, string>>;
   /** Prefixed `mcp:*` tool names from servers with the user's explicit per-server "always offer" toggle enabled. */
   alwaysOfferMcpTools?: readonly string[];
+  /** Optional set of `mcp:*` tools marked read-only so intra-server ranking prefers read-only tools for read requests. */
+  readOnlyMcpTools?: ReadonlySet<string>;
 }
 
 export interface Route {
@@ -560,11 +641,21 @@ export class ToolRouter {
     for (const tool of options.alwaysOfferMcpTools ?? []) add(tool, "mcp always offer");
     if (mcpTools.length > 0 && message.trim().length > 0) {
       // Deterministic MCP signals only (no generic word scoring): exact tool name or server ID
-      // (>= 3 chars, word boundaries) against the current user message only.
+      // (>= 3 chars, word boundaries) against the current user message only. Within a matched
+      // server, rank tools by message token overlap and prefer read-only tools for read requests.
       const rawLower = message.toLowerCase();
+      const msgTokens = extractMatchTokens(message);
+      const wantsMutation = WRITE_INTENT_RE.test(rawLower);
       const matchedMcp: { tool: string; score: number; reason: string }[] = [];
       for (const tool of mcpTools) {
-        const hit = matchDeterministicMcpTool(rawLower, tool);
+        const hit = matchDeterministicMcpTool(
+          rawLower,
+          tool,
+          msgTokens,
+          wantsMutation,
+          options.toolDescriptions?.[tool],
+          options.readOnlyMcpTools,
+        );
         if (hit) matchedMcp.push({ tool, ...hit });
       }
       matchedMcp
