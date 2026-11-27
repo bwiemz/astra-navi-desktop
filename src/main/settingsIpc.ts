@@ -45,6 +45,7 @@ import {
 } from "../core/profileBackup.ts";
 import { buildPairingUri, encodeQrMatrix, type QrMatrix } from "../core/qrCode.ts";
 import type { Reach } from "../core/reach.ts";
+import type { Recall } from "../core/recall.ts";
 import { auditSecurityRules } from "../core/ruleAudit.ts";
 import type { SearchBudget } from "../core/searchBudget.ts";
 import type { SelfCheckResult } from "../core/selfCheck.ts";
@@ -57,6 +58,7 @@ import {
 } from "../core/supportBundle.ts";
 import { forShow, type ShownTrace, type TraceKeeper } from "../core/trace.ts";
 import { checkGithubReleaseUpdate, type UpdateCheckResult } from "../core/updateCheck.ts";
+import { wakeAliasWarnings } from "../core/wakeName.ts";
 import type { ConversationArchive } from "../core/archive.ts";
 import {
   detectDistributionChannel,
@@ -97,6 +99,7 @@ export interface SettingsIpcDeps {
   noticeWatch(): NoticeWatch | null;
   initiative(): Initiative | null;
   reach(): Reach | null;
+  recall?(): Recall | null;
   mcpHub?(): McpHub | null;
   visionSidecar?(): LlamaVisionSidecar | null;
   board?(): MissionBoard | null;
@@ -403,6 +406,11 @@ export function createSettingsController(deps: SettingsIpcDeps): SettingsControl
       pingPhone: config.value.devices.pingPhone,
       machines: config.value.fleet.machines.map((machine) => ({ ...machine })),
       mcpServers: buildMcpServerViews(config.value.mcp.servers, deps.mcpHub?.() ?? null),
+      semanticRoutingStatus: deps.recall?.()?.embedder?.status?.() ?? "unavailable",
+      wakeAliasWarnings: wakeAliasWarnings(
+        config.value.voice.otherNames,
+        config.value.character.displayName,
+      ),
       character: {
         userAddress: config.value.character.userAddress,
         displayName: config.value.character.displayName,

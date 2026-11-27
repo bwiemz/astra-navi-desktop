@@ -801,6 +801,7 @@ const settings = createSettingsController({
     rebuildTrayMenu();
   },
   detectGameOnCard: gameOnCard,
+  recall: () => recallRef,
   sendToWindow,
   rebuildTrayMenu: () => rebuildTrayMenu(),
 });

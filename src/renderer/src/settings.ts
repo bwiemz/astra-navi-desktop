@@ -89,6 +89,12 @@ function show(view: SettingsView): void {
   needsName.disabled = view.alwaysListening;
   const names = element<HTMLInputElement>("otherNames");
   if (document.activeElement !== names) names.value = view.otherNames.join(", ");
+  const wakeWarnEl = document.getElementById("otherNames-warning");
+  if (wakeWarnEl) {
+    const warnings = view.wakeAliasWarnings ?? [];
+    wakeWarnEl.hidden = warnings.length === 0;
+    wakeWarnEl.textContent = warnings.join(" ");
+  }
 
   element<HTMLInputElement>("lookWithoutAsking").checked = view.lookWithoutAsking;
   element<HTMLInputElement>("handsOff").checked = view.handsOff;

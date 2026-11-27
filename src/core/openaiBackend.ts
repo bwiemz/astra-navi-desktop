@@ -643,22 +643,25 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
           ...(Array.isArray(payload.models) ? payload.models : []),
         ];
         const wanted = this.config.model.trim().toLowerCase();
-        const match =
-          entries.find((e) => {
-            const id = typeof e["id"] === "string" ? e["id"] : typeof e["name"] === "string" ? e["name"] : "";
-            return id.trim().toLowerCase() === wanted;
-          }) ?? entries[0];
+        // Match ONLY the configured model (never fall back to entries[0], which may be a different model).
+        const match = entries.find((e) => {
+          const id =
+            typeof e["id"] === "string" ? e["id"] : typeof e["name"] === "string" ? e["name"] : "";
+          return id.trim().toLowerCase() === wanted;
+        });
         if (match) {
           const meta =
             typeof match["meta"] === "object" && match["meta"] !== null
               ? (match["meta"] as Record<string, unknown>)
               : {};
+          // Use ONLY runtime context-window fields — never `n_ctx_train` (training context can be
+          // 128K–262K even when the server is running with a 4K–8K active window).
           const candidates = [
             match["max_model_len"],
             match["context_length"],
             match["n_ctx"],
             match["max_context_length"],
-            meta["n_ctx_train"],
+            meta["n_ctx"],
           ];
           for (const c of candidates) {
             if (typeof c === "number" && Number.isFinite(c) && c >= 1_024) {
@@ -787,13 +790,25 @@ export class OpenAiCompatibleSession implements ChatSessionLike {
       });
 
     // Try `chat_template_kwargs: { enable_thinking: false }` for all servers (including remote
-    // thinking models). If rejected with HTTP 400 or 422, remember per-session so later calls
-    // take a single round trip and retry once immediately without it.
+    // thinking models). Only permanently disable it for the session when an HTTP 400/422 error
+    // body actually names the field or an unknown/extra property rejection, so transient/unrelated
+    // 400s (e.g. context overflow) never turn off thinking suppression permanently.
     const tryDisableThinking = this.supportsChatTemplateKwargs;
     let res = await sendDecide(tryDisableThinking);
     if (tryDisableThinking && (res.status === 400 || res.status === 422)) {
-      this.supportsChatTemplateKwargs = false;
-      res = await sendDecide(false);
+      const errBody = await res.text().catch(() => "");
+      const rejectsThinkingField =
+        /chat_template_kwargs|enable_thinking|extra_body|unknown[\s_-]*field|unrecognized|additional[\s_-]*propert|extra_forbidden|unexpected[\s_-]*field/i.test(
+          errBody,
+        );
+      if (rejectsThinkingField) {
+        this.supportsChatTemplateKwargs = false;
+        res = await sendDecide(false);
+      } else {
+        throw new Error(
+          `OpenAI-compatible claim-check returned HTTP ${res.status}${errBody ? `: ${errBody.slice(0, 180)}` : ""}`,
+        );
+      }
     }
     if (!res.ok) {
       throw new Error(`OpenAI-compatible claim-check returned HTTP ${res.status}`);

@@ -16,6 +16,8 @@ const MAX_REGISTERED_MCP_TOOLS = 512;
 
 const MAX_FULL_EXPAND_DEPTH = 10;
 const MAX_FULL_EXPAND_NODES = 2_000;
+const MAX_EXPANDED_BYTES = 48_000;
+const MAX_NORMALIZE_WALL_MS = 100;
 const MAX_OBJECT_PROPERTIES = 24;
 const MAX_REQUIRED_OBJECT_PROPERTIES = 48;
 const MAX_SCANNED_OBJECT_PROPERTIES = 512;
@@ -36,10 +38,29 @@ const MAX_STRIP_ARG_DEPTH = 12;
 
 type MutableSchema = Record<string, unknown>;
 
+interface MemoEntry {
+  schema: GbnfJsonSchema;
+  nodes: number;
+  bytes: number;
+}
+
 interface ExpandState {
   nodesLeft: number;
-  /** Memoizes resolved `$ref` target objects by `(target, depth:insideArray)` so DAGs visit each node once. */
-  refMemo: Map<Record<string, unknown>, Map<string, GbnfJsonSchema>>;
+  bytesLeft: number;
+  deadlineMs: number;
+  timedOut: boolean;
+  /** Objects currently on the active recursion stack (guards against cyclic `$ref` aliases). */
+  activeTargets: Set<Record<string, unknown>>;
+  /** Memoizes cycle-free, full `$ref` target expansions with exact logical `(nodes, bytes)`. */
+  refMemo: Map<Record<string, unknown>, Map<string, MemoEntry>>;
+}
+
+interface ExpandResult {
+  schema: GbnfJsonSchema;
+  nodes: number;
+  bytes: number;
+  hitCycle: boolean;
+  hitBudget: boolean;
 }
 
 const normalizedSchemaCache = new WeakMap<Record<string, unknown>, McpObjectParamsSchema>();
@@ -87,11 +108,13 @@ function derefNode(
   targetObj: Record<string, unknown> | undefined;
   nextSeen: Set<string>;
   hadRef: boolean;
+  hitCycle: boolean;
 } {
   const nextSeen = new Set(seenRefs);
   let current: unknown = raw;
   let targetObj: Record<string, unknown> | undefined;
   let hadRef = false;
+  let hitCycle = false;
   let hops = 0;
   let inheritedDesc: string | undefined;
 
@@ -105,21 +128,25 @@ function derefNode(
       inheritedDesc = current["description"];
     }
     const ref = current["$ref"];
+    if (nextSeen.has(ref)) {
+      hitCycle = true;
+      return { node: undefined, targetObj: undefined, nextSeen, hadRef, hitCycle };
+    }
     const target = resolveLocalRef(ref, root, nextSeen);
-    if (!target) return { node: undefined, targetObj: undefined, nextSeen, hadRef };
+    if (!target) return { node: undefined, targetObj: undefined, nextSeen, hadRef, hitCycle };
     nextSeen.add(ref);
     targetObj = target;
     current = target;
     hops += 1;
   }
   if (!isPlainObject(current)) {
-    return { node: undefined, targetObj: undefined, nextSeen, hadRef };
+    return { node: undefined, targetObj: undefined, nextSeen, hadRef, hitCycle };
   }
   const node =
     inheritedDesc !== undefined && typeof current["description"] !== "string"
       ? { ...current, description: inheritedDesc }
       : current;
-  return { node, targetObj, nextSeen, hadRef };
+  return { node, targetObj, nextSeen, hadRef, hitCycle };
 }
 
 function schemaAllowsNull(schema: Record<string, unknown>): boolean {
@@ -297,7 +324,7 @@ function readRefMemo(
   state: ExpandState,
   target: Record<string, unknown>,
   key: string,
-): GbnfJsonSchema | undefined {
+): MemoEntry | undefined {
   return state.refMemo.get(target)?.get(key);
 }
 
@@ -305,11 +332,11 @@ function writeRefMemo(
   state: ExpandState,
   target: Record<string, unknown>,
   key: string,
-  val: GbnfJsonSchema,
+  val: MemoEntry,
 ): void {
   let inner = state.refMemo.get(target);
   if (!inner) {
-    inner = new Map<string, GbnfJsonSchema>();
+    inner = new Map<string, MemoEntry>();
     state.refMemo.set(target, inner);
   }
   inner.set(key, val);
@@ -390,6 +417,42 @@ function finalizeUnionBranches(
 }
 
 /**
+ * Minimal O(K) safe fallback schema used ONLY if a pathological input hits the
+ * wall-clock normalization deadline. Preserves valid required top-level keys strictly <= 12 KB.
+ */
+function minimalFallbackSchema(effective: Record<string, unknown>): McpObjectParamsSchema {
+  const requiredRaw = Array.isArray(effective["required"])
+    ? effective["required"].filter((k): k is string => typeof k === "string")
+    : [];
+  const rawProps = isPlainObject(effective["properties"]) ? effective["properties"] : {};
+  const properties: Record<string, GbnfJsonSchema> = {};
+  const required: string[] = [];
+  let bytes = 36;
+  for (const key of requiredRaw) {
+    if (required.length >= MAX_REQUIRED_OBJECT_PROPERTIES) break;
+    if (
+      !Object.hasOwn(rawProps, key) ||
+      !key ||
+      key.length > MAX_KEY_CHARS ||
+      Buffer.byteLength(key, "utf8") > MAX_KEY_UTF8_BYTES ||
+      key.includes("\0")
+    ) {
+      continue;
+    }
+    const entryBytes = Buffer.byteLength(key, "utf8") * 2 + 28;
+    if (bytes + entryBytes > MAX_SERIALIZED_SCHEMA_BYTES) break;
+    properties[key] = { type: "string" };
+    required.push(key);
+    bytes += entryBytes;
+  }
+  return {
+    type: "object",
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+  };
+}
+
+/**
  * Phase 1: Normalize the entire object's properties WITHOUT premature per-property degradation.
  * Required keys past index 24 are collected first and always kept (up to 48 required keys).
  */
@@ -399,7 +462,14 @@ function normalizeFullObjectProperties(
   depth: number,
   seenRefs: ReadonlySet<string>,
   state: ExpandState,
-): { properties: Record<string, GbnfJsonSchema>; required: string[] } {
+): {
+  properties: Record<string, GbnfJsonSchema>;
+  required: string[];
+  nodes: number;
+  bytes: number;
+  hitCycle: boolean;
+  hitBudget: boolean;
+} {
   const requiredRaw = Array.isArray(node["required"])
     ? node["required"].filter((key): key is string => typeof key === "string")
     : [];
@@ -434,10 +504,21 @@ function normalizeFullObjectProperties(
   ]);
 
   const normalizedByKey = new Map<string, GbnfJsonSchema>();
+  let totalNodes = 0;
+  let totalBytes = 32;
+  let hitCycle = false;
+  let hitBudget = false;
   for (const [key, propSchema] of [...requiredEntries, ...optionalEntries]) {
     const isReq = requiredSet.has(key);
-    const propNode = normalizeFullNode(propSchema, root, depth + 1, seenRefs, state, false);
-    normalizedByKey.set(key, isReq ? propNode : makeNullableSchema(propNode));
+    const propRes = normalizeFullNode(propSchema, root, depth + 1, seenRefs, state, false);
+    const wrapped = isReq ? propRes.schema : makeNullableSchema(propRes.schema);
+    const keyBytes = Buffer.byteLength(key, "utf8") + 4 + (isReq ? Buffer.byteLength(key, "utf8") + 3 : 36);
+    state.bytesLeft -= keyBytes;
+    totalNodes += propRes.nodes;
+    totalBytes += propRes.bytes + keyBytes;
+    if (propRes.hitCycle) hitCycle = true;
+    if (propRes.hitBudget) hitBudget = true;
+    normalizedByKey.set(key, wrapped);
   }
 
   const properties: Record<string, GbnfJsonSchema> = {};
@@ -447,13 +528,14 @@ function normalizeFullObjectProperties(
     if (val !== undefined) properties[key] = val;
   }
   const required = requiredRaw.filter((key) => Object.hasOwn(properties, key));
-  return { properties, required };
+  return { properties, required, nodes: totalNodes, bytes: totalBytes, hitCycle, hitBudget };
 }
 
 /**
- * Phase 1: Full, lossless, cycle-safe, memoized schema normalization up to a generous
- * `MAX_FULL_EXPAND_NODES` (2,000) ceiling. Never drops fields, enums, consts, or types
- * on ordinary schemas; Phase 2 shrinks by strict priority ONLY if output exceeds 12 KB UTF-8.
+ * Phase 1: Full, lossless, cycle-safe, memoized schema normalization enforcing hard caps
+ * on BOTH logical expanded nodes (`MAX_FULL_EXPAND_NODES = 2,000`) and expanded bytes
+ * (`MAX_EXPANDED_BYTES = 48,000`) — including across `$ref` memo hits so width-4 `$ref` DAGs
+ * cannot amplify exponentially — plus a wall-clock deadline (`MAX_NORMALIZE_WALL_MS`).
  */
 function normalizeFullNode(
   raw: unknown,
@@ -462,207 +544,305 @@ function normalizeFullNode(
   seenRefs: ReadonlySet<string>,
   state: ExpandState,
   insideArray: boolean,
-): GbnfJsonSchema {
-  const { node, targetObj, nextSeen, hadRef } = derefNode(raw, root, seenRefs);
+): ExpandResult {
+  if (state.timedOut || performance.now() > state.deadlineMs) {
+    state.timedOut = true;
+    const stub = isPlainObject(raw) ? shallowStubForRawNode(raw) : ({ type: "string" } as GbnfJsonSchema);
+    return { schema: stub, nodes: 1, bytes: 24, hitCycle: false, hitBudget: true };
+  }
+
+  const { node, targetObj, nextSeen, hadRef, hitCycle: derefCycle } = derefNode(raw, root, seenRefs);
   if (!node) {
-    return { type: "string" };
+    const fallback: GbnfJsonSchema = { type: "string" };
+    state.bytesLeft -= 18;
+    return { schema: fallback, nodes: 1, bytes: 18, hitCycle: derefCycle, hitBudget: false };
+  }
+
+  if (hadRef && targetObj && state.activeTargets.has(targetObj)) {
+    const stub = shallowStubForRawNode(targetObj);
+    const bytes = utf8ByteLength(stub);
+    state.bytesLeft -= bytes;
+    return { schema: stub, nodes: 1, bytes, hitCycle: true, hitBudget: false };
   }
 
   const memoKey = `${depth}:${insideArray ? 1 : 0}`;
   if (hadRef && targetObj) {
     const cached = readRefMemo(state, targetObj, memoKey);
     if (cached) {
-      // Re-attach referencing property description if the target itself lacked one.
-      const ownDesc = cleanDescription(node["description"], MAX_PARAM_DESC_CHARS);
-      if (ownDesc && typeof (cached as unknown as Record<string, unknown>)["description"] !== "string") {
-        return { ...cached, description: ownDesc } as GbnfJsonSchema;
+      // Enforce logical expanded node + byte caps BEFORE reusing a memoized subtree so
+      // diamond/width-4 `$ref` DAGs can never multiply into megabytes during clone/shrink.
+      if (state.nodesLeft < cached.nodes || state.bytesLeft < cached.bytes) {
+        const stub = shallowStubForRawNode(node);
+        const bytes = utf8ByteLength(stub);
+        state.nodesLeft -= 1;
+        state.bytesLeft -= bytes;
+        return { schema: stub, nodes: 1, bytes, hitCycle: false, hitBudget: true };
       }
-      return cached;
+      state.nodesLeft -= cached.nodes;
+      state.bytesLeft -= cached.bytes;
+      const ownDesc = cleanDescription(node["description"], MAX_PARAM_DESC_CHARS);
+      if (ownDesc && typeof (cached.schema as unknown as Record<string, unknown>)["description"] !== "string") {
+        const extraBytes = Buffer.byteLength(ownDesc, "utf8") + 17;
+        state.bytesLeft -= extraBytes;
+        return {
+          schema: { ...cached.schema, description: ownDesc } as GbnfJsonSchema,
+          nodes: cached.nodes,
+          bytes: cached.bytes + extraBytes,
+          hitCycle: false,
+          hitBudget: false,
+        };
+      }
+      return {
+        schema: cached.schema,
+        nodes: cached.nodes,
+        bytes: cached.bytes,
+        hitCycle: false,
+        hitBudget: false,
+      };
     }
   }
 
-  if (depth > MAX_FULL_EXPAND_DEPTH || state.nodesLeft <= 0) {
-    return shallowStubForRawNode(node);
+  if (depth > MAX_FULL_EXPAND_DEPTH || state.nodesLeft <= 0 || state.bytesLeft <= 0) {
+    const stub = shallowStubForRawNode(node);
+    const bytes = utf8ByteLength(stub);
+    return {
+      schema: stub,
+      nodes: 1,
+      bytes,
+      hitCycle: derefCycle,
+      hitBudget: depth <= MAX_FULL_EXPAND_DEPTH,
+    };
   }
   state.nodesLeft -= 1;
 
   if (hadRef && targetObj) {
-    // Store provisional stub BEFORE recursing so cyclic / diamond `$ref` DAGs visit each node once.
-    writeRefMemo(state, targetObj, memoKey, shallowStubForRawNode(targetObj));
+    state.activeTargets.add(targetObj);
   }
 
   const description = cleanDescription(node["description"], MAX_PARAM_DESC_CHARS);
   let out: GbnfJsonSchema | null = null;
+  let subtreeNodes = 1;
+  let subtreeBytes = 0;
+  let hitCycle = derefCycle;
+  let hitBudget = false;
 
-  // Unions (`oneOf` / `anyOf`): normalize every branch up to MAX_UNION_BRANCHES, collapsing
-  // duplicates so diamond union chains like B0..B11 run in O(V) without injecting false "string".
-  const unionRaw = Array.isArray(node["oneOf"])
-    ? node["oneOf"]
-    : Array.isArray(node["anyOf"])
-      ? node["anyOf"]
-      : null;
-  if (unionRaw && unionRaw.length > 0) {
-    const branches: GbnfJsonSchema[] = [];
-    for (const rawBranch of unionRaw.slice(0, MAX_UNION_BRANCHES)) {
-      if (isPlainObject(rawBranch) && rawBranch["type"] === "null") {
-        branches.push({ type: "null" } as GbnfJsonSchema);
-        continue;
+  try {
+    // Unions (`oneOf` / `anyOf`): deduplicate identical raw `$ref` strings first, then normalize
+    // branches up to MAX_UNION_BRANCHES without injecting a false "string" on broken/cyclic refs.
+    const unionRaw = Array.isArray(node["oneOf"])
+      ? node["oneOf"]
+      : Array.isArray(node["anyOf"])
+        ? node["anyOf"]
+        : null;
+    if (unionRaw && unionRaw.length > 0) {
+      const branches: GbnfJsonSchema[] = [];
+      const seenRawRefs = new Set<string>();
+      for (const rawBranch of unionRaw.slice(0, MAX_UNION_BRANCHES)) {
+        if (isPlainObject(rawBranch) && rawBranch["type"] === "null") {
+          branches.push({ type: "null" } as GbnfJsonSchema);
+          continue;
+        }
+        if (isPlainObject(rawBranch) && typeof rawBranch["$ref"] === "string") {
+          const refStr = rawBranch["$ref"];
+          if (seenRawRefs.has(refStr)) continue;
+          seenRawRefs.add(refStr);
+          const peek = derefNode(rawBranch, root, nextSeen);
+          if (peek.hitCycle) hitCycle = true;
+          if (!peek.node) continue;
+        }
+        const bRes = normalizeFullNode(rawBranch, root, depth + 1, nextSeen, state, insideArray);
+        if (bRes.hitCycle) hitCycle = true;
+        if (bRes.hitBudget) hitBudget = true;
+        subtreeNodes += bRes.nodes;
+        subtreeBytes += bRes.bytes;
+        branches.push(bRes.schema);
       }
-      // If a union branch is a broken/cyclic `$ref` and other valid branches exist, skip adding a false "string".
-      if (isPlainObject(rawBranch) && typeof rawBranch["$ref"] === "string") {
-        const peek = derefNode(rawBranch, root, nextSeen);
-        if (!peek.node) continue;
+      if (branches.length > 0) {
+        out = finalizeUnionBranches(branches, description);
+        subtreeBytes = utf8ByteLength(out);
       }
-      branches.push(normalizeFullNode(rawBranch, root, depth + 1, nextSeen, state, insideArray));
     }
-    if (branches.length > 0) {
-      out = finalizeUnionBranches(branches, description);
-    }
-  }
 
-  if (!out && "const" in node) {
-    const val = node["const"];
-    if (
-      typeof val === "string" ||
-      typeof val === "number" ||
-      typeof val === "boolean" ||
-      val === null
-    ) {
-      if (typeof val === "string" && val.length > MAX_CONST_STRING_CHARS) {
-        out = { type: "string", ...(description ? { description } : {}) } as GbnfJsonSchema;
-      } else {
-        out = { const: val, ...(description ? { description } : {}) } as GbnfJsonSchema;
-      }
-    }
-  }
-
-  if (!out && Array.isArray(node["enum"]) && node["enum"].length > 0) {
-    const valid: (string | number | boolean | null)[] = [];
-    const seen = new Set<string>();
-    let exceeded = false;
-    for (const v of node["enum"]) {
-      if (valid.length >= MAX_FULL_ENUM_VALUES) {
-        exceeded = true;
-        break;
-      }
+    if (!out && "const" in node) {
+      const val = node["const"];
       if (
-        typeof v !== "string" &&
-        typeof v !== "number" &&
-        typeof v !== "boolean" &&
-        v !== null
+        typeof val === "string" ||
+        typeof val === "number" ||
+        typeof val === "boolean" ||
+        val === null
       ) {
-        continue;
+        if (typeof val === "string" && val.length > MAX_CONST_STRING_CHARS) {
+          out = { type: "string", ...(description ? { description } : {}) } as GbnfJsonSchema;
+        } else {
+          out = { const: val, ...(description ? { description } : {}) } as GbnfJsonSchema;
+        }
       }
-      if (typeof v === "string" && v.length > MAX_ENUM_STRING_CHARS) {
-        exceeded = true;
-        break;
-      }
-      const key = `${typeof v}:${String(v)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      valid.push(v);
     }
-    if (!exceeded && valid.length > 0) {
-      out = { enum: valid, ...(description ? { description } : {}) } as GbnfJsonSchema;
-    } else {
-      out = {
-        ...primitiveTypeForEnumValues(node["enum"]),
-        ...(description ? { description } : {}),
-      } as GbnfJsonSchema;
-    }
-  }
 
-  if (!out) {
-    const rawType = node["type"];
-    if (Array.isArray(rawType)) {
-      const validTypes = rawType.filter(
-        (t): t is string => typeof t === "string" && PRIMITIVE_TYPES.has(t),
-      );
-      if (validTypes.length > 0 && validTypes.length === rawType.length) {
+    if (!out && Array.isArray(node["enum"]) && node["enum"].length > 0) {
+      const valid: (string | number | boolean | null)[] = [];
+      const seen = new Set<string>();
+      let exceeded = false;
+      for (const v of node["enum"]) {
+        if (valid.length >= MAX_FULL_ENUM_VALUES) {
+          exceeded = true;
+          break;
+        }
+        if (
+          typeof v !== "string" &&
+          typeof v !== "number" &&
+          typeof v !== "boolean" &&
+          v !== null
+        ) {
+          continue;
+        }
+        if (typeof v === "string" && v.length > MAX_ENUM_STRING_CHARS) {
+          exceeded = true;
+          break;
+        }
+        const key = `${typeof v}:${String(v)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        valid.push(v);
+      }
+      if (!exceeded && valid.length > 0) {
+        out = { enum: valid, ...(description ? { description } : {}) } as GbnfJsonSchema;
+      } else {
         out = {
-          type: validTypes.length === 1 ? validTypes[0] : validTypes,
+          ...primitiveTypeForEnumValues(node["enum"]),
           ...(description ? { description } : {}),
-        } as unknown as GbnfJsonSchema;
+        } as GbnfJsonSchema;
       }
     }
 
     if (!out) {
-      const primaryType = Array.isArray(rawType)
-        ? rawType.find((t): t is string => typeof t === "string" && t !== "null")
-        : typeof rawType === "string"
-          ? rawType
-          : isPlainObject(node["properties"])
-            ? "object"
-            : node["items"] !== undefined
-              ? "array"
-              : "string";
-      const wantsNull = Array.isArray(rawType) && rawType.includes("null");
-
-      switch (primaryType) {
-        case "string":
-        case "number":
-        case "integer":
-        case "boolean":
-        case "null":
+      const rawType = node["type"];
+      if (Array.isArray(rawType)) {
+        const validTypes = rawType.filter(
+          (t): t is string => typeof t === "string" && PRIMITIVE_TYPES.has(t),
+        );
+        if (validTypes.length > 0 && validTypes.length === rawType.length) {
           out = {
-            type: wantsNull && primaryType !== "null" ? [primaryType, "null"] : primaryType,
+            type: validTypes.length === 1 ? validTypes[0] : validTypes,
             ...(description ? { description } : {}),
           } as unknown as GbnfJsonSchema;
-          break;
+        }
+      }
 
-        case "array": {
-          let arr: GbnfJsonSchema = {
-            type: "array",
-            items:
+      if (!out) {
+        const primaryType = Array.isArray(rawType)
+          ? rawType.find((t): t is string => typeof t === "string" && t !== "null")
+          : typeof rawType === "string"
+            ? rawType
+            : isPlainObject(node["properties"])
+              ? "object"
+              : node["items"] !== undefined
+                ? "array"
+                : "string";
+        const wantsNull = Array.isArray(rawType) && rawType.includes("null");
+
+        switch (primaryType) {
+          case "string":
+          case "number":
+          case "integer":
+          case "boolean":
+          case "null":
+            out = {
+              type: wantsNull && primaryType !== "null" ? [primaryType, "null"] : primaryType,
+              ...(description ? { description } : {}),
+            } as unknown as GbnfJsonSchema;
+            break;
+
+          case "array": {
+            const itemRes =
               node["items"] !== undefined
                 ? normalizeFullNode(node["items"], root, depth + 1, nextSeen, state, true)
-                : { type: "string" },
-            ...(description ? { description } : {}),
-          } as GbnfJsonSchema;
-          if (wantsNull) arr = makeNullableSchema(arr);
-          out = arr;
-          break;
-        }
+                : {
+                    schema: { type: "string" } as GbnfJsonSchema,
+                    nodes: 1,
+                    bytes: 18,
+                    hitCycle: false,
+                    hitBudget: false,
+                  };
+            if (itemRes.hitCycle) hitCycle = true;
+            if (itemRes.hitBudget) hitBudget = true;
+            subtreeNodes += itemRes.nodes;
+            subtreeBytes = itemRes.bytes + 28 + (description ? Buffer.byteLength(description, "utf8") + 17 : 0);
+            let arr: GbnfJsonSchema = {
+              type: "array",
+              items: itemRes.schema,
+              ...(description ? { description } : {}),
+            } as GbnfJsonSchema;
+            if (wantsNull) {
+              arr = makeNullableSchema(arr);
+              subtreeBytes += 28;
+            }
+            out = arr;
+            break;
+          }
 
-        case "object": {
-          const { properties, required } = normalizeFullObjectProperties(
-            node,
-            root,
-            depth,
-            nextSeen,
-            state,
-          );
-          let obj: GbnfJsonSchema = {
-            type: "object",
-            properties,
-            ...(required.length > 0 ? { required } : {}),
-            ...(description ? { description } : {}),
-          } as GbnfJsonSchema;
-          if (wantsNull) obj = makeNullableSchema(obj);
-          out = obj;
-          break;
-        }
+          case "object": {
+            const objRes = normalizeFullObjectProperties(node, root, depth, nextSeen, state);
+            if (objRes.hitCycle) hitCycle = true;
+            if (objRes.hitBudget) hitBudget = true;
+            subtreeNodes += objRes.nodes;
+            subtreeBytes = objRes.bytes + (description ? Buffer.byteLength(description, "utf8") + 17 : 0);
+            let obj: GbnfJsonSchema = {
+              type: "object",
+              properties: objRes.properties,
+              ...(objRes.required.length > 0 ? { required: objRes.required } : {}),
+              ...(description ? { description } : {}),
+            } as GbnfJsonSchema;
+            if (wantsNull) {
+              obj = makeNullableSchema(obj);
+              subtreeBytes += 28;
+            }
+            out = obj;
+            break;
+          }
 
-        default:
-          out = {
-            type: wantsNull ? ["string", "null"] : "string",
-            ...(description ? { description } : {}),
-          } as unknown as GbnfJsonSchema;
-          break;
+          default:
+            out = {
+              type: wantsNull ? ["string", "null"] : "string",
+              ...(description ? { description } : {}),
+            } as unknown as GbnfJsonSchema;
+            break;
+        }
       }
     }
-  }
 
-  if (hadRef && targetObj) {
-    // Cache target's own clean form (without referencing property's injected description).
-    const cachedVal =
-      typeof targetObj["description"] !== "string" &&
-      typeof (out as unknown as Record<string, unknown>)["description"] === "string"
+    if (subtreeBytes === 0) {
+      subtreeBytes = utf8ByteLength(out);
+      state.bytesLeft -= subtreeBytes;
+    } else {
+      // Wrapper overhead for container nodes (children already deducted their own bytes).
+      state.bytesLeft -= 28;
+    }
+
+    // Only memoize cycle-free, non-truncated subtrees so `seenRefs` paths and partial
+    // budget stubs can never poison other lookups of the same `$ref` target.
+    if (hadRef && targetObj && !hitCycle && !hitBudget && !state.timedOut) {
+      const hasInjectedDesc =
+        typeof targetObj["description"] !== "string" &&
+        typeof (out as unknown as Record<string, unknown>)["description"] === "string";
+      const cachedSchema = hasInjectedDesc
         ? (withoutKey(out as unknown as Record<string, unknown>, "description") as unknown as GbnfJsonSchema)
         : out;
-    writeRefMemo(state, targetObj, memoKey, cachedVal);
+      const cachedBytes = hasInjectedDesc
+        ? Math.max(16, subtreeBytes - Buffer.byteLength(String((out as unknown as Record<string, unknown>)["description"]), "utf8") - 17)
+        : subtreeBytes;
+      writeRefMemo(state, targetObj, memoKey, {
+        schema: cachedSchema,
+        nodes: subtreeNodes,
+        bytes: cachedBytes,
+      });
+    }
+    return { schema: out, nodes: subtreeNodes, bytes: subtreeBytes, hitCycle, hitBudget };
+  } finally {
+    if (hadRef && targetObj) {
+      state.activeTargets.delete(targetObj);
+    }
   }
-  return out;
 }
 
 function withoutKey(obj: Record<string, unknown>, dropKey: string): Record<string, unknown> {
@@ -776,19 +956,59 @@ function isCollapsibleSubtree(node: MutableSchema): boolean {
   return false;
 }
 
+/**
+ * Computes exact JSON UTF-8 byte lengths bottom-up in ONE O(N) pass so shrinking never
+ * repeatedly calls `JSON.stringify` on ancestor subtrees.
+ */
+function computeSubtreeByteMap(root: unknown): Map<object, number> {
+  const sizes = new Map<object, number>();
+  const measure = (val: unknown): number => {
+    if (val === null) return 4;
+    if (typeof val === "boolean") return val ? 4 : 5;
+    if (typeof val === "number") return String(val).length;
+    if (typeof val === "string") return Buffer.byteLength(JSON.stringify(val), "utf8");
+    if (typeof val !== "object") return 4;
+    const cached = sizes.get(val);
+    if (cached !== undefined) return cached;
+    if (Array.isArray(val)) {
+      let total = 2; // []
+      for (let i = 0; i < val.length; i += 1) {
+        if (i > 0) total += 1; // ,
+        total += measure(val[i]);
+      }
+      sizes.set(val, total);
+      return total;
+    }
+    let total = 2; // {}
+    let first = true;
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      if (v === undefined) continue;
+      if (!first) total += 1; // ,
+      first = false;
+      total += Buffer.byteLength(JSON.stringify(k), "utf8") + 1 + measure(v);
+    }
+    sizes.set(val, total);
+    return total;
+  };
+  measure(root);
+  return sizes;
+}
+
 interface SubtreeRef {
   depth: number;
   inOptional: boolean;
   bytes: number;
-  applyCollapse: () => void;
+  applyCollapse: () => number;
 }
 
 function collectCollapsibleSubtrees(
   node: MutableSchema,
   depth: number,
   inOptional: boolean,
+  sizeMap: ReadonlyMap<object, number>,
   out: SubtreeRef[],
 ): void {
+  const bytesOf = (obj: MutableSchema): number => sizeMap.get(obj) ?? utf8ByteLength(obj);
   if (isPlainObject(node["properties"])) {
     const props = node["properties"];
     const reqSet = new Set(
@@ -799,14 +1019,17 @@ function collectCollapsibleSubtrees(
     for (const [key, rawChild] of Object.entries(props)) {
       if (!isPlainObject(rawChild)) continue;
       const childOptional = inOptional || !reqSet.has(key);
-      collectCollapsibleSubtrees(rawChild, depth + 1, childOptional, out);
+      collectCollapsibleSubtrees(rawChild, depth + 1, childOptional, sizeMap, out);
       if (isCollapsibleSubtree(rawChild)) {
+        const oldBytes = bytesOf(rawChild);
         out.push({
           depth: depth + 1,
           inOptional: childOptional,
-          bytes: utf8ByteLength(rawChild),
+          bytes: oldBytes,
           applyCollapse: () => {
-            props[key] = collapseNodeToStub(rawChild);
+            const stub = collapseNodeToStub(rawChild);
+            props[key] = stub;
+            return Math.max(0, oldBytes - utf8ByteLength(stub));
           },
         });
       }
@@ -814,14 +1037,17 @@ function collectCollapsibleSubtrees(
   }
   if (isPlainObject(node["items"])) {
     const item = node["items"];
-    collectCollapsibleSubtrees(item, depth + 1, inOptional, out);
+    collectCollapsibleSubtrees(item, depth + 1, inOptional, sizeMap, out);
     if (isCollapsibleSubtree(item)) {
+      const oldBytes = bytesOf(item);
       out.push({
         depth: depth + 1,
         inOptional,
-        bytes: utf8ByteLength(item),
+        bytes: oldBytes,
         applyCollapse: () => {
-          node["items"] = collapseNodeToStub(item);
+          const stub = collapseNodeToStub(item);
+          node["items"] = stub;
+          return Math.max(0, oldBytes - utf8ByteLength(stub));
         },
       });
     }
@@ -831,14 +1057,17 @@ function collectCollapsibleSubtrees(
     for (let i = 0; i < branches.length; i += 1) {
       const b = branches[i];
       if (!isPlainObject(b)) continue;
-      collectCollapsibleSubtrees(b, depth + 1, inOptional, out);
+      collectCollapsibleSubtrees(b, depth + 1, inOptional, sizeMap, out);
       if (isCollapsibleSubtree(b)) {
+        const oldBytes = bytesOf(b);
         out.push({
           depth: depth + 1,
           inOptional,
-          bytes: utf8ByteLength(b),
+          bytes: oldBytes,
           applyCollapse: () => {
-            branches[i] = collapseNodeToStub(b);
+            const stub = collapseNodeToStub(b);
+            branches[i] = stub;
+            return Math.max(0, oldBytes - utf8ByteLength(stub));
           },
         });
       }
@@ -851,12 +1080,13 @@ interface ConstraintRef {
   oversized: boolean;
   inOptional: boolean;
   bytes: number;
-  widen: () => void;
+  widen: () => number;
 }
 
 function collectConstraints(
   node: MutableSchema,
   inOptional: boolean,
+  sizeMap: ReadonlyMap<object, number>,
   out: ConstraintRef[],
 ): void {
   const inspectSlot = (
@@ -868,39 +1098,42 @@ function collectConstraints(
     if (!isPlainObject(child)) return;
     if (Array.isArray(child["enum"])) {
       const vals = child["enum"];
-      const bytes = utf8ByteLength(vals);
+      const valsBytes = sizeMap.get(vals) ?? utf8ByteLength(vals);
+      const oldBytes = sizeMap.get(child) ?? utf8ByteLength(child);
       const nonNullCount = vals.filter((v) => v !== null).length;
-      const oversized = nonNullCount > SMALL_ENUM_MAX_VALUES || bytes > SMALL_ENUM_MAX_BYTES;
+      const oversized = nonNullCount > SMALL_ENUM_MAX_VALUES || valsBytes > SMALL_ENUM_MAX_BYTES;
       out.push({
         kind: "enum",
         oversized,
         inOptional: slotOptional,
-        bytes,
+        bytes: valsBytes,
         widen: () => {
           const replacement = primitiveTypeForEnumValues(vals);
           if (Array.isArray(container)) container[slot as number] = replacement;
           else container[slot as string] = replacement;
+          return Math.max(0, oldBytes - utf8ByteLength(replacement));
         },
       });
       return;
     }
     if ("const" in child) {
       const val = child["const"];
-      const bytes = utf8ByteLength(child);
+      const oldBytes = sizeMap.get(child) ?? utf8ByteLength(child);
       out.push({
         kind: "const",
-        oversized: bytes > SMALL_ENUM_MAX_BYTES,
+        oversized: oldBytes > SMALL_ENUM_MAX_BYTES,
         inOptional: slotOptional,
-        bytes,
+        bytes: oldBytes,
         widen: () => {
           const replacement = primitiveTypeForConst(val);
           if (Array.isArray(container)) container[slot as number] = replacement;
           else container[slot as string] = replacement;
+          return Math.max(0, oldBytes - utf8ByteLength(replacement));
         },
       });
       return;
     }
-    collectConstraints(child, slotOptional, out);
+    collectConstraints(child, slotOptional, sizeMap, out);
   };
 
   if (isPlainObject(node["properties"])) {
@@ -924,8 +1157,13 @@ function collectConstraints(
   }
 }
 
-function shrinkToCeiling(initial: McpObjectParamsSchema): McpObjectParamsSchema {
+function shrinkToCeiling(
+  initial: McpObjectParamsSchema,
+  effective: Record<string, unknown>,
+  deadlineMs: number,
+): McpObjectParamsSchema {
   if (utf8ByteLength(initial) <= MAX_SERIALIZED_SCHEMA_BYTES) return initial;
+  if (performance.now() > deadlineMs) return minimalFallbackSchema(effective);
 
   let working = cloneMutable(initial) as unknown as MutableSchema;
 
@@ -937,14 +1175,27 @@ function shrinkToCeiling(initial: McpObjectParamsSchema): McpObjectParamsSchema 
 
   // Stage 1b: drop all descriptions completely (still keeping every structural constraint).
   working = dropDescriptionsInPlace(working) as MutableSchema;
-  if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+  let currentBytes = utf8ByteLength(working);
+  if (currentBytes <= MAX_SERIALIZED_SCHEMA_BYTES) {
     return working as unknown as McpObjectParamsSchema;
   }
 
+  const fitsNow = (): boolean => {
+    if (currentBytes > MAX_SERIALIZED_SCHEMA_BYTES) return false;
+    currentBytes = utf8ByteLength(working);
+    return currentBytes <= MAX_SERIALIZED_SCHEMA_BYTES;
+  };
+
   // Stage 2: collapse optional nested subtrees, deepest first (largest first within same depth).
-  for (let pass = 0; pass < 24 && utf8ByteLength(working) > MAX_SERIALIZED_SCHEMA_BYTES; pass += 1) {
+  for (let pass = 0; pass < 24 && currentBytes > MAX_SERIALIZED_SCHEMA_BYTES; pass += 1) {
+    if (performance.now() > deadlineMs) return minimalFallbackSchema(effective);
+    const sizeMap = computeSubtreeByteMap(working);
+    currentBytes = sizeMap.get(working) ?? utf8ByteLength(working);
+    if (currentBytes <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      return working as unknown as McpObjectParamsSchema;
+    }
     const subtrees: SubtreeRef[] = [];
-    collectCollapsibleSubtrees(working, 0, false, subtrees);
+    collectCollapsibleSubtrees(working, 0, false, sizeMap, subtrees);
     const optSubtrees = subtrees
       .filter((s) => s.inOptional)
       .sort((a, b) => b.depth - a.depth || b.bytes - a.bytes);
@@ -955,40 +1206,54 @@ function shrinkToCeiling(initial: McpObjectParamsSchema): McpObjectParamsSchema 
     let changed = false;
     for (const sub of optSubtrees) {
       if (sub.depth !== targetDepth) break;
-      sub.applyCollapse();
+      if (performance.now() > deadlineMs) return minimalFallbackSchema(effective);
+      currentBytes -= sub.applyCollapse();
       changed = true;
-      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      if (fitsNow()) {
         return working as unknown as McpObjectParamsSchema;
       }
     }
     if (!changed) break;
   }
 
-  // Stage 3a: widen oversized enums (>16 vals or >512 bytes) — optional first, then required (enum fan-out).
+  // Stage 3a: widen oversized enums (>16 vals or >512 bytes) on OPTIONAL properties ONLY.
+  // Required enums are NEVER weakened while optional constraints or keys remain.
   {
+    const sizeMap = computeSubtreeByteMap(working);
+    currentBytes = sizeMap.get(working) ?? utf8ByteLength(working);
+    if (currentBytes <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      return working as unknown as McpObjectParamsSchema;
+    }
     const constraints: ConstraintRef[] = [];
-    collectConstraints(working, false, constraints);
-    const oversizedEnums = constraints
-      .filter((c) => c.kind === "enum" && c.oversized)
-      .sort((a, b) => Number(b.inOptional) - Number(a.inOptional) || b.bytes - a.bytes);
-    for (const c of oversizedEnums) {
-      c.widen();
-      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+    collectConstraints(working, false, sizeMap, constraints);
+    const optOversizedEnums = constraints
+      .filter((c) => c.inOptional && c.kind === "enum" && c.oversized)
+      .sort((a, b) => b.bytes - a.bytes);
+    for (const c of optOversizedEnums) {
+      if (performance.now() > deadlineMs) return minimalFallbackSchema(effective);
+      currentBytes -= c.widen();
+      if (fitsNow()) {
         return working as unknown as McpObjectParamsSchema;
       }
     }
   }
 
-  // Stage 3b: widen remaining enums & consts on OPTIONAL properties only.
+  // Stage 3b: widen remaining enums & consts on OPTIONAL properties ONLY.
   {
+    const sizeMap = computeSubtreeByteMap(working);
+    currentBytes = sizeMap.get(working) ?? utf8ByteLength(working);
+    if (currentBytes <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      return working as unknown as McpObjectParamsSchema;
+    }
     const constraints: ConstraintRef[] = [];
-    collectConstraints(working, false, constraints);
+    collectConstraints(working, false, sizeMap, constraints);
     const optConstraints = constraints
       .filter((c) => c.inOptional)
       .sort((a, b) => b.bytes - a.bytes);
     for (const c of optConstraints) {
-      c.widen();
-      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      if (performance.now() > deadlineMs) return minimalFallbackSchema(effective);
+      currentBytes -= c.widen();
+      if (fitsNow()) {
         return working as unknown as McpObjectParamsSchema;
       }
     }
@@ -996,6 +1261,8 @@ function shrinkToCeiling(initial: McpObjectParamsSchema): McpObjectParamsSchema 
 
   // Stage 3c: drop optional top-level properties from the end (never dropping required properties).
   if (isPlainObject(working["properties"])) {
+    const sizeMap = computeSubtreeByteMap(working);
+    currentBytes = sizeMap.get(working) ?? utf8ByteLength(working);
     const reqSet = new Set(
       Array.isArray(working["required"])
         ? working["required"].filter((k): k is string => typeof k === "string")
@@ -1004,19 +1271,39 @@ function shrinkToCeiling(initial: McpObjectParamsSchema): McpObjectParamsSchema 
     const kept = new Map<string, unknown>(Object.entries(working["properties"]));
     for (const key of [...kept.keys()].reverse()) {
       if (reqSet.has(key)) continue;
+      if (performance.now() > deadlineMs) return minimalFallbackSchema(effective);
+      const val = kept.get(key);
+      const valBytes =
+        val !== null && typeof val === "object"
+          ? (sizeMap.get(val) ?? utf8ByteLength(val))
+          : utf8ByteLength(val);
       kept.delete(key);
-      working["properties"] = Object.fromEntries(kept);
-      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
-        return working as unknown as McpObjectParamsSchema;
+      currentBytes -= Buffer.byteLength(JSON.stringify(key), "utf8") + 2 + valBytes;
+      if (currentBytes <= MAX_SERIALIZED_SCHEMA_BYTES) {
+        working["properties"] = Object.fromEntries(kept);
+        if (fitsNow()) {
+          return working as unknown as McpObjectParamsSchema;
+        }
       }
+    }
+    working["properties"] = Object.fromEntries(kept);
+    currentBytes = utf8ByteLength(working);
+    if (currentBytes <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      return working as unknown as McpObjectParamsSchema;
     }
   }
 
   // Stage 4 (last resort): required properties alone exceed 12 KB UTF-8.
   // 4a: collapse deepest nested subtrees inside required properties first.
-  for (let pass = 0; pass < 24 && utf8ByteLength(working) > MAX_SERIALIZED_SCHEMA_BYTES; pass += 1) {
+  for (let pass = 0; pass < 24 && currentBytes > MAX_SERIALIZED_SCHEMA_BYTES; pass += 1) {
+    if (performance.now() > deadlineMs) return minimalFallbackSchema(effective);
+    const sizeMap = computeSubtreeByteMap(working);
+    currentBytes = sizeMap.get(working) ?? utf8ByteLength(working);
+    if (currentBytes <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      return working as unknown as McpObjectParamsSchema;
+    }
     const subtrees: SubtreeRef[] = [];
-    collectCollapsibleSubtrees(working, 0, false, subtrees);
+    collectCollapsibleSubtrees(working, 0, false, sizeMap, subtrees);
     subtrees.sort((a, b) => b.depth - a.depth || b.bytes - a.bytes);
     if (subtrees.length === 0) break;
     const firstSub = subtrees[0];
@@ -1024,24 +1311,32 @@ function shrinkToCeiling(initial: McpObjectParamsSchema): McpObjectParamsSchema 
     const targetDepth = firstSub.depth;
     for (const sub of subtrees) {
       if (sub.depth !== targetDepth) break;
-      sub.applyCollapse();
-      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      if (performance.now() > deadlineMs) return minimalFallbackSchema(effective);
+      currentBytes -= sub.applyCollapse();
+      if (fitsNow()) {
         return working as unknown as McpObjectParamsSchema;
       }
     }
   }
 
-  // 4b: widen enums, then consts on required properties (largest first — handles 48 required long consts).
+  // 4b: widen oversized required enums first, then remaining required enums, then required consts.
   {
+    const sizeMap = computeSubtreeByteMap(working);
+    currentBytes = sizeMap.get(working) ?? utf8ByteLength(working);
+    if (currentBytes <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      return working as unknown as McpObjectParamsSchema;
+    }
     const constraints: ConstraintRef[] = [];
-    collectConstraints(working, false, constraints);
+    collectConstraints(working, false, sizeMap, constraints);
     constraints.sort((a, b) => {
       if (a.kind !== b.kind) return a.kind === "enum" ? -1 : 1;
+      if (a.oversized !== b.oversized) return a.oversized ? -1 : 1;
       return b.bytes - a.bytes;
     });
     for (const c of constraints) {
-      c.widen();
-      if (utf8ByteLength(working) <= MAX_SERIALIZED_SCHEMA_BYTES) {
+      if (performance.now() > deadlineMs) return minimalFallbackSchema(effective);
+      currentBytes -= c.widen();
+      if (fitsNow()) {
         return working as unknown as McpObjectParamsSchema;
       }
     }
@@ -1076,12 +1371,13 @@ function shrinkToCeiling(initial: McpObjectParamsSchema): McpObjectParamsSchema 
 /**
  * Normalizes an arbitrary external MCP `inputSchema` into a `node-llama-cpp`-safe
  * GBNF JSON Schema object:
- * - Phase 1 normalizes the full schema without premature degradation (cycle-safe, memoized
- *   by `$ref` target, generous 2,000-node ceiling), keeping required keys even past slot 24
- *   and modeling optional parameters as nullable so `node-llama-cpp` 3.22.3 lets the model omit them;
- * - Phase 2 shrinks by strict priority ONLY when serialized UTF-8 exceeds 12,288 bytes:
- *   (1) trim then drop descriptions, (2) collapse deepest optional subtrees, (3) widen/drop
- *   optional constraints, and (4) touch required keys only as a last resort.
+ * - Phase 1 normalizes the schema up to strict expanded-tree bounds (`2,000` nodes,
+ *   `48 KB` logical expanded bytes, `100 ms` wall-clock deadline), keeping required keys
+ *   even past slot 24 and modeling optional parameters as nullable;
+ * - Phase 2 shrinks with O(N) bottom-up byte accounting by strict priority ONLY when
+ *   serialized UTF-8 exceeds 12,288 bytes: (1) trim/drop descriptions, (2) collapse
+ *   deepest optional subtrees, (3) widen/drop optional constraints & keys, and (4) touch
+ *   required keys only as a last resort.
  */
 export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObjectParamsSchema {
   if (!isPlainObject(raw)) {
@@ -1090,8 +1386,13 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
   const cached = normalizedSchemaCache.get(raw);
   if (cached) return cached;
 
+  const deadlineMs = performance.now() + MAX_NORMALIZE_WALL_MS;
   const state: ExpandState = {
     nodesLeft: MAX_FULL_EXPAND_NODES,
+    bytesLeft: MAX_EXPANDED_BYTES,
+    deadlineMs,
+    timedOut: false,
+    activeTargets: new Set(),
     refMemo: new Map(),
   };
   const { node, nextSeen } = derefNode(raw, raw, new Set());
@@ -1103,6 +1404,11 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
     nextSeen,
     state,
   );
+  if (state.timedOut) {
+    const fallback = minimalFallbackSchema(effective);
+    normalizedSchemaCache.set(raw, fallback);
+    return fallback;
+  }
   const description = cleanDescription(effective["description"], MAX_DESC_CHARS);
   const full: McpObjectParamsSchema = {
     type: "object",
@@ -1111,7 +1417,7 @@ export function normalizeMcpParamsSchema(raw?: Record<string, unknown>): McpObje
     ...(description ? { description } : {}),
   };
 
-  const result = shrinkToCeiling(full);
+  const result = shrinkToCeiling(full, effective, deadlineMs);
   normalizedSchemaCache.set(raw, result);
   return result;
 }

@@ -729,24 +729,32 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
     await worker?.close();
     await engine.dispose();
 
-    // 3. Report dialog resets on BOTH clearLive() AND forgetLog() ("Forget all past exchanges"),
-    //    only refreshes on reply-start when closed (preserving user's note during proactive events),
-    //    and guards against duplicate Save writes!
+    // 3. Report dialog resets ONLY on explicit Forget (handleForgetLastTurn + forgetLog), NOT on
+    //    clearLive() (so log-panel idle never wipes an open dialog!), blocks Save during Forget in
+    //    BOTH renderer and main process, and clears abandoned notes when closed!
     const rendererMain = await readFile(join(process.cwd(), "src/renderer/src/main.ts"), "utf8");
+    const desktopIpcSrc = await readFile(join(process.cwd(), "src/main/desktopIpc.ts"), "utf8");
     const dialogFn = rendererMain.slice(rendererMain.indexOf("function wireAiReportDialog()"));
     expect(dialogFn).toContain("snapshotReply = document.getElementById(\"reply\")");
     expect(dialogFn).toContain("replyExcerpt: snapshotReply");
     expect(dialogFn).toContain("if (!dialogEl.hidden) return;");
     expect(dialogFn).toContain("if (lastSavedKey && reportKey === lastSavedKey)");
+    expect(dialogFn).toContain("if (inFlight || forgettingInProgress) return;");
+    expect(dialogFn).toContain("if (genAtClick !== reportGeneration) return;");
     const clearLiveIdx = rendererMain.indexOf("function clearLive()");
-    expect(rendererMain.slice(clearLiveIdx, clearLiveIdx + 250)).toContain("resetAiReportDialog()");
+    expect(rendererMain.slice(clearLiveIdx, clearLiveIdx + 280)).toContain("refreshAiReportOnNewReply()");
+    expect(rendererMain.slice(clearLiveIdx, clearLiveIdx + 280)).not.toContain("resetAiReportDialog()");
+    const forgetLastIdx = rendererMain.indexOf("async function handleForgetLastTurn");
+    expect(rendererMain.slice(forgetLastIdx, forgetLastIdx + 350)).toContain("forgettingInProgress = true");
+    expect(rendererMain.slice(forgetLastIdx, forgetLastIdx + 350)).toContain("resetAiReportDialog()");
     const forgetLogIdx = rendererMain.indexOf("function forgetLog()");
     expect(rendererMain.slice(forgetLogIdx, forgetLogIdx + 250)).toContain("resetAiReportDialog()");
+    expect(desktopIpcSrc).toContain("if (forgetInFlight)");
     const replyStartIdx = rendererMain.indexOf('case "reply-start":');
     expect(rendererMain.slice(replyStartIdx, replyStartIdx + 250)).toContain("refreshAiReportOnNewReply()");
     // When closed, refreshAiReportOnNewReply also clears abandoned typed notes so they don't carry over.
     const refreshIdx = dialogFn.indexOf("refreshAiReportOnNewReply = (): void =>");
-    expect(dialogFn.slice(refreshIdx, refreshIdx + 550)).toContain('detailsEl.value = ""');
+    expect(dialogFn.slice(refreshIdx, refreshIdx + 620)).toContain('detailsEl.value = ""');
 
     // 4. decide() probes remote /models context (never using local GGUF contextSize), sends
     //    enable_thinking:false even on remote HTTPS servers, caches HTTP 400/422 rejection so
@@ -807,6 +815,62 @@ describe("OpenAI-compatible live HTTP server streaming, tool calling & LocalEngi
     await midSession.decide(CLAIM_CHECK);
     expect(decideBodies).toHaveLength(3);
     expect(decideBodies[2]?.chat_template_kwargs).toBeUndefined();
+
+    // Unrelated HTTP 400 (NOT naming chat_template_kwargs) MUST NOT permanently disable enable_thinking:false!
+    const stickyBodies: { chat_template_kwargs?: { enable_thinking?: boolean } }[] = [];
+    let failUnrelated400 = true;
+    const stickySession = new OpenAiCompatibleSession(
+      {
+        provider: "openai-compatible",
+        preset: "custom",
+        baseUrl: "https://api.example.com/v1",
+        model: "qwen3.5:9b",
+        apiKey: "k-remote",
+      },
+      "You are Astra.",
+      (async (u: string | URL | Request, init?: RequestInit) => {
+        if (String(u).endsWith("/models")) {
+          // Model ID missing & another model has giant n_ctx_train -> MUST NOT fall back to entries[0] or n_ctx_train!
+          return new Response(
+            JSON.stringify({
+              data: [
+                { id: "unrelated-model", max_model_len: 131_072 },
+                { id: "qwen3.5:9b", meta: { n_ctx_train: 262_144 } },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+          chat_template_kwargs?: { enable_thinking?: boolean };
+          messages?: { role: string; content: string }[];
+        };
+        stickyBodies.push(parsed);
+        if (failUnrelated400) {
+          failUnrelated400 = false;
+          return new Response('{"error":"context length exceeded"}', { status: 400 });
+        }
+        // Excerpt must stay bounded to the safe 4096 fallback (~6144 chars), NOT 12000 from n_ctx_train!
+        const userMsg = parsed.messages?.find((m) => m.role === "user")?.content ?? "";
+        expect(userMsg.length).toBeLessThan(6_800);
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: '{"claimed": 0.15}' } }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch,
+    );
+    stickySession.setChatHistory([
+      { type: "system", text: "You are Astra." },
+      { type: "user", text: "Explain something long" },
+      { type: "model", response: ["Z".repeat(12_000)] },
+    ]);
+    await expect(stickySession.decide(CLAIM_CHECK)).rejects.toThrow(/HTTP 400/);
+    expect(stickyBodies).toHaveLength(1); // Did NOT retry on unrelated 400!
+    // Next call MUST STILL send chat_template_kwargs: { enable_thinking: false }!
+    const after400 = await stickySession.decide(CLAIM_CHECK);
+    expect(after400.claimed.value).toBeCloseTo(0.15, 2);
+    expect(stickyBodies).toHaveLength(2);
+    expect(stickyBodies[1]?.chat_template_kwargs?.enable_thinking).toBe(false);
 
     // Small remote server reporting context_length: 2048 via /models caps reply excerpt cleanly!
     let smallUserContent = "";

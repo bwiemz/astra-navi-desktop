@@ -390,14 +390,15 @@ export class ConfigStore {
       const parsed = ConfigSchema.safeParse(JSON.parse(raw));
       if (parsed.success) {
         this.current = parsed.data;
-        // Genuine one-time migration: clean any bad punctuated aliases from earlier releases
-        // ("Dr.", "Lyra,"), preserve safe first-word alias for pre-existing multi-word custom
-        // character names ("Lyra Vance" -> "Lyra"), and unconditionally mark `wakeAliasMigrated: true`.
-        const cleanedExisting = sanitizeLegacyWakeAliases(this.current.voice.otherNames);
-        const aliasesCleaned =
-          cleanedExisting.length !== this.current.voice.otherNames.length ||
-          cleanedExisting.some((v, idx) => v !== this.current.voice.otherNames[idx]);
+        // Genuine ONE-TIME migration gated behind `wakeAliasMigrated`: clean any bad punctuated
+        // aliases from earlier releases ("Dr.", "Lyra,"), preserve safe first-word alias for
+        // pre-existing multi-word custom character names ("Lyra Vance" -> "Lyra"), and mark
+        // `wakeAliasMigrated: true`. Once migrated, user-configured aliases are NEVER rewritten on load.
         if (this.current.character.wakeAliasMigrated !== true) {
+          const cleanedExisting = sanitizeLegacyWakeAliases(this.current.voice.otherNames);
+          const aliasesCleaned =
+            cleanedExisting.length !== this.current.voice.otherNames.length ||
+            cleanedExisting.some((v, idx) => v !== this.current.voice.otherNames[idx]);
           const legacyFirst = extractSafeLegacyFirstWordAlias(this.current.character.displayName);
           const hasAlready =
             legacyFirst !== null &&
@@ -413,10 +414,6 @@ export class ConfigStore {
               ? { voice: { ...this.current.voice, otherNames: nextOtherNames } }
               : {}),
             character: { ...this.current.character, wakeAliasMigrated: true },
-          });
-        } else if (aliasesCleaned) {
-          await this.update({
-            voice: { ...this.current.voice, otherNames: cleanedExisting },
           });
         }
       } else {

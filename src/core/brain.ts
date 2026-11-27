@@ -657,7 +657,34 @@ export class Brain {
     this.offeredFewer = false;
     this.pickedOut = [];
     const allNames = Object.keys(all);
-    if (message.event || allNames.length === 0) return all;
+    if (allNames.length === 0) return all;
+    const alwaysOfferMcpTools = deps.mcp
+      ? deps.mcp
+          .listPrefixedTools()
+          .filter(({ serverId }) => deps.mcp?.getClient(serverId)?.config.alwaysOffer === true)
+          .map(({ fullName }) => fullName)
+      : [];
+    if (message.event) {
+      // Correction turns are queued as events and receive all built-in tools, but still enforce
+      // the 48-tool MCP ceiling so up to 512 registered MCP schemas cannot ride on one retry.
+      const mcpNames = allNames.filter((name) => name.startsWith("mcp:"));
+      if (mcpNames.length <= MAX_EXPOSED_MCP_TOOLS) return all;
+      const priority = new Set<string>([
+        ...this.usedMcpOfLate.flat(),
+        ...this.pickedMcpLastTurn,
+        ...alwaysOfferMcpTools,
+      ]);
+      const cappedMcp = [
+        ...mcpNames.filter((name) => priority.has(name)),
+        ...mcpNames.filter((name) => !priority.has(name)),
+      ].slice(0, MAX_EXPOSED_MCP_TOOLS);
+      const allowed = new Set([
+        ...allNames.filter((name) => !name.startsWith("mcp:")),
+        ...cappedMcp,
+      ]);
+      this.offeredFewer = allowed.size < allNames.length;
+      return Object.fromEntries(Object.entries(all).filter(([name]) => allowed.has(name)));
+    }
     const wanted = deps.lab?.fittingTools ?? deps.config.value.fittingTools;
     const hasMcp = allNames.some((name) => name.startsWith("mcp:"));
     if (!wanted && !hasMcp) return all;
@@ -665,12 +692,9 @@ export class Brain {
     const toolDescriptions = Object.fromEntries(
       Object.entries(all).map(([name, fn]) => [name, fn.description ?? ""]),
     );
-    const alwaysOfferMcpTools = deps.mcp
-      ? deps.mcp
-          .listPrefixedTools()
-          .filter(({ serverId }) => deps.mcp?.getClient(serverId)?.config.alwaysOffer === true)
-          .map(({ fullName }) => fullName)
-      : [];
+    const readOnlyMcpTools = new Set<string>(
+      allNames.filter((name) => name.startsWith("mcp:") && deps.mcp?.isReadOnlyTool(name) === true),
+    );
     const recentTools = [
       ...new Set([
         ...this.toolsOfLate.flat().filter((name) => !name.startsWith("mcp:")),
@@ -684,11 +708,23 @@ export class Brain {
       machines: deps.fleet?.machines().map((machine) => machine.name) ?? [],
       toolDescriptions,
       alwaysOfferMcpTools,
+      readOnlyMcpTools,
       ...(this.saidBefore === undefined ? {} : { before: this.saidBefore }),
     });
-    // Enforce the 48-tool MCP exposure cap AFTER routing so tools late in the alphabet stay reachable.
+    // Enforce the 48-tool MCP exposure cap AFTER routing, filling exact/server/meaning matches
+    // FIRST, then carried-over recent MCP tools, and `alwaysOffer` servers LAST so a large
+    // always-offered server can never crowd out a tool the user named directly.
+    const mcpPriority = (name: string): number => {
+      const reason = route.why[name] ?? "";
+      if (reason === "mcp exact name") return 0;
+      if (reason === "mcp server" || reason.startsWith("mcp meaning")) return 1;
+      if (reason === "used just now") return 2;
+      if (reason === "mcp always offer") return 3;
+      return 4;
+    };
     const routedMcp = route.offered
       .filter((name) => name.startsWith("mcp:"))
+      .sort((a, b) => mcpPriority(a) - mcpPriority(b))
       .slice(0, MAX_EXPOSED_MCP_TOOLS);
     const offered = wanted
       ? new Set([...route.offered.filter((name) => !name.startsWith("mcp:")), ...routedMcp])
@@ -697,15 +733,21 @@ export class Brain {
     // because it was on offer a moment ago, or because it goes with another, would
     // otherwise keep itself on offer for ever.
     this.pickedOut = Object.entries(route.why)
-      .filter(([tool, reason]) =>
-        wanted
-          ? /^(?:words|meaning|names a machine|mcp (?:exact name|server|meaning))/.test(reason)
-          : tool.startsWith("mcp:") && /^mcp (?:exact name|server|meaning)/.test(reason),
+      .filter(
+        ([tool, reason]) =>
+          offered.has(tool) &&
+          (wanted
+            ? /^(?:words|meaning|names a machine|mcp (?:exact name|server|meaning))/.test(reason)
+            : tool.startsWith("mcp:") && /^mcp (?:exact name|server|meaning)/.test(reason)),
       )
       .map(([tool]) => tool);
     this.pickedFor = wanted
-      ? route.why
-      : Object.fromEntries(Object.entries(route.why).filter(([tool]) => tool.startsWith("mcp:")));
+      ? Object.fromEntries(Object.entries(route.why).filter(([tool]) => offered.has(tool)))
+      : Object.fromEntries(
+          Object.entries(route.why).filter(
+            ([tool]) => tool.startsWith("mcp:") && offered.has(tool),
+          ),
+        );
     this.offeredFewer = offered.size < allNames.length;
     if (wanted) {
       deps.lab?.onOffered?.(route.offered, route.why);
@@ -1307,14 +1349,17 @@ export class Brain {
     }
     if (!learner || (message.event && !message.correction)) return;
     if (message.correction && this.turnTools.length === 0) return;
-    const turnHadMcp = this.offeredNow.some((name) => name.startsWith("mcp:"));
-    // Do not journal MCP turns into Learner so untrusted MCP metadata/outputs cannot leak into long-term memory.
-    if (turnHadMcp) return;
+    const turnCalledMcp = this.turnTools.some((record) => record.tool.startsWith("mcp:"));
+    // Never journal turns where an MCP tool actually ran (untrusted MCP tool outputs).
+    if (turnCalledMcp) return;
+    const turnOfferedMcp = this.offeredNow.some((name) => name.startsWith("mcp:"));
     learner.record({
       at: new Date().toISOString(),
       said: message.correction ? "(the same request, now carried out)" : message.text,
-      // A reply that claimed something she did not do is not worth remembering either.
-      reply: this.readOutsideText || falseClaim ? null : this.replyText,
+      // Withhold the assistant reply whenever MCP schemas were offered (or outside text / false
+      // claim) so background learning still remembers what the USER typed even with `alwaysOffer`
+      // enabled, while untrusted MCP tool descriptions can never seed long-term memory.
+      reply: this.readOutsideText || turnOfferedMcp || falseClaim ? null : this.replyText,
       did: this.turnTools,
     });
   }

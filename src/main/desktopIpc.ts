@@ -211,23 +211,32 @@ export function registerDesktopIpc(deps: DesktopIpcDeps): void {
     if (!fromMainWindow(event) || typeof off !== "boolean") return;
     void deps.setHandsOff?.(off).catch((error: unknown) => console.error(error));
   });
+  let forgetInFlight = false;
   ipcMain.handle(
     "chat:forget-last",
     async (
       event,
     ): Promise<{ removed: boolean; userText: string | null; forgottenMemories: number }> => {
       if (!fromMainWindow(event)) throw new Error("Not allowed from here.");
-      return (
-        (await deps.brain()?.forgetLastTurn()) ?? {
-          removed: false,
-          userText: null,
-          forgottenMemories: 0,
-        }
-      );
+      forgetInFlight = true;
+      try {
+        return (
+          (await deps.brain()?.forgetLastTurn()) ?? {
+            removed: false,
+            userText: null,
+            forgottenMemories: 0,
+          }
+        );
+      } finally {
+        forgetInFlight = false;
+      }
     },
   );
   ipcMain.handle("ai:report-output", async (event, raw: unknown): Promise<AiReportResult> => {
     if (!fromMainWindow(event)) throw new Error("Not allowed from here.");
+    if (forgetInFlight) {
+      return { ok: false, error: "Cannot save a report while forgetting a turn." };
+    }
     const ctx = deps.aiReportContext?.();
     if (!ctx) return { ok: false, error: "AI report context is not configured." };
     const rec = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};

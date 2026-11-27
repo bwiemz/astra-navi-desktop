@@ -1,3 +1,4 @@
+import { isIPv6 } from "node:net";
 import { homedir } from "node:os";
 import type { BootstrapStatusView, HardwareRecommendationView } from "../shared/settings.ts";
 import type { SelfCheckResult } from "./selfCheck.ts";
@@ -151,18 +152,26 @@ const COMMON_IDENTIFIER_DICTIONARY_WORDS = new Set([
   "prod",
 ]);
 
-/** Non-secret MCP config env key patterns (ports, timeouts, limits, retries, locale/logging) — NEVER skips HOST/HOSTNAME! */
+/** Non-secret MCP config env key patterns (ports, timeouts, limits, retries, region/mode/logging) — NEVER skips HOST/HOSTNAME! */
 const NON_SECRET_MCP_ENV_KEY_RE =
-  /^(?:PORT|.*_PORT|.*TIMEOUT.*|.*_MS|.*_SEC|.*_SECONDS|MAX_.*|MIN_.*|.*_LIMIT|.*LIMIT|RETRIES|.*_RETRIES|WORKERS|.*_WORKERS|CONCURRENCY|TZ|LANG|LC_ALL|NODE_ENV|LOG_LEVEL|DEBUG|VERBOSE|COLOR|NO_COLOR|TERM|CI)$/i;
+  /^(?:PORT|.*_PORT|.*TIMEOUT.*|.*_MS|.*_SEC|.*_SECONDS|MAX_.*|MIN_.*|.*_LIMIT|.*LIMIT|RETRIES|.*_RETRIES|WORKERS|.*_WORKERS|CONCURRENCY|TZ|LANG|LC_ALL|NODE_ENV|LOG_LEVEL|DEBUG|VERBOSE|COLOR|NO_COLOR|TERM|CI|REGION|.*_REGION|ZONE|.*_ZONE|ENV|ENVIRONMENT|STAGE|MODE|FORMAT|LOCALE|LANGUAGE|ENCODING|CHARSET|THEME|PLATFORM|ARCH)$/i;
 
 /** MCP env keys that hold host/user/endpoint identifiers (including HOST and HOSTNAME). */
 const IDENTIFIER_MCP_ENV_KEY_RE =
   /(?:^|_)(?:HOST|HOSTNAME|SERVER|DOMAIN|USER|USERNAME|EMAIL|URL|URI|ENDPOINT)$/i;
 
+/** MCP env keys that hold credentials/secrets (tokens, keys, passwords, PINs, auth headers). */
+const CREDENTIAL_MCP_ENV_KEY_RE =
+  /(?:^|_)(?:TOKEN|SECRET|KEY|PASS|PASSWORD|PWD|AUTH|AUTHORIZATION|CRED|CREDENTIAL|CREDENTIALS|BEARER|COOKIE|SESSION|PIN|PRIVATE|SIGNING|WEBHOOK|DSN|CERT|JWT|OAUTH|PAT|API)$/i;
+
+/** Secret-shaped value prefixes for unlisted env keys. */
+const SECRET_VALUE_PREFIX_RE = /^(?:sk-|ghp_|gho_|github_pat_|xox[baprs]-|AIza|AKIA|Bearer\s|Basic\s)/i;
+
 /**
  * Separates MCP server headers and environment variables into `credentials` (headers, tokens,
  * passwords, PINs) and `identifiers` (HOST, HOSTNAME, *_HOST, *_USER, *_URL), while skipping
- * benign numeric/config env keys by key pattern (`*_PORT`, `*TIMEOUT*`, `*_MS`, `MAX_*`, `*LIMIT*`).
+ * benign numeric/config env keys (`*_PORT`, `*TIMEOUT*`, `*_MS`, `MAX_*`, `*LIMIT*`, `REGION`)
+ * and never treating short unlisted config values like `REGION=us` as unrestricted credentials.
  */
 export function collectMcpRedactionLists(
   servers: readonly { headers?: Record<string, string>; env?: Record<string, string> }[],
@@ -174,13 +183,22 @@ export function collectMcpRedactionLists(
       if (typeof val === "string" && val.trim().length > 0) credentials.push(val);
     }
     for (const [rawKey, val] of Object.entries(server.env ?? {})) {
-      if (typeof val !== "string" || val.trim().length === 0) continue;
+      if (typeof val !== "string") continue;
+      const trimmedVal = val.trim();
+      if (trimmedVal.length === 0) continue;
       const key = rawKey.trim();
       if (NON_SECRET_MCP_ENV_KEY_RE.test(key)) continue;
       if (IDENTIFIER_MCP_ENV_KEY_RE.test(key)) {
-        identifiers.push(val);
-      } else {
-        credentials.push(val);
+        identifiers.push(trimmedVal);
+      } else if (CREDENTIAL_MCP_ENV_KEY_RE.test(key)) {
+        credentials.push(trimmedVal);
+      } else if (trimmedVal.length >= 12 || SECRET_VALUE_PREFIX_RE.test(trimmedVal)) {
+        credentials.push(trimmedVal);
+      } else if (
+        trimmedVal.length >= 3 &&
+        !COMMON_IDENTIFIER_DICTIONARY_WORDS.has(trimmedVal.toLowerCase())
+      ) {
+        identifiers.push(trimmedVal);
       }
     }
   }
@@ -258,11 +276,12 @@ export function redactSupportText(
   replaceCount(/ssh-(?:ed25519|rsa|ecdsa)\s+[A-Za-z0-9+/=]{16,}(?:\s+\S+)?/g, "[redacted-ssh-key]");
   replaceCount(/SHA256:[A-Za-z0-9+/=]{16,}/g, "SHA256:[redacted]");
 
-  // Windows and POSIX user profile paths (MUST run before literal pass so machine "Home" never breaks `/home/alice`)
+  // Windows and POSIX user profile paths (MUST run before literal pass so machine "Home" never breaks `/home/alice`;
+  // negative lookbehind `(?<![A-Za-z0-9_/])` avoids matching `http://home/api` as `/home/<user>`).
   replaceCount(/[A-Za-z]:\\Users\\[^\\\s"':]+/gi, "C:\\Users\\[user]");
   replaceCount(/[A-Za-z]:\/Users\/[^/\s"':]+/gi, "C:/Users/[user]");
-  replaceCount(/\/home\/[^/\s"':]+/g, "/home/[user]");
-  replaceCount(/\/Users\/[^/\s"':]+/g, "/Users/[user]");
+  replaceCount(/(?<![A-Za-z0-9_/])\/home\/[^/\s"':]+/g, "/home/[user]");
+  replaceCount(/(?<![A-Za-z0-9_/])\/Users\/[^/\s"':]+/g, "/Users/[user]");
 
   // user@host / emails (MUST run before literal pass so "kenji" never leaves `[redacted]@Example.com`)
   replaceCount(/\b[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b/g, "[redacted-email]");
@@ -275,35 +294,53 @@ export function redactSupportText(
   replaceCount(/(https?:\/\/)[^/\s@"'#?]+@/gi, "$1[redacted]@");
   replaceCount(/(https?:\/\/[^\s"'?#]+)\?[^\s"'#]+/gi, "$1?[redacted-query]");
 
+  // IPv6 addresses validated with `net.isIPv6()` (runs BEFORE IPv4 so `::ffff:192.168.1.5`
+  // scrubs cleanly as one token). Full identifier boundaries prevent matching C++/Vulkan/Rust
+  // scope tokens like `std::bad_alloc`, `vk::Device::Create`, or `node::Start`; preserves `::` / `::1`.
+  replaceCount(
+    /(?<![A-Za-z0-9_:.])(?:[0-9a-fA-F:]{2,39}(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){0,3})(?:%[A-Za-z0-9_.-]+)?(?![A-Za-z0-9_:.])/g,
+    (match) => {
+      if (!match.includes(":")) return match;
+      const withoutZone = match.split("%")[0] ?? match;
+      const lower = withoutZone.toLowerCase();
+      if (lower === "::" || lower === "::1") return match;
+      if (!isIPv6(withoutZone)) return match;
+      return "[redacted-ip]";
+    },
+  );
+
   // IPv4 addresses (avoid matching leading-v version strings like v1.2.3.4)
   replaceCount(
     /(?<![vV.\d])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![.\d])/g,
     "[redacted-ip]",
   );
 
-  // IPv6 addresses (full 8-group or `::`-compressed, preserving bare `::` and loopback `::1`, never matching `10:30:00`)
-  replaceCount(
-    /(?<![0-9a-fA-F:])(?:(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})*)?|:(?::[0-9a-fA-F]{1,4}){1,7}|::ffff:(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))(?:%[A-Za-z0-9_.-]+)?(?![0-9a-fA-F:])/g,
-    (match) => {
-      const lower = match.toLowerCase();
-      if (lower === "::" || lower === "::1") return match;
-      return "[redacted-ip]";
-    },
-  );
-
-  // --- Helper for longest-first case-insensitive literal redaction ---
-  const scrubLiteralList = (rawList: readonly string[], predicate: (s: string) => boolean): void => {
-    const seenLower = new Set<string>();
+  // --- Helper for longest-first literal redaction ---
+  const dedupeLongestFirst = (
+    rawList: readonly string[],
+    predicate: (s: string) => boolean,
+  ): string[] => {
+    const seenExact = new Set<string>();
     const ordered: string[] = [];
     for (const raw of rawList) {
       const secret = raw.trim();
       if (!predicate(secret)) continue;
-      const lower = secret.toLowerCase();
-      if (seenLower.has(lower)) continue;
-      seenLower.add(lower);
+      if (seenExact.has(secret)) continue;
+      seenExact.add(secret);
       ordered.push(secret);
     }
     ordered.sort((a, b) => b.length - a.length);
+    return ordered;
+  };
+
+  const scrubLiteralList = (rawList: readonly string[], predicate: (s: string) => boolean): void => {
+    const seenLower = new Set<string>();
+    const ordered = dedupeLongestFirst(rawList, predicate).filter((secret) => {
+      const lower = secret.toLowerCase();
+      if (seenLower.has(lower)) return false;
+      seenLower.add(lower);
+      return true;
+    });
 
     for (const secret of ordered) {
       if (secret.length < 16 && /^[A-Za-z0-9_]+$/.test(secret)) {
@@ -320,8 +357,38 @@ export function redactSupportText(
   // --- Pass 2: Credentials ALWAYS (longest-first, case-insensitive) ---
   scrubLiteralList(credentialSecrets, shouldRedactCredentialLiteral);
 
-  // --- Pass 3: Identifiers (longest-first, case-insensitive, skipping dictionary words) ---
+  // --- Pass 3a: Non-dictionary identifiers (longest-first, case-insensitive) ---
   scrubLiteralList(identifierSecrets, shouldRedactIdentifierLiteral);
+
+  // --- Pass 3b: Dictionary-word identifiers (`home`, `Mark`, `Will`, etc.) ---
+  // Redact exact-case matches when configured with uppercase (e.g. `Mark`, `Home`, `Will`)
+  // AND redact ANY case in identifier contexts (after host/machine/server/ssh/user, around `@`,
+  // before `:port`, and inside hostnames/URLs) while leaving ordinary prose untouched.
+  const dictIdentifiers = dedupeLongestFirst(
+    identifierSecrets,
+    (s) => s.length >= 2 && COMMON_IDENTIFIER_DICTIONARY_WORDS.has(s.toLowerCase()),
+  );
+  for (const secret of dictIdentifiers) {
+    const esc = escapeRegexLiteral(secret);
+    // 1. Any case in explicit identifier contexts:
+    replaceCount(
+      new RegExp(
+        `(\\b(?:host|hostname|machine|server|node|ssh|user|username|login|box|vm|target|remote|cluster)\\s+)${esc}(?![A-Za-z0-9_])`,
+        "gi",
+      ),
+      "$1[redacted]",
+    );
+    replaceCount(new RegExp(`(?<![A-Za-z0-9_.])${esc}(?=@)`, "gi"), "[redacted]");
+    replaceCount(new RegExp(`(?<=@)${esc}(?![A-Za-z0-9_-])`, "gi"), "[redacted]");
+    replaceCount(new RegExp(`(?<![A-Za-z0-9_.])${esc}(?=:\\d{1,5}\\b)`, "gi"), "[redacted]");
+    replaceCount(new RegExp(`(?<=:\\/\\/)${esc}(?=[/:?#\\s]|$)`, "gi"), "[redacted]");
+    replaceCount(new RegExp(`(?<![A-Za-z0-9_-])${esc}(?=\\.[A-Za-z0-9-]+\\b)`, "gi"), "[redacted]");
+    replaceCount(new RegExp(`(?<=[A-Za-z0-9-]\\.)${esc}(?![A-Za-z0-9_-])`, "gi"), "[redacted]");
+    // 2. Exact-case match when the configured value carries capitalization (e.g. "Mark", "Home"):
+    if (secret !== secret.toLowerCase()) {
+      replaceCount(new RegExp(`(?<![A-Za-z0-9_])${esc}(?![A-Za-z0-9_])`, "g"), "[redacted]");
+    }
+  }
 
   return { text: out, count };
 }

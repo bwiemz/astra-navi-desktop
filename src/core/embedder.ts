@@ -3,10 +3,14 @@ import { env, pipeline } from "@huggingface/transformers";
 import { z } from "zod";
 import { cosineSimilarity } from "./hygiene.ts";
 
+export type EmbedderStatus = "ready" | "downloading" | "unavailable";
+
 /** Turns text into a list of numbers such that texts with similar meaning get similar lists. */
 export interface Embedder {
   /** @param kind Whether the texts are things to be found ("passage") or what is being looked for ("query"). */
   embed(texts: readonly string[], kind: "query" | "passage"): Promise<Float32Array[]>;
+  /** Optional readiness status surfaced in Settings for semantic MCP routing. */
+  status?(): EmbedderStatus;
 }
 
 export const DistilledEmbedderAdapterSchema = z.object({
@@ -73,9 +77,14 @@ export class LocalEmbedder implements Embedder {
   private readonly cacheDir: string;
   private extractor: Promise<Extractor> | null = null;
   private adapter: DistilledEmbedderAdapter | null = null;
+  private loadState: EmbedderStatus = "unavailable";
 
   constructor(cacheDir: string) {
     this.cacheDir = cacheDir;
+  }
+
+  status(): EmbedderStatus {
+    return this.loadState;
   }
 
   /** Loads an optional overnight-distilled `router_adapter.json` into memory. */
@@ -141,15 +150,23 @@ export class LocalEmbedder implements Embedder {
   private load(): Promise<Extractor> {
     if (!this.extractor) {
       env.cacheDir = this.cacheDir;
+      this.loadState = "downloading";
       const loading = pipeline("feature-extraction", MODEL, {
         device: "cpu",
         dtype: "q8",
       }) as unknown as Promise<Extractor>;
       this.extractor = loading;
-      // A failed load (no network on first use) is retried next time, not remembered.
-      loading.catch(() => {
-        if (this.extractor === loading) this.extractor = null;
-      });
+      loading.then(
+        () => {
+          if (this.extractor === loading) this.loadState = "ready";
+        },
+        () => {
+          if (this.extractor === loading) {
+            this.extractor = null;
+            this.loadState = "unavailable";
+          }
+        },
+      );
     }
     return this.extractor;
   }

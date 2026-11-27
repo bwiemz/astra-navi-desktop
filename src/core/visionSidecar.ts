@@ -98,6 +98,8 @@ export interface LlamaVisionSidecarOptions {
   failureBackoffMaxMs?: number;
   /** Grace period after SIGTERM before escalating to SIGKILL on shutdown (default 2000ms). */
   killTimeoutMs?: number;
+  /** Max time an internal restart waits for in-flight requests to drain before stopping the old child (default min(requestTimeoutMs, 15s)). */
+  drainTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -700,8 +702,14 @@ export class LlamaVisionSidecar implements VisionDescriber {
 
   /** Stops the current child process during an internal restart WITHOUT bumping `disposeGeneration`. */
   private async stopCurrentChild(): Promise<void> {
-    // Let any active `/v1/chat/completions` request on the old child finish briefly before restarting.
-    await this.waitForInFlight(2_000);
+    // Yield one microtask so any caller whose `ensureReady()` just resolved can claim its
+    // in-flight lease before we check `inFlightRequests`, then drain all active requests
+    // (including image normalization and response JSON parsing) before terminating the old child.
+    await Promise.resolve();
+    const drainMs =
+      this.opts.drainTimeoutMs ??
+      Math.min(this.opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, 15_000);
+    await this.waitForInFlight(drainMs);
     this.clearIdleTimer();
     const child = this.child;
     this.child = null;
@@ -889,24 +897,27 @@ export class LlamaVisionSidecar implements VisionDescriber {
       const conn = await this.ensureReady(options.signal);
       if (!conn) return null;
 
-      const normalized = await normalizeImageForVision(imagePng);
-      const messages = buildVisionMessages(normalized.toString("base64"), options);
-      const timeoutSignal = AbortSignal.timeout(
-        this.opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-      );
-      const combinedSignal = options.signal
-        ? AbortSignal.any([options.signal, timeoutSignal])
-        : timeoutSignal;
-
-      const headers: Record<string, string> = {
-        "content-type": "application/json",
-        ...(conn.apiKey ? { Authorization: `Bearer ${conn.apiKey}` } : {}),
-      };
-
+      // Hold the in-flight lease across image normalization, HTTP fetch, AND `res.json()` body
+      // reading so a concurrent internal restart drains this request cleanly instead of killing
+      // the old child mid-flight.
       this.inFlightRequests += 1;
-      let res: Response;
+      let rawContent: unknown;
       try {
-        res = await this.fetchImpl(`${conn.baseUrl}/v1/chat/completions`, {
+        const normalized = await normalizeImageForVision(imagePng);
+        const messages = buildVisionMessages(normalized.toString("base64"), options);
+        const timeoutSignal = AbortSignal.timeout(
+          this.opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+        );
+        const combinedSignal = options.signal
+          ? AbortSignal.any([options.signal, timeoutSignal])
+          : timeoutSignal;
+
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+          ...(conn.apiKey ? { Authorization: `Bearer ${conn.apiKey}` } : {}),
+        };
+
+        const res = await this.fetchImpl(`${conn.baseUrl}/v1/chat/completions`, {
           method: "POST",
           headers,
           body: JSON.stringify({
@@ -917,19 +928,19 @@ export class LlamaVisionSidecar implements VisionDescriber {
           }),
           signal: combinedSignal,
         });
+        if (!res.ok) {
+          throw new Error(`Local vision sidecar HTTP ${res.status}`);
+        }
+        const data = (await res.json()) as {
+          choices?: { message?: { content?: unknown } }[];
+        };
+        rawContent = data?.choices?.[0]?.message?.content;
       } finally {
         this.inFlightRequests = Math.max(0, this.inFlightRequests - 1);
         if (this.inFlightRequests === 0) {
           for (const waiter of this.inFlightWaiters.splice(0)) waiter();
         }
       }
-      if (!res.ok) {
-        throw new Error(`Local vision sidecar HTTP ${res.status}`);
-      }
-      const data = (await res.json()) as {
-        choices?: { message?: { content?: unknown } }[];
-      };
-      const rawContent = data?.choices?.[0]?.message?.content;
       const text =
         typeof rawContent === "string"
           ? rawContent

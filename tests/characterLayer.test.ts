@@ -19,7 +19,12 @@ import { describeNotice as describeWatchNotice } from "../src/core/reach.ts";
 import { describeRecalled, Recall } from "../src/core/recall.ts";
 import { describeRoutine } from "../src/core/routines.ts";
 import { describeAgendaReading, selfCheck } from "../src/core/selfCheck.ts";
-import { afterWakeName, extractSafeLegacyFirstWordAlias } from "../src/core/wakeName.ts";
+import {
+  afterWakeName,
+  extractSafeLegacyFirstWordAlias,
+  sanitizeLegacyWakeAliases,
+  wakeAliasWarnings,
+} from "../src/core/wakeName.ts";
 import { ScreenWatch } from "../src/core/watch.ts";
 import type { ChatHistoryItem, ChatSessionModelFunctions } from "node-llama-cpp";
 import {
@@ -879,19 +884,73 @@ describe("Character Layer security: literal slot substitution & Brain integratio
     await reloadedAfterImport.load();
     expect(reloadedAfterImport.value.voice.otherNames).toEqual([]);
 
-    // Legacy bad aliases ("Dr.", "Lyra,") are cleaned up on load, and corrupt configs still mark migrated!
+    // Legacy bad aliases ("Dr.", "Lyra,") are cleaned up ONCE behind `wakeAliasMigrated !== true`,
+    // while preserving non-Latin combining marks (Hindi "प्रिया", Thai "มะลิ", Vietnamese "Hà"),
+    // symbols ("C++"), and non-title initials ("K.") — and NEVER rewritten on later loads!
+    expect(sanitizeLegacyWakeAliases(["Dr.", "Mr.", "Lyra,", "प्रिया", "มะลิ", "Hà", "Ha\u0300", "C++", "K."])).toEqual([
+      "Lyra",
+      "प्रिया",
+      "มะลิ",
+      "Hà",
+      "Ha\u0300",
+      "C++",
+      "K.",
+    ]);
     const dirtyPath = join(dir, "dirty-aliases.json");
     await writeFile(
       dirtyPath,
       JSON.stringify({
-        character: { displayName: "Lyra Vance", userAddress: "Alex", source: "custom", wakeAliasMigrated: true },
-        voice: { otherNames: ["Dr.", "Lyra,", "Nova"] },
+        character: { displayName: "Lyra Vance", userAddress: "Alex", source: "custom", wakeAliasMigrated: false },
+        voice: { otherNames: ["Dr.", "Lyra,", "प्रिया", "มะลิ", "C++"] },
       }),
       "utf8",
     );
     const dirtyStore = new ConfigStore(dirtyPath);
     await dirtyStore.load();
-    expect(dirtyStore.value.voice.otherNames).toEqual(["Lyra", "Nova"]);
+    expect(dirtyStore.value.voice.otherNames).toEqual(["Lyra", "प्रिया", "มะลิ", "C++"]);
+    expect(dirtyStore.value.character.wakeAliasMigrated).toBe(true);
+    // Once migrated, even reload with user-chosen non-Latin/punctuated aliases ("Hà", "K.", "प्रिया", "มะลิ", "C++") is NEVER rewritten!
+    await dirtyStore.update({
+      voice: { ...dirtyStore.value.voice, otherNames: ["Hà", "K.", "प्रिया", "มะลิ", "C++"] },
+    });
+    const reloadedDirty = new ConfigStore(dirtyPath);
+    await reloadedDirty.load();
+    expect(reloadedDirty.value.voice.otherNames).toEqual(["Hà", "K.", "प्रिया", "มะลิ", "C++"]);
+
+    // Round 7 Wake Behaviour Table (Intl.Segmenter word boundaries + fillers + Settings warnings):
+    const wakeTable: {
+      name: string;
+      heard: string;
+      aliases: readonly string[];
+      characterName?: string;
+      expected: string | null;
+    }[] = [
+      { name: "2-char ZH wake without punctuation", heard: "小星打开笔记", aliases: ["小星"], expected: "打开笔记" },
+      { name: "2-char ZH wake before verb", heard: "小星提醒我明天开会", aliases: ["小星"], expected: "提醒我明天开会" },
+      { name: "2-char JA wake without punctuation", heard: "リラノートを開いて", aliases: ["リラ"], expected: "ノートを開いて" },
+      { name: "JA ordinary word アスファルト rejected", heard: "アスファルトは熱い", aliases: ["アス"], expected: null },
+      { name: "JA ordinary word リラックス rejected", heard: "リラックスしたい", aliases: ["リラ"], expected: null },
+      { name: "ZH ordinary word 明明是 rejected", heard: "明明是你说的", aliases: ["明明"], expected: null },
+      { name: "JA filler あのね rejected without pause", heard: "あのね、聞いて", aliases: ["あの"], expected: null },
+      { name: "JA filler あの accepted with comma", heard: "あの、聞いて", aliases: ["あの"], expected: "聞いて" },
+      { name: "1-char ZH ordinary word 星期天 rejected", heard: "星期天去公园", aliases: ["星"], expected: null },
+      { name: "1-char ZH accepted with punctuation", heard: "星，打开笔记", aliases: ["星"], expected: "打开笔记" },
+      { name: "English stop-word The Navigator does not fire on The weather", heard: "The weather is nice", aliases: [], characterName: "The Navigator", expected: null },
+      { name: "Hey Astra alias never cuts built-in Astra Navi", heard: "Hey Astra Navi, open notes", aliases: ["Hey Astra"], expected: "open notes" },
+      { name: "Short アス alias never cuts built-in アストラ", heard: "アストラ天気教えて", aliases: ["アス"], expected: "天気教えて" },
+      { name: "Short 阿斯 alias never cuts built-in 阿斯特拉", heard: "阿斯特拉打开笔记", aliases: ["阿斯"], expected: "打开笔记" },
+      { name: "Hindi combining-mark alias wakes cleanly", heard: "प्रिया, notes open", aliases: ["प्रिया"], expected: "notes open" },
+    ];
+    for (const row of wakeTable) {
+      expect(afterWakeName(row.heard, row.aliases, row.characterName), row.name).toBe(row.expected);
+    }
+
+    // Settings warnings fire for ambiguous standalone CJK words ("天天", "あの") and 1-char CJK ("星"), not normal names!
+    const warnings = wakeAliasWarnings(["天天", "星", "あの", "Lyra"]);
+    expect(warnings.some((w) => w.includes("天天"))).toBe(true);
+    expect(warnings.some((w) => w.includes("星"))).toBe(true);
+    expect(warnings.some((w) => w.includes("あの"))).toBe(true);
+    expect(warnings.some((w) => w.includes("Lyra"))).toBe(false);
 
     const corruptPath = join(dir, "corrupt.json");
     await writeFile(corruptPath, "{not valid json", "utf8");

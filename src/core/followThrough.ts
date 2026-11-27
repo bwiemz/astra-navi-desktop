@@ -221,11 +221,9 @@ export async function checkReply(turn: FinishedReply): Promise<Checked> {
       if (sureness !== null) {
         claimed = sureness >= CLAIM_THRESHOLD;
         debug(`follow-through check: ${sureness.toFixed(2)} for: ${start(reply)}`);
-      } else if (claimsFlatly(said) && nothingBehindIt) {
-        // When the verifier itself fails, fall back to the deterministic flat-claim check rather than silently skipping.
-        claimed = true;
-        debug(`follow-through verifier failed; caught flat claim via fallback for: ${start(reply)}`);
       }
+      // When the verifier fails (`sureness === null`), Brain has already logged a `check-failed`
+      // trace; leave the reply alone rather than falsely flagging honest replies (e.g. pasted edits).
     } else {
       debug(`said done with nothing done: ${start(reply)}`);
     }

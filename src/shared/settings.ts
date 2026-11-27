@@ -118,6 +118,10 @@ export interface SettingsView {
   machines: MachineView[];
   /** Configured external MCP servers (header/env values are redacted; only key names are sent). */
   mcpServers: McpServerView[];
+  /** Readiness of the local semantic embedder used for natural-language MCP routing. */
+  semanticRoutingStatus?: "ready" | "downloading" | "unavailable";
+  /** Optional non-blocking warnings for wake aliases that are common standalone words (e.g. "天天", "あの"). */
+  wakeAliasWarnings?: string[];
   /** Active companion identity, user address, traits, and persona/bundle source. */
   character: CharacterSettingsView;
   /** Local `llama-server` + `mmproj` native vision sidecar configuration and readiness. */

@@ -672,19 +672,19 @@ describe("the record kept of each reply", () => {
     await brain.dispose();
   });
 
-  it("traces check-failed when decide() fails and still catches flat claims via deterministic fallback", async () => {
+  it("traces check-failed when decide() fails and leaves honest pasted replies alone", async () => {
     const { brain, prompts, script, decide, traces } = await rig(dir);
     try {
       decide.mockRejectedValue(new Error("remote 502"));
-      script.reply = (prompt, turn) => {
-        if (turn === 1) prompt.say("[[happy]] Done, Captain! I've saved that in my notes.");
-        else prompt.say("[[worried]] AI-chan has not saved anything yet, Captain.");
+      script.reply = (prompt) => {
+        prompt.say("[[happy]] Done! I've removed the extra spaces:\nhello world");
       };
-      brain.send("Just chatting about my workspace.");
+      brain.send("Remove the extra spaces in this text:\n```hello   world```");
       await brain.whenIdle();
-      expect(prompts).toHaveLength(2);
+      // Verifier failure logs a visible `check-failed` trace and leaves the honest reply alone (no false retry!).
+      expect(prompts).toHaveLength(1);
       expect(traces[0]?.checks).toContainEqual({ found: "check-failed", did: "skipped" });
-      expect(traces[0]?.checks).toContainEqual({ found: "claimed", did: "again" });
+      expect(traces[0]?.checks.some((c) => c.found === "claimed")).toBe(false);
     } finally {
       await brain.dispose();
     }

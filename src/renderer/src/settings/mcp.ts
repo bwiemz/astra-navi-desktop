@@ -38,6 +38,16 @@ function parseKeyValueLines(
 }
 
 export function showMcpServers(view: SettingsView, onView: (fresh: SettingsView) => void): void {
+  const semanticStatusEl = document.getElementById("mcp-semantic-status");
+  if (semanticStatusEl) {
+    const st = view.semanticRoutingStatus ?? "unavailable";
+    semanticStatusEl.textContent =
+      st === "ready"
+        ? "Semantic routing: ready (natural-language MCP requests match by description)."
+        : st === "downloading"
+          ? "Semantic routing: downloading… (exact tool/server names and Always offer work immediately)."
+          : "Semantic routing: unavailable (name the server/tool directly or enable Always offer for everyday servers).";
+  }
   const list = element("mcp-servers");
   const button = (label: string, act: () => void, kind: "default" | "quiet" | "danger" = "default"): HTMLButtonElement => {
     const made = document.createElement("button");
@@ -188,7 +198,7 @@ export function showMcpServers(view: SettingsView, onView: (fresh: SettingsView)
       });
       const alwaysOfferWords = document.createElement("span");
       alwaysOfferWords.textContent =
-        "Always offer this server's tools (opt-in for filesystem/database servers; persistence tools ask while active).";
+        "Always offer this server's tools (opt-in for filesystem/database servers; persistence tools ask and replies are withheld from background learning while active).";
       alwaysOfferRow.append(alwaysOfferBox, alwaysOfferWords);
 
       item.append(head, where, actions, readOnlyRow, alwaysOfferRow, note);

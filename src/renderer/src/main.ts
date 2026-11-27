@@ -583,30 +583,39 @@ function logItem(className: string): HTMLLIElement {
 
 let latestTurnNodes: HTMLElement[] = [];
 let latestTurnActionsBar: HTMLElement | null = null;
+let forgettingInProgress = false;
 
 async function handleForgetLastTurn(putInInput: boolean): Promise<void> {
-  const res = await bridge.forgetLastTurn();
-  if (!res.removed) return;
-  if (latestTurnNodes.length > 0) {
-    for (const node of latestTurnNodes) node.remove();
-    latestTurnNodes = [];
-    entriesShown = Math.max(0, entriesShown - 1);
-    if (logList.lastElementChild?.classList.contains("log-day")) {
-      logList.lastElementChild.remove();
+  forgettingInProgress = true;
+  // Reset & close the AI report dialog IMMEDIATELY before awaiting forget IPC so a concurrent
+  // Save click during Forget cannot write the forgotten turn's excerpt to disk.
+  resetAiReportDialog();
+  try {
+    const res = await bridge.forgetLastTurn();
+    if (!res.removed) return;
+    if (latestTurnNodes.length > 0) {
+      for (const node of latestTurnNodes) node.remove();
+      latestTurnNodes = [];
+      entriesShown = Math.max(0, entriesShown - 1);
+      if (logList.lastElementChild?.classList.contains("log-day")) {
+        logList.lastElementChild.remove();
+      }
+      const lastSaid = [...logList.querySelectorAll<HTMLElement>(".log-said[data-day]")].at(-1);
+      lastDayKey = lastSaid?.dataset["day"] ?? "";
     }
-    const lastSaid = [...logList.querySelectorAll<HTMLElement>(".log-said[data-day]")].at(-1);
-    lastDayKey = lastSaid?.dataset["day"] ?? "";
-  }
-  latestTurnActionsBar?.remove();
-  latestTurnActionsBar = null;
-  clearLive();
-  if (!logOpen) hideBalloon();
-  if (putInInput && res.userText) {
-    openAsk();
-    askInput.value = res.userText;
-    growInput();
-    askInput.focus();
-    askInput.setSelectionRange(askInput.value.length, askInput.value.length);
+    latestTurnActionsBar?.remove();
+    latestTurnActionsBar = null;
+    clearLive();
+    if (!logOpen) hideBalloon();
+    if (putInInput && res.userText) {
+      openAsk();
+      askInput.value = res.userText;
+      growInput();
+      askInput.focus();
+      askInput.setSelectionRange(askInput.value.length, askInput.value.length);
+    }
+  } finally {
+    forgettingInProgress = false;
   }
 }
 
@@ -862,7 +871,8 @@ let refreshAiReportOnNewReply: () => void = () => undefined;
 
 /** Clears what is live. In the panel a finished reply is already in the list above. */
 function clearLive(): void {
-  resetAiReportDialog();
+  // Never wipe an open AI report dialog on log-panel idle or log open; explicit Forget handles hard resets.
+  refreshAiReportOnNewReply();
   setReply("");
   setHeard(null);
   clearSteps();
@@ -1728,17 +1738,19 @@ function wireAiReportDialog(): void {
   let snapshotHeard = "";
   let inFlight = false;
   let lastSavedKey = "";
+  let reportGeneration = 0;
   const buildReportKey = (): string =>
     `${categoryEl.value}\0${includeBox.checked ? "1" : "0"}\0${detailsEl.value.trim()}\0${snapshotReply}\0${snapshotHeard}`;
   const markReportDirty = (): void => {
     lastSavedKey = "";
-    if (!inFlight) saveBtn.disabled = false;
+    if (!inFlight && !forgettingInProgress) saveBtn.disabled = false;
   };
   detailsEl.addEventListener("input", markReportDirty);
   categoryEl.addEventListener("change", markReportDirty);
   includeBox.addEventListener("change", markReportDirty);
 
   resetAiReportDialog = (): void => {
+    reportGeneration += 1;
     dialogEl.hidden = true;
     snapshotReply = "";
     snapshotHeard = "";
@@ -1747,12 +1759,12 @@ function wireAiReportDialog(): void {
     detailsEl.value = "";
     if (statusEl) statusEl.textContent = "";
     if (githubBtn) githubBtn.hidden = true;
-    if (!inFlight) saveBtn.disabled = false;
+    if (!inFlight) saveBtn.disabled = forgettingInProgress;
   };
   refreshAiReportOnNewReply = (): void => {
-    // Only refresh when the dialog is closed so incoming proactive reminders/events never
-    // close the dialog or wipe a note the user is currently typing. Once closed, also clear
-    // any abandoned typed note so it never carries over to the next reply.
+    // Only refresh when the dialog is closed so incoming proactive reminders/events or log-panel
+    // idle transitions never close the dialog or wipe a note the user is currently typing. Once
+    // closed, also clear any abandoned typed note so it never carries over to the next reply.
     if (!dialogEl.hidden) return;
     snapshotReply = "";
     snapshotHeard = "";
@@ -1763,6 +1775,7 @@ function wireAiReportDialog(): void {
     if (githubBtn) githubBtn.hidden = true;
   };
   openBtn.addEventListener("click", () => {
+    if (forgettingInProgress) return;
     dialogEl.hidden = !dialogEl.hidden;
     if (!dialogEl.hidden) {
       // Snapshot the visible reply & prompt when the dialog OPENS so incoming events or
@@ -1784,12 +1797,13 @@ function wireAiReportDialog(): void {
     if (lastIssueUrl) bridge.openLink(lastIssueUrl);
   });
   saveBtn.addEventListener("click", () => {
-    if (inFlight) return;
+    if (inFlight || forgettingInProgress) return;
     const reportKey = buildReportKey();
     if (lastSavedKey && reportKey === lastSavedKey) {
       if (statusEl) statusEl.textContent = "Already saved locally (edit details to save another report).";
       return;
     }
+    const genAtClick = reportGeneration;
     inFlight = true;
     saveBtn.disabled = true;
     if (statusEl) statusEl.textContent = "Saving scrubbed report locally…";
@@ -1802,6 +1816,7 @@ function wireAiReportDialog(): void {
         userPromptExcerpt: snapshotHeard,
       })
       .then((res) => {
+        if (genAtClick !== reportGeneration) return;
         if (res.ok) {
           lastIssueUrl = res.issueUrl;
           lastSavedKey = buildReportKey();
@@ -1815,11 +1830,12 @@ function wireAiReportDialog(): void {
         }
       })
       .catch((error: unknown) => {
+        if (genAtClick !== reportGeneration) return;
         if (statusEl) statusEl.textContent = error instanceof Error ? error.message : String(error);
       })
       .finally(() => {
         inFlight = false;
-        saveBtn.disabled = false;
+        saveBtn.disabled = forgettingInProgress;
       });
   });
 }
